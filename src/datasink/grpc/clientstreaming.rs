@@ -8,7 +8,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 use tracing::Instrument;
 
 use super::{
@@ -98,7 +98,12 @@ where
     stream_context: StreamContext<T, R, E>,
     handler: Arc<H>,
     client_function: ClientStreamingClientFunction<ReqT, ResR>,
-    pending: Arc<Mutex<HashMap<String, Arc<Pending<HandlerState, ReqT, ResR>>>>>,
+    // Each streamID maps to a OnceCell reserved immediately (before any
+    // network I/O) so concurrent Consume calls for *different* streamIDs
+    // never contend on a single shared lock; a Consume for the *same*
+    // still-being-created streamID awaits the cell instead, and only ever
+    // observes a fully, atomically constructed Pending.
+    pending: Arc<Mutex<HashMap<String, Arc<OnceCell<Arc<Pending<HandlerState, ReqT, ResR>>>>>>>,
     metrics: Arc<EndpointMetrics>,
 }
 
@@ -141,7 +146,12 @@ where
     E: Send + Sync + 'static,
     H: EndpointHandler<HandlerState, ReqT, ResR, T, R, E> + 'static,
 {
-    fn spawn_finalizer(&self, stream_id: String, pending: Arc<Pending<HandlerState, ReqT, ResR>>) {
+    fn spawn_finalizer(
+        &self,
+        stream_id: String,
+        cell: Arc<OnceCell<Arc<Pending<HandlerState, ReqT, ResR>>>>,
+        pending: Arc<Pending<HandlerState, ReqT, ResR>>,
+    ) {
         let pending_map = Arc::clone(&self.pending);
         let handler = Arc::clone(&self.handler);
         let stream_context = self.stream_context.clone();
@@ -159,7 +169,7 @@ where
                 let mut map = pending_map.lock().await;
                 if map
                     .get(&stream_id)
-                    .is_some_and(|current| Arc::ptr_eq(current, &pending))
+                    .is_some_and(|current| Arc::ptr_eq(current, &cell))
                 {
                     map.remove(&stream_id);
                     true
@@ -267,12 +277,18 @@ where
             }
         };
 
-        let mut created = false;
-        let pending = {
+        let cell = {
             let mut map = self.pending.lock().await;
-            if let Some(pending) = map.get(&stream_id) {
-                Arc::clone(pending)
-            } else {
+            Arc::clone(
+                map.entry(stream_id.clone())
+                    .or_insert_with(|| Arc::new(OnceCell::new())),
+            )
+        };
+
+        let init_cell = Arc::clone(&cell);
+        let init_stream_id = stream_id.clone();
+        let pending = match cell
+            .get_or_try_init(move || async move {
                 let (context, span) =
                     start_output_span(context, stream.as_ref(), self.metrics.rpc_method());
                 let (handler_context, state) = match self
@@ -292,7 +308,7 @@ where
                                 "begin_request failed"
                             )
                         });
-                        return;
+                        return Err(error);
                     }
                 };
                 span.in_scope(|| tracing::info!(event.name = "begin_request"));
@@ -325,7 +341,7 @@ where
                             .await;
                         self.metrics.request_end(started_at, &result);
                         self.metrics.grpc_client_end(grpc_started_at, &result);
-                        return;
+                        return Err(result.unwrap_err());
                     }
                 };
                 span.in_scope(|| tracing::info!(event.name = "grpc_call"));
@@ -343,9 +359,27 @@ where
                     grpc_started_at,
                     span: span.clone(),
                 });
-                map.insert(stream_id.clone(), Arc::clone(&pending));
-                created = true;
-                pending
+                self.spawn_finalizer(
+                    init_stream_id.clone(),
+                    Arc::clone(&init_cell),
+                    Arc::clone(&pending),
+                );
+                Ok(pending)
+            })
+            .await
+        {
+            Ok(pending) => Arc::clone(pending),
+            Err(_) => {
+                // Creation failed; drop the reservation so a future Consume
+                // for the same streamID can retry from scratch.
+                let mut map = self.pending.lock().await;
+                if map
+                    .get(&stream_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &cell))
+                {
+                    map.remove(&stream_id);
+                }
+                return;
             }
         };
 
@@ -379,8 +413,5 @@ where
             pending.result_context.done();
         }
         drop(_operation);
-        if created {
-            self.spawn_finalizer(stream_id, pending);
-        }
     }
 }
