@@ -1,10 +1,13 @@
 use std::sync::{Arc, RwLock};
 
+use serde::{Serialize, de::DeserializeOwned};
+
 use crate::runtime::{
     collector::{Collect, Collector},
     common::{Consumer, MessageContext, Payload, RuntimeStream},
     config::RuntimeStreamConfig,
     environment::{RuntimeEnvironment, RuntimeError, RuntimeResult},
+    serde::{JsonSerde, Serde as ServiceSerde, StreamSerde, make_stream_serde},
 };
 
 pub struct Stream<T>
@@ -23,6 +26,7 @@ where
     environment: RuntimeEnvironment,
     name_override: Option<String>,
     downstream: RwLock<Option<Collector<T>>>,
+    serde: Arc<dyn StreamSerde<T>>,
 }
 
 impl<T> Clone for Stream<T>
@@ -36,9 +40,16 @@ where
     }
 }
 
+// Go: runtime.MakeSerde[T](env) / MakeConsumedStream[T] — root streams and the
+// output type of type-changing operators always resolve a fresh serde for
+// their own type, with no parent to propagate from. Rust has no per-type
+// generated serde registry (unlike Go's type switch or C++'s
+// DefaultSerdeFactory specializations): JsonSerde<T> works generically for
+// any T that derives serde::Serialize + Deserialize, which every generated
+// type does, so no stub/fallback path is needed here.
 impl<T> Stream<T>
 where
-    T: Send + Sync + 'static,
+    T: Serialize + DeserializeOwned + Send + Sync + 'static,
 {
     pub fn new(config: impl Into<RuntimeStreamConfig>, environment: RuntimeEnvironment) -> Self {
         let config = config.into();
@@ -47,6 +58,24 @@ where
     }
 
     pub(crate) fn with_ids(id: i32, config_id: i32, environment: RuntimeEnvironment) -> Self {
+        let serde = make_stream_serde(Arc::new(JsonSerde::<T>::new()) as Arc<dyn ServiceSerde<T>>);
+        Self::with_ids_and_serde(id, config_id, environment, serde)
+    }
+}
+
+impl<T> Stream<T>
+where
+    T: Send + Sync + 'static,
+{
+    // Go: stream.GetSerde() reuse — type-preserving operators (delay, filter,
+    // link, merge, split) and any other case that already has a parent stream
+    // propagate its existing serde instead of resolving a new one.
+    pub(crate) fn with_ids_and_serde(
+        id: i32,
+        config_id: i32,
+        environment: RuntimeEnvironment,
+        serde: Arc<dyn StreamSerde<T>>,
+    ) -> Self {
         environment.register_runtime_stream(id);
         Self {
             inner: Arc::new(StreamInner {
@@ -55,14 +84,26 @@ where
                 environment,
                 name_override: None,
                 downstream: RwLock::new(None),
+                serde,
             }),
         }
     }
 
-    pub(crate) fn with_name(
+    pub(crate) fn derived(
+        config: impl Into<RuntimeStreamConfig>,
+        environment: RuntimeEnvironment,
+        serde: Arc<dyn StreamSerde<T>>,
+    ) -> Self {
+        let config = config.into();
+        let id = config.stream().id;
+        Self::with_ids_and_serde(id, id, environment, serde)
+    }
+
+    pub(crate) fn derived_with_name(
         config: impl Into<RuntimeStreamConfig>,
         environment: RuntimeEnvironment,
         name: String,
+        serde: Arc<dyn StreamSerde<T>>,
     ) -> Self {
         let config = config.into();
         let id = config.stream().id;
@@ -74,8 +115,13 @@ where
                 environment,
                 name_override: Some(name),
                 downstream: RwLock::new(None),
+                serde,
             }),
         }
+    }
+
+    pub fn get_serde(&self) -> Arc<dyn StreamSerde<T>> {
+        Arc::clone(&self.inner.serde)
     }
 
     pub fn id(&self) -> i32 {

@@ -405,6 +405,7 @@ async fn zero_delay_emits_even_if_context_is_already_cancelled() {
     assert_eq!(capture.0.lock().unwrap().len(), 1);
 }
 
+#[derive(Serialize, Deserialize)]
 enum Event {
     Number(i32),
     Text(String),

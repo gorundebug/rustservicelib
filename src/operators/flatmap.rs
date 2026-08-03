@@ -3,6 +3,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tracing::Instrument;
 
+use serde::{Serialize, de::DeserializeOwned};
+
 use crate::runtime::{
     common::{Consumer, MessageContext, Payload, RuntimeStream},
     config::FlatMapStreamConfig,
@@ -39,7 +41,8 @@ where
 impl<T, R, F> FlatMapStream<T, R, F>
 where
     T: Send + Sync + 'static,
-    R: Send + Sync + 'static,
+    // Go: runtime.MakeSerde[R](env) — fresh, R is a new type at this point.
+    R: Serialize + DeserializeOwned + Send + Sync + 'static,
     F: FlatMapFunction<T, R> + 'static,
 {
     pub fn make(
@@ -68,7 +71,7 @@ where
         function: F,
     ) -> RuntimeResult<Stream<R>>
     where
-        R: Send + Sync + 'static,
+        R: Serialize + DeserializeOwned + Send + Sync + 'static,
         F: FlatMapFunction<T, R> + 'static,
     {
         FlatMapStream::make(config.into(), self, function)

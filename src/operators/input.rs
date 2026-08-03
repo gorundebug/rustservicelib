@@ -3,6 +3,8 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use tracing::Instrument;
 
+use serde::{Serialize, de::DeserializeOwned};
+
 use crate::runtime::{
     common::{Consumer, MessageContext, Payload},
     config::{InputStreamConfig, RuntimeStreamConfig},
@@ -46,9 +48,12 @@ where
 
 impl<T, R, E> InputStream<T, R, E>
 where
-    T: Send + Sync + 'static,
+    // Go: MakeInputStream[T,R,E] always resolves a fresh serde for T (no
+    // parent stream exists for a root); MakeErrorStream[E] does the same for
+    // the error branch. Neither has anything to propagate from.
+    T: Serialize + DeserializeOwned + Send + Sync + 'static,
     R: Send + Sync + 'static,
-    E: Send + Sync + 'static,
+    E: Serialize + DeserializeOwned + Send + Sync + 'static,
 {
     pub fn new(config: InputStreamConfig, environment: RuntimeEnvironment) -> Self {
         let error_stream =
@@ -62,7 +67,14 @@ where
             }),
         }
     }
+}
 
+impl<T, R, E> InputStream<T, R, E>
+where
+    T: Send + Sync + 'static,
+    R: Send + Sync + 'static,
+    E: Send + Sync + 'static,
+{
     pub fn stream(&self) -> &Stream<T> {
         &self.inner.stream
     }

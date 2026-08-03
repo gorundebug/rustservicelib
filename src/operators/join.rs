@@ -4,6 +4,8 @@ use async_trait::async_trait;
 use futures::FutureExt;
 use tracing::Instrument;
 
+use serde::{Serialize, de::DeserializeOwned};
+
 use crate::runtime::{
     common::{Consumer, MessageContext, Payload, RuntimeStream},
     config::{JoinStreamConfig, JoinType},
@@ -95,7 +97,18 @@ where
             .instrument(span)
             .await;
     }
+}
 
+impl<K, L, R, O, F> JoinStream<K, L, R, O, F>
+where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    L: Clone + Send + Sync + 'static,
+    R: Clone + Send + Sync + 'static,
+    // Go: runtime.MakeSerde[R](env) — fresh, O is the join's output type,
+    // distinct from either input side.
+    O: Serialize + DeserializeOwned + Send + Sync + 'static,
+    F: JoinFunction<K, L, R, O> + 'static,
+{
     pub fn make(
         config: JoinStreamConfig,
         left: &Stream<KeyValue<K, L>>,
@@ -198,7 +211,7 @@ where
     ) -> RuntimeResult<Stream<O>>
     where
         R: Clone + Send + Sync + 'static,
-        O: Send + Sync + 'static,
+        O: Serialize + DeserializeOwned + Send + Sync + 'static,
         F: JoinFunction<K, L, R, O> + 'static,
     {
         JoinStream::make(config, self, right, function)

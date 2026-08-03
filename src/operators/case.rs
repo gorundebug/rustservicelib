@@ -1,6 +1,7 @@
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
+use serde::{Serialize, de::DeserializeOwned};
 use tracing::Instrument;
 
 use crate::runtime::{
@@ -114,7 +115,9 @@ where
 {
     pub fn when<R, M>(&self, config: impl Into<WhenStreamConfig>, map: M) -> Stream<R>
     where
-        R: Send + Sync + 'static,
+        // Go: runtime.MakeSerde[R](env) — fresh; each branch's map(&T) -> R
+        // introduces a new type distinct from T (and from other branches).
+        R: Serialize + DeserializeOwned + Send + Sync + 'static,
         M: Fn(&T) -> R + Send + Sync + 'static,
     {
         let output = Stream::new(config.into(), self.environment.clone());

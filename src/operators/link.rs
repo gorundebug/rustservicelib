@@ -1,6 +1,7 @@
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
+use serde::{Serialize, de::DeserializeOwned};
 use tracing::Instrument;
 
 use crate::runtime::{
@@ -16,6 +17,9 @@ use crate::runtime::{
 /// required for cyclic graphs: generated code creates the link first, builds
 /// the downstream chain, and calls `set_source` only after the cycle endpoint
 /// exists.
+///
+/// Go-aligned: like a root stream, this has no parent to propagate a serde
+/// from at construction time, so it resolves one fresh.
 pub struct LinkStream<T>
 where
     T: Send + Sync + 'static,
@@ -26,7 +30,7 @@ where
 
 impl<T> LinkStream<T>
 where
-    T: Send + Sync + 'static,
+    T: Serialize + DeserializeOwned + Send + Sync + 'static,
 {
     pub fn make<C>(config: C, environment: RuntimeEnvironment) -> Arc<Self>
     where

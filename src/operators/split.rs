@@ -23,12 +23,16 @@ where
     T: Send + Sync + 'static,
 {
     pub fn make(config: SplitStreamConfig, source: &Stream<T>) -> RuntimeResult<[Stream<T>; N]> {
-        let stream = Stream::new(config.clone(), source.environment().clone());
+        // Go: stream.GetSerde() — type-preserving, reuse the source's serde
+        // for both the internal collector stream and each branch link.
+        let serde = source.get_serde();
+        let stream = Stream::derived(config.clone(), source.environment().clone(), serde.clone());
         let links = std::array::from_fn(|index| {
-            Stream::with_name(
+            Stream::derived_with_name(
                 config.clone(),
                 source.environment().clone(),
                 format!("{}SplitLink{index}", config.stream.name),
+                serde.clone(),
             )
         });
         let operator = Arc::new(Self {

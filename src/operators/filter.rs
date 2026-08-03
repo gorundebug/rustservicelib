@@ -42,7 +42,8 @@ where
         source: &Stream<T>,
         function: F,
     ) -> RuntimeResult<Stream<T>> {
-        let output = Stream::new(config, source.environment().clone());
+        // Go: stream.GetSerde() — type-preserving, reuse the source's serde.
+        let output = Stream::derived(config, source.environment().clone(), source.get_serde());
         let operator = Arc::new(Self {
             output: output.clone(),
             function,

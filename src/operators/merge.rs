@@ -23,7 +23,12 @@ where
 {
     pub fn make(config: MergeStreamConfig, sources: &[Stream<T>]) -> RuntimeResult<Stream<T>> {
         assert!(!sources.is_empty(), "merge needs at least one source");
-        let output = Stream::new(config, sources[0].environment().clone());
+        // Go: stream.GetSerde() — type-preserving, reuse the first source's serde.
+        let output = Stream::derived(
+            config,
+            sources[0].environment().clone(),
+            sources[0].get_serde(),
+        );
         let operator = Arc::new(Self {
             output: output.clone(),
         });

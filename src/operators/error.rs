@@ -1,3 +1,5 @@
+use serde::{Serialize, de::DeserializeOwned};
+
 use crate::runtime::{
     common::{MessageContext, Payload},
     config::StreamConfig,
@@ -10,6 +12,9 @@ use crate::runtime::{
 /// The negative ID follows Go's `ErrorStream`: it prevents the error output
 /// from colliding with the process node while still allowing link semantics to
 /// be configured independently.
+///
+/// Go: MakeErrorStream[E](id, env) — always resolves a fresh serde for E; this
+/// is a root with no parent to propagate from.
 #[derive(Clone)]
 pub struct ErrorStream<E>
 where
@@ -20,14 +25,19 @@ where
 
 impl<E> ErrorStream<E>
 where
-    E: Send + Sync + 'static,
+    E: Serialize + DeserializeOwned + Send + Sync + 'static,
 {
     pub fn new(owner: &StreamConfig, environment: RuntimeEnvironment) -> Self {
         Self {
             stream: Stream::with_ids(-owner.id, owner.id, environment),
         }
     }
+}
 
+impl<E> ErrorStream<E>
+where
+    E: Send + Sync + 'static,
+{
     pub fn stream(&self) -> &Stream<E> {
         &self.stream
     }
