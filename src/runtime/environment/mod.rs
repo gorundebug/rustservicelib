@@ -1,6 +1,9 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, RwLock},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicI64, Ordering},
+    },
 };
 
 use arc_swap::ArcSwap;
@@ -13,9 +16,28 @@ use thiserror::Error;
 
 use self::{
     log::{LogsEngine, StdoutLogsEngine},
-    metrics::{Int64Counter, Metrics, MetricsEngine, PrometheusMetricsEngine},
+    metrics::{Metrics, MetricsEngine, PrometheusMetricsEngine},
     tracing::{StdoutTracingEngine, TracingEngine},
 };
+
+/// Plain call counter for the live status-page graph view, deliberately kept
+/// independent of `metrics::Int64Counter` (which is optionally backed by an
+/// OTel instrument). The status page needs a value it can always read back
+/// synchronously; an OTel-backed counter may not maintain one. Mirrors Go's
+/// `consumeStatistics` (runtime/runtime.go), which is likewise a bare
+/// `atomic.Int64` kept separate from the OTel `messagesCounter`.
+#[derive(Clone, Default)]
+pub struct CallStatistics(Arc<AtomicI64>);
+
+impl CallStatistics {
+    pub fn inc(&self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn get(&self) -> i64 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
 
 #[derive(Clone)]
 pub struct GraphLink {
@@ -23,7 +45,7 @@ pub struct GraphLink {
     pub to: i32,
     pub call_semantics: CallSemantics,
     pub type_name: String,
-    pub calls: Int64Counter,
+    pub calls: CallStatistics,
 }
 use crate::runtime::{
     common::{MessageContext, RuntimeEndpointConsumer},
@@ -269,7 +291,7 @@ impl RuntimeEnvironment {
         to: i32,
         call_semantics: CallSemantics,
         type_name: String,
-        calls: Int64Counter,
+        calls: CallStatistics,
     ) {
         let mut links = self.graph_links.write().expect("graph links lock poisoned");
         if let Some(link) = links

@@ -74,9 +74,15 @@ impl Config {
 
 /// Production OpenTelemetry engine for all three signals.
 ///
-/// Metrics are recorded both into the local Prometheus registry and into the
-/// OTLP meter. Logs and spans use the same `tracing` events, so instrumentation
-/// in operators and transports cannot diverge between stdout and OTLP.
+/// Metrics are recorded into the OTLP meter only -- Counter and Histogram
+/// recording skip the local Prometheus registry entirely while an OTel meter
+/// is attached (see `metrics::Metrics::has_otel`), so there is a single source
+/// of truth per mode instead of double bookkeeping. Gauge keeps writing its
+/// local value unconditionally even with OTel attached, because it needs that
+/// value to compute the delta OTel's UpDownCounter API expects, and some
+/// gauges mix `add`/`inc`/`dec` with `set` on the same instance. Logs and
+/// spans use the same `tracing` events, so instrumentation in operators and
+/// transports cannot diverge between stdout and OTLP.
 pub struct OpenTelemetry {
     metrics: Metrics,
     tracer_provider: SdkTracerProvider,

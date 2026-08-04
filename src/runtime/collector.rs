@@ -6,7 +6,7 @@ use crate::runtime::{
     common::{Consumer, MessageContext, Payload},
     config::CallSemantics,
     environment::{
-        RuntimeEnvironment, RuntimeResult,
+        CallStatistics, RuntimeEnvironment, RuntimeResult,
         metrics::{Int64Counter, Labels},
     },
     pool::{PriorityTaskPool, TaskPool},
@@ -21,6 +21,7 @@ where
     from: String,
     to: String,
     messages_total: Int64Counter,
+    call_statistics: CallStatistics,
 }
 
 impl<T> Clone for Collector<T>
@@ -34,6 +35,7 @@ where
             from: self.from.clone(),
             to: self.to.clone(),
             messages_total: self.messages_total.clone(),
+            call_statistics: self.call_statistics.clone(),
         }
     }
 }
@@ -111,12 +113,13 @@ where
                 "Total number of messages processed by stream link",
                 Labels::new(),
             )?;
+        let call_statistics = CallStatistics::default();
         environment.register_graph_link(
             source_id,
             target_id,
             call_semantics,
             short_type_name::<T>(),
-            messages_total.clone(),
+            call_statistics.clone(),
         );
         Ok(Self {
             consumer,
@@ -124,6 +127,7 @@ where
             from,
             to,
             messages_total,
+            call_statistics,
         })
     }
 
@@ -192,6 +196,7 @@ where
     }
 
     async fn out_payload(&self, context: MessageContext, payload: Payload<T>) {
+        self.call_statistics.inc();
         self.messages_total.inc();
         match &self.caller {
             Caller::FunctionCall => {

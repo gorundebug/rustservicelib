@@ -376,7 +376,11 @@ impl ServiceApp {
                 }),
             );
         }
-        if !config.metrics_handler.is_empty() {
+        // Skip mounting the Prometheus scrape endpoint when metrics are being
+        // pushed through OTel: Counter/Histogram recording bypasses the local
+        // registry in that mode (see Metrics::has_otel), so render_prometheus()
+        // would only serve stale zeros for those metric types.
+        if !config.metrics_handler.is_empty() && !self.environment.metrics().has_otel() {
             let path = format!("/{}", config.metrics_handler.trim_start_matches('/'));
             let metrics = self.environment.metrics().clone();
             router = router.route(

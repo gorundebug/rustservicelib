@@ -132,9 +132,10 @@ impl Int64Counter {
 
     pub fn add(&self, value: i64) {
         debug_assert!(value >= 0, "counter cannot decrease");
-        self.value.fetch_add(value, Ordering::Relaxed);
         if let Some(counter) = &self.otel {
             counter.add(value as u64, &self.attributes);
+        } else {
+            self.value.fetch_add(value, Ordering::Relaxed);
         }
     }
 
@@ -159,6 +160,12 @@ impl Int64Gauge {
         self.add(-1);
     }
 
+    // Unlike Counter/Histogram, add() cannot skip the local atomic when OTel is
+    // present: set() below computes its OTel delta from `self.value`, and some
+    // callers mix add()/inc()/dec() with set() on the same gauge (e.g.
+    // taskpool's executors_allocated). Skipping the write here would desync
+    // `self.value` from the gauge's real value and corrupt the next set()'s
+    // delta. So this one metric type keeps writing both unconditionally.
     pub fn add(&self, value: i64) {
         self.value.fetch_add(value, Ordering::Relaxed);
         if let Some(gauge) = &self.otel {
@@ -214,6 +221,15 @@ impl Metrics {
             registry: Arc::default(),
             meter: Some(meter),
         }
+    }
+
+    /// True when metrics are being pushed through an OTel meter. Counter/Gauge/
+    /// Histogram recording then skips the local registry entirely (see their
+    /// `add`/`observe` methods), so `render_prometheus()` would only report
+    /// stale zeros in that mode -- callers should not expose it as a scrape
+    /// endpoint when this returns true.
+    pub fn has_otel(&self) -> bool {
+        self.meter.is_some()
     }
 
     pub fn scope(&self, namespace: impl Into<String>, labels: Labels) -> MetricsScope {
