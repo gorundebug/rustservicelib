@@ -7,7 +7,7 @@ use std::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
@@ -36,8 +36,11 @@ use crate::{
             Lifecycle, RuntimeError, RuntimeResult,
             metrics::{Float64Histogram, Int64Counter, Int64Gauge, Labels},
         },
+        store::RotatingMap,
     },
 };
+
+const PENDING_ROTATION_INTERVAL: Duration = Duration::from_secs(30);
 
 pub const IMPLEMENTATION: &str = "rust/rdkafka";
 
@@ -246,7 +249,7 @@ where
     stream_context: StreamContext<T, R, E>,
     endpoint_name: String,
     handler: Arc<H>,
-    pending: RwLock<HashMap<String, Arc<KafkaResult<HandlerState, T, R, E>>>>,
+    pending: RotatingMap<String, Arc<KafkaResult<HandlerState, T, R, E>>>,
     concurrency: Concurrency,
     metrics: EndpointMetrics,
 }
@@ -776,13 +779,24 @@ where
 
         self.metrics.active_requests.inc();
         if has_result {
-            let replaced = self
+            if let Err(error) = self
                 .pending
-                .write()
-                .await
-                .insert(stream_id.clone(), Arc::clone(&kafka_result));
-            if replaced.is_some() {
+                .set(stream_id.clone(), Arc::clone(&kafka_result))
+            {
+                let result: HandlerResult = Err(Box::new(error));
+                crate::runtime::telemetry::record_span_error(
+                    &span,
+                    result.as_ref().expect_err("duplicate pending request"),
+                );
+                self.handler
+                    .end_request(context, self.stream_context.clone(), &result, handler_state)
+                    .instrument(span)
+                    .await;
                 self.metrics.active_requests.dec();
+                self.metrics
+                    .request_duration
+                    .observe(kafka_result.started_at.elapsed().as_secs_f64());
+                self.metrics.request_errors.inc();
                 return;
             }
             self.metrics.pending_requests.add(&stream_id);
@@ -834,7 +848,7 @@ where
 
         let removed = if has_result {
             self.metrics.pending_requests.remove(&stream_id);
-            self.pending.write().await.remove(&stream_id)
+            self.pending.pop(&stream_id)
         } else {
             None
         };
@@ -862,17 +876,15 @@ where
             self.metrics.missing_stream_id.inc();
             return;
         };
-        let Some(result) = self.pending.read().await.get(stream_id).cloned() else {
+        let Some(result) = self.pending.get(stream_id) else {
             self.metrics.late_result.inc();
             return;
         };
         let _lifetime = result.lifetime.read().await;
         if !self
             .pending
-            .read()
-            .await
             .get(stream_id)
-            .is_some_and(|current| Arc::ptr_eq(current, &result))
+            .is_some_and(|current| Arc::ptr_eq(&current, &result))
         {
             self.metrics.late_result.inc();
             tracing::warn!(parent: &result.span, event.name = "late_result");
@@ -961,12 +973,13 @@ where
         .environment()
         .metrics()
         .scope("datasource_endpoint", labels);
+    let pending = RotatingMap::new(PENDING_ROTATION_INTERVAL);
     let endpoint_consumer = Arc::new(RdkafkaKafkaTypedEndpointConsumer {
         stream_context: StreamContext::new(input_stream.clone()),
         input_stream: input_stream.clone(),
         endpoint_name: endpoint_config.name,
         handler: Arc::new(handler),
-        pending: RwLock::new(HashMap::new()),
+        pending: pending.clone(),
         concurrency: Concurrency {
             active: AtomicUsize::new(0),
             stopped: AtomicBool::new(false),
@@ -1038,6 +1051,12 @@ where
         input_stream.set_result_consumer(Arc::new(ResultConsumer {
             endpoint_consumer: Arc::downgrade(&endpoint_consumer),
         }));
+    }
+    if input_stream.result_stream().is_some() {
+        input_stream
+            .stream()
+            .environment()
+            .register_storage(Arc::new(pending));
     }
     input_stream
         .stream()

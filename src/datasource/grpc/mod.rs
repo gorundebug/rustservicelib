@@ -4,7 +4,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex, Weak},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
@@ -22,8 +22,11 @@ use crate::{
             RuntimeResult,
             metrics::{Float64Histogram, Int64Counter, Int64Gauge, Labels},
         },
+        store::RotatingMap,
     },
 };
+
+const PENDING_ROTATION_INTERVAL: Duration = Duration::from_secs(30);
 
 mod bidistreaming;
 mod clientstreaming;
@@ -208,7 +211,7 @@ where
     input_stream: InputStream<T, R, E>,
     stream_context: StreamContext<T, R, E>,
     handler: Arc<H>,
-    pending: Mutex<HashMap<String, Arc<Pending<HandlerState, T, ResR, R, E>>>>,
+    pending: RotatingMap<String, Arc<Pending<HandlerState, T, ResR, R, E>>>,
     metrics: EndpointMetrics,
     endpoint_name: String,
     _request: std::marker::PhantomData<fn(ReqT)>,
@@ -243,11 +246,12 @@ where
             .environment()
             .metrics()
             .scope("datasource_endpoint", labels);
+        let pending = RotatingMap::new(PENDING_ROTATION_INTERVAL);
         let endpoint_consumer = Arc::new(Self {
             stream_context: StreamContext::new(input_stream.clone()),
             input_stream: input_stream.clone(),
             handler: Arc::new(handler),
-            pending: Mutex::new(HashMap::new()),
+            pending: pending.clone(),
             metrics: EndpointMetrics {
                 messages_total: scope.counter(
                     "messages_total",
@@ -316,6 +320,12 @@ where
             input_stream.set_result_consumer(Arc::new(ResultConsumer {
                 endpoint_consumer: Arc::downgrade(&endpoint_consumer),
             }));
+        }
+        if input_stream.result_stream().is_some() {
+            input_stream
+                .stream()
+                .environment()
+                .register_storage(Arc::new(pending));
         }
         input_stream
             .stream()
@@ -389,18 +399,35 @@ where
             span,
         });
         if self.has_result() {
-            let replaced = self
+            if self
                 .pending
-                .lock()
-                .expect("gRPC pending lock poisoned")
-                .insert(stream_id.clone(), Arc::clone(&pending));
-            if replaced.is_some() {
-                self.metrics.active_requests.dec();
+                .set(stream_id.clone(), Arc::clone(&pending))
+                .is_err()
+            {
+                let result: HandlerResult = Err("duplicate gRPC stream ID".into());
                 crate::runtime::telemetry::record_span_error(
                     &pending.span,
                     "duplicate gRPC stream ID",
                 );
-                return Err("duplicate gRPC stream ID".into());
+                let _ = self
+                    .handler
+                    .end_request(
+                        pending.context.read().await.clone(),
+                        self.stream_context.clone(),
+                        &result,
+                        Arc::clone(&pending.state),
+                    )
+                    .instrument(pending.span.clone())
+                    .await;
+                self.metrics.active_requests.dec();
+                self.metrics
+                    .request_duration
+                    .observe(pending.started_at.elapsed().as_secs_f64());
+                self.metrics.request_errors.inc();
+                return match result {
+                    Err(error) => Err(error),
+                    Ok(()) => unreachable!("duplicate stream ID is always an error"),
+                };
             }
             self.metrics.pending_requests.add(&stream_id);
         }
@@ -484,11 +511,7 @@ where
         mut result: HandlerResult,
     ) -> HandlerResult {
         let removed = if self.has_result() {
-            let removed = self
-                .pending
-                .lock()
-                .expect("gRPC pending lock poisoned")
-                .remove(stream_id);
+            let removed = self.pending.pop(stream_id);
             self.metrics.pending_requests.remove(stream_id);
             removed
         } else {
@@ -532,13 +555,7 @@ where
             tracing::error!("consumeResult called without streamID");
             return;
         };
-        let Some(pending) = self
-            .pending
-            .lock()
-            .expect("gRPC pending lock poisoned")
-            .get(&stream_id)
-            .cloned()
-        else {
+        let Some(pending) = self.pending.get(&stream_id) else {
             self.metrics.late_result.inc();
             tracing::warn!(
                 session_id = stream_id,
@@ -549,10 +566,8 @@ where
         let _lifetime = pending.lifetime.read().await;
         if !self
             .pending
-            .lock()
-            .expect("gRPC pending lock poisoned")
             .get(&stream_id)
-            .is_some_and(|current| Arc::ptr_eq(current, &pending))
+            .is_some_and(|current| Arc::ptr_eq(&current, &pending))
         {
             self.metrics.late_result.inc();
             pending

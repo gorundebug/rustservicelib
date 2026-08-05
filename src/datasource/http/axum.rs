@@ -4,6 +4,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -28,10 +29,12 @@ use crate::{
         config::{HttpDataConnectorConfig, HttpEndpointConfig},
         datasource::{DataSource, PendingRequests, StreamContext},
         environment::{Lifecycle, RuntimeError, RuntimeResult, metrics::Labels},
+        store::RotatingMap,
     },
 };
 
 pub const IMPLEMENTATION: &str = "rust/axum";
+const PENDING_ROTATION_INTERVAL: Duration = Duration::from_secs(30);
 
 pub type HandlerError = Box<dyn Error + Send + Sync>;
 pub type HandlerResult = Result<(), HandlerError>;
@@ -453,7 +456,7 @@ where
     input_stream: InputStream<T, R, E>,
     stream_context: StreamContext<T, R, E>,
     handler: H,
-    pending: Mutex<HashMap<String, Arc<PendingRequest<HandlerState, ReqT, ResR, T, R, E>>>>,
+    pending: RotatingMap<String, Arc<PendingRequest<HandlerState, ReqT, ResR, T, R, E>>>,
     messages_total: crate::runtime::environment::metrics::Int64Counter,
     request_errors: crate::runtime::environment::metrics::Int64Counter,
     begin_request_failed: crate::runtime::environment::metrics::Int64Counter,
@@ -496,11 +499,12 @@ where
             ("protocol", "http"),
         ]),
     );
+    let pending = RotatingMap::new(PENDING_ROTATION_INTERVAL);
     let consumer = Arc::new(EndpointConsumer {
         stream_context: StreamContext::new(input_stream.clone()),
         input_stream: input_stream.clone(),
         handler,
-        pending: Mutex::new(HashMap::new()),
+        pending: pending.clone(),
         messages_total: scope.counter(
             "messages_total",
             "Total number of successfully processed messages in data source endpoint",
@@ -559,6 +563,12 @@ where
         input_stream.set_result_consumer(Arc::new(ResultConsumer {
             endpoint_consumer: Arc::downgrade(&consumer),
         }));
+    }
+    if input_stream.result_stream().is_some() {
+        input_stream
+            .stream()
+            .environment()
+            .register_storage(Arc::new(pending));
     }
     input_stream
         .stream()
@@ -706,19 +716,37 @@ where
         let result_context = Arc::new(ResultContext::new(span.clone()));
         let has_result = self.input_stream.result_stream().is_some();
         if has_result {
-            self.pending
-                .lock()
-                .expect("HTTP pending lock poisoned")
-                .insert(
-                    stream_id.clone(),
-                    Arc::new(PendingRequest {
-                        state: Arc::clone(&state),
-                        data: data.clone(),
-                        result_context: Arc::clone(&result_context),
-                        lifetime: RwLock::new(()),
-                        span: span.clone(),
-                    }),
+            if let Err(error) = self.pending.set(
+                stream_id.clone(),
+                Arc::new(PendingRequest {
+                    state: Arc::clone(&state),
+                    data: data.clone(),
+                    result_context: Arc::clone(&result_context),
+                    lifetime: RwLock::new(()),
+                    span: span.clone(),
+                }),
+            ) {
+                let result: HandlerResult = Err(Box::new(error));
+                crate::runtime::telemetry::record_span_error(
+                    &span,
+                    result.as_ref().expect_err("duplicate pending request"),
                 );
+                self.handler
+                    .end_request(
+                        context,
+                        self.stream_context.clone(),
+                        &result,
+                        state,
+                        data.clone(),
+                    )
+                    .instrument(span)
+                    .await;
+                self.active_requests.dec();
+                self.request_duration
+                    .observe(started_at.elapsed().as_secs_f64());
+                self.request_errors.inc();
+                return data.into_response();
+            }
             self.pending_requests.add(&stream_id);
         }
 
@@ -766,11 +794,7 @@ where
             }
         }
         let removed_pending = if has_result {
-            let pending = self
-                .pending
-                .lock()
-                .expect("HTTP pending lock poisoned")
-                .remove(&stream_id);
+            let pending = self.pending.pop(&stream_id);
             self.pending_requests.remove(&stream_id);
             pending
         } else {
@@ -810,13 +834,7 @@ where
             tracing::error!("consumeResult called without streamID");
             return;
         };
-        let Some(pending) = self
-            .pending
-            .lock()
-            .expect("HTTP pending lock poisoned")
-            .get(&stream_id)
-            .cloned()
-        else {
+        let Some(pending) = self.pending.get(&stream_id) else {
             self.late_result.inc();
             tracing::warn!(
                 session_id = stream_id,
@@ -827,10 +845,8 @@ where
         let _lifetime = pending.lifetime.read().await;
         if !self
             .pending
-            .lock()
-            .expect("HTTP pending lock poisoned")
             .get(&stream_id)
-            .is_some_and(|current| Arc::ptr_eq(current, &pending))
+            .is_some_and(|current| Arc::ptr_eq(&current, &pending))
         {
             self.late_result.inc();
             pending

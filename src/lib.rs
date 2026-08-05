@@ -1,3 +1,10 @@
+// The public API deliberately carries the full stream, handler, payload, result,
+// and error types so generated services retain compile-time type safety.
+#![allow(
+    clippy::type_complexity,
+    reason = "strongly typed generated service APIs require these generic signatures"
+)]
+
 pub mod api;
 pub mod datasink;
 pub mod datasource;

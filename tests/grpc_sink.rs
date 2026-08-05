@@ -76,6 +76,9 @@ impl EndpointHandler<(), u32, u32, u32, u32, String> for Handler {
 
 struct ResultCollector(Arc<Mutex<Vec<u32>>>);
 
+type TestSink = Arc<servicelib::operators::SinkStreamWithResult<u32, u32, String>>;
+type TestSinkFixture = (Stream<u32>, TestSink, Arc<Mutex<Vec<u32>>>);
+
 #[async_trait]
 impl Consumer<u32> for ResultCollector {
     async fn consume(&self, _context: MessageContext, payload: Payload<u32>) {
@@ -83,14 +86,7 @@ impl Consumer<u32> for ResultCollector {
     }
 }
 
-fn make_sink(
-    environment: RuntimeEnvironment,
-    id: i32,
-) -> (
-    Stream<u32>,
-    Arc<servicelib::operators::SinkStreamWithResult<u32, u32, String>>,
-    Arc<Mutex<Vec<u32>>>,
-) {
+fn make_sink(environment: RuntimeEnvironment, id: i32) -> TestSinkFixture {
     let source = Stream::new(&StreamConfig::new(id, "source"), environment);
     let sink = source
         .sink_with_result::<u32, String>(&SinkStreamConfig {

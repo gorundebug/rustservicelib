@@ -1,8 +1,61 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, hash_map::RandomState},
+    hash::BuildHasher,
     sync::{Arc, Mutex},
     time::Instant,
 };
+
+const PENDING_REQUEST_SHARDS: usize = 64;
+
+struct PendingRequestTimestamps {
+    shards: Box<[Mutex<HashMap<String, Instant>>]>,
+    hash_builder: RandomState,
+}
+
+impl PendingRequestTimestamps {
+    fn new() -> Self {
+        Self {
+            shards: (0..PENDING_REQUEST_SHARDS)
+                .map(|_| Mutex::new(HashMap::new()))
+                .collect(),
+            hash_builder: RandomState::new(),
+        }
+    }
+
+    fn shard(&self, stream_id: &str) -> &Mutex<HashMap<String, Instant>> {
+        let hash = self.hash_builder.hash_one(stream_id);
+        &self.shards[hash as usize % self.shards.len()]
+    }
+
+    fn insert(&self, stream_id: &str) {
+        self.shard(stream_id)
+            .lock()
+            .expect("pending request timestamps shard poisoned")
+            .insert(stream_id.to_owned(), Instant::now());
+    }
+
+    fn remove(&self, stream_id: &str) {
+        self.shard(stream_id)
+            .lock()
+            .expect("pending request timestamps shard poisoned")
+            .remove(stream_id);
+    }
+
+    fn oldest_age(&self) -> f64 {
+        self.shards
+            .iter()
+            .filter_map(|shard| {
+                shard
+                    .lock()
+                    .expect("pending request timestamps shard poisoned")
+                    .values()
+                    .min()
+                    .copied()
+            })
+            .min()
+            .map_or(0.0, |started| started.elapsed().as_secs_f64())
+    }
+}
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -21,7 +74,7 @@ use crate::{
 
 pub(crate) struct PendingRequests {
     gauge: Int64Gauge,
-    started: Arc<Mutex<HashMap<String, Instant>>>,
+    started: Arc<PendingRequestTimestamps>,
 }
 
 impl PendingRequests {
@@ -31,38 +84,25 @@ impl PendingRequests {
             "Number of requests awaiting a pipeline result",
             Labels::new(),
         )?;
-        let started = Arc::new(Mutex::new(HashMap::<String, Instant>::new()));
+        let started = Arc::new(PendingRequestTimestamps::new());
         let observable = Arc::clone(&started);
         scope.observable_float64_gauge(
             "pending_oldest_age_seconds",
             "Age in seconds of the oldest pending request awaiting a pipeline result",
             Labels::new(),
-            Arc::new(move || {
-                observable
-                    .lock()
-                    .expect("pending request timestamps lock poisoned")
-                    .values()
-                    .min()
-                    .map_or(0.0, |started| started.elapsed().as_secs_f64())
-            }),
+            Arc::new(move || observable.oldest_age()),
         )?;
         Ok(Self { gauge, started })
     }
 
     pub(crate) fn add(&self, stream_id: &str) {
         self.gauge.inc();
-        self.started
-            .lock()
-            .expect("pending request timestamps lock poisoned")
-            .insert(stream_id.to_owned(), Instant::now());
+        self.started.insert(stream_id);
     }
 
     pub(crate) fn remove(&self, stream_id: &str) {
         self.gauge.dec();
-        self.started
-            .lock()
-            .expect("pending request timestamps lock poisoned")
-            .remove(stream_id);
+        self.started.remove(stream_id);
     }
 }
 
@@ -210,31 +250,44 @@ where
 /// returned receiver and explicitly removes it when the request completes,
 /// matching Go's pending-result lifecycle.
 pub struct ResultRouter<T> {
-    pending: Mutex<HashMap<String, mpsc::UnboundedSender<Payload<T>>>>,
+    pending: Box<[Mutex<HashMap<String, mpsc::UnboundedSender<Payload<T>>>>]>,
+    hash_builder: RandomState,
     message_id: Arc<dyn Fn(&T) -> String + Send + Sync>,
 }
 
 impl<T> ResultRouter<T> {
     pub fn new(message_id: impl Fn(&T) -> String + Send + Sync + 'static) -> Arc<Self> {
         Arc::new(Self {
-            pending: Mutex::new(HashMap::new()),
+            pending: (0..PENDING_REQUEST_SHARDS)
+                .map(|_| Mutex::new(HashMap::new()))
+                .collect(),
+            hash_builder: RandomState::new(),
             message_id: Arc::new(message_id),
         })
     }
 
+    fn shard(
+        &self,
+        message_id: &str,
+    ) -> &Mutex<HashMap<String, mpsc::UnboundedSender<Payload<T>>>> {
+        let hash = self.hash_builder.hash_one(message_id);
+        &self.pending[hash as usize % self.pending.len()]
+    }
+
     pub fn begin(&self, message_id: impl Into<String>) -> mpsc::UnboundedReceiver<Payload<T>> {
         let (sender, receiver) = mpsc::unbounded_channel();
+        let message_id = message_id.into();
         let replaced = self
-            .pending
+            .shard(&message_id)
             .lock()
             .expect("result router lock poisoned")
-            .insert(message_id.into(), sender);
+            .insert(message_id, sender);
         assert!(replaced.is_none(), "duplicate pending message ID");
         receiver
     }
 
     pub fn done(&self, message_id: &str) {
-        self.pending
+        self.shard(message_id)
             .lock()
             .expect("result router lock poisoned")
             .remove(message_id);
@@ -249,7 +302,7 @@ where
     async fn consume(&self, _context: MessageContext, payload: Payload<T>) {
         let message_id = (self.message_id)(&payload);
         let sender = self
-            .pending
+            .shard(&message_id)
             .lock()
             .expect("result router lock poisoned")
             .get(&message_id)

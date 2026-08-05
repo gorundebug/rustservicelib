@@ -1,14 +1,13 @@
 use std::{
-    collections::HashMap,
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::{Mutex, OnceCell, RwLock};
 use tracing::Instrument;
 
 use super::{
@@ -20,8 +19,11 @@ use crate::{
     runtime::{
         common::{Consumer, MessageContext, Payload, new_stream_id},
         environment::RuntimeResult,
+        store::RotatingMap,
     },
 };
+
+const PENDING_ROTATION_INTERVAL: Duration = Duration::from_secs(30);
 
 #[async_trait]
 pub trait ClientStreamingCall<ReqT, ResR>: Send + Sync
@@ -77,7 +79,7 @@ where
     state: Arc<Mutex<HandlerState>>,
     sender: StreamingSender<ReqT, ResR>,
     result_context: ResultContext,
-    operation: Mutex<()>,
+    lifetime: RwLock<()>,
     finished: AtomicBool,
     started_at: Instant,
     grpc_started_at: Instant,
@@ -103,7 +105,7 @@ where
     // never contend on a single shared lock; a Consume for the *same*
     // still-being-created streamID awaits the cell instead, and only ever
     // observes a fully, atomically constructed Pending.
-    pending: Arc<Mutex<HashMap<String, Arc<OnceCell<Arc<Pending<HandlerState, ReqT, ResR>>>>>>>,
+    pending: RotatingMap<String, Arc<OnceCell<Arc<Pending<HandlerState, ReqT, ResR>>>>>,
     metrics: Arc<EndpointMetrics>,
 }
 
@@ -123,14 +125,19 @@ where
     E: Send + Sync + 'static,
     H: EndpointHandler<HandlerState, ReqT, ResR, T, R, E> + 'static,
 {
+    let pending = RotatingMap::new(PENDING_ROTATION_INTERVAL);
     let consumer = Arc::new(ClientStreamingEndpointConsumer {
         stream: Arc::downgrade(stream),
         stream_context: StreamContext::new(Arc::downgrade(stream)),
         handler: Arc::new(handler),
         client_function,
-        pending: Arc::new(Mutex::new(HashMap::new())),
+        pending: pending.clone(),
         metrics: Arc::new(EndpointMetrics::new(stream, connector_name, endpoint_name)?),
     });
+    stream
+        .stream()
+        .environment()
+        .register_storage(Arc::new(pending));
     stream.set_sink_consumer(consumer.clone())?;
     Ok(consumer)
 }
@@ -152,7 +159,7 @@ where
         cell: Arc<OnceCell<Arc<Pending<HandlerState, ReqT, ResR>>>>,
         pending: Arc<Pending<HandlerState, ReqT, ResR>>,
     ) {
-        let pending_map = Arc::clone(&self.pending);
+        let pending_map = self.pending.clone();
         let handler = Arc::clone(&self.handler);
         let stream_context = self.stream_context.clone();
         let metrics = Arc::clone(&self.metrics);
@@ -161,22 +168,13 @@ where
                 _ = pending.result_context.cancelled() => false,
                 _ = pending.context.cancelled() => true,
             };
+            let _lifetime = pending.lifetime.write().await;
             if pending.finished.swap(true, Ordering::AcqRel) {
                 return;
             }
-            let _operation = pending.operation.lock().await;
-            let removed = {
-                let mut map = pending_map.lock().await;
-                if map
-                    .get(&stream_id)
-                    .is_some_and(|current| Arc::ptr_eq(current, &cell))
-                {
-                    map.remove(&stream_id);
-                    true
-                } else {
-                    false
-                }
-            };
+            let removed = pending_map
+                .pop_if(&stream_id, |current| Arc::ptr_eq(current, &cell))
+                .is_some();
             if !removed {
                 return;
             }
@@ -277,13 +275,9 @@ where
             }
         };
 
-        let cell = {
-            let mut map = self.pending.lock().await;
-            Arc::clone(
-                map.entry(stream_id.clone())
-                    .or_insert_with(|| Arc::new(OnceCell::new())),
-            )
-        };
+        let (cell, _) = self
+            .pending
+            .get_or_create(stream_id.clone(), || Arc::new(OnceCell::new()));
 
         let init_cell = Arc::clone(&cell);
         let init_stream_id = stream_id.clone();
@@ -341,7 +335,7 @@ where
                             .await;
                         self.metrics.request_end(started_at, &result);
                         self.metrics.grpc_client_end(grpc_started_at, &result);
-                        return Err(result.unwrap_err());
+                        return result.map(|()| unreachable!("gRPC creation error became success"));
                     }
                 };
                 span.in_scope(|| tracing::info!(event.name = "grpc_call"));
@@ -353,7 +347,7 @@ where
                         span: span.clone(),
                     },
                     result_context: ResultContext::with_span(span.clone()),
-                    operation: Mutex::new(()),
+                    lifetime: RwLock::new(()),
                     finished: AtomicBool::new(false),
                     started_at,
                     grpc_started_at,
@@ -372,18 +366,13 @@ where
             Err(_) => {
                 // Creation failed; drop the reservation so a future Consume
                 // for the same streamID can retry from scratch.
-                let mut map = self.pending.lock().await;
-                if map
-                    .get(&stream_id)
-                    .is_some_and(|current| Arc::ptr_eq(current, &cell))
-                {
-                    map.remove(&stream_id);
-                }
+                self.pending
+                    .pop_if(&stream_id, |current| Arc::ptr_eq(current, &cell));
                 return;
             }
         };
 
-        let _operation = pending.operation.lock().await;
+        let _lifetime = pending.lifetime.read().await;
         if pending.finished.load(Ordering::Acquire) {
             return;
         }
@@ -412,6 +401,5 @@ where
         if result.is_err() {
             pending.result_context.done();
         }
-        drop(_operation);
     }
 }

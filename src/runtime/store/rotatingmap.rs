@@ -1,6 +1,7 @@
 use std::{
-    collections::HashMap,
-    hash::Hash,
+    borrow::Borrow,
+    collections::{HashMap, hash_map::RandomState},
+    hash::{BuildHasher, Hash},
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
@@ -27,13 +28,19 @@ struct Maps<K, V> {
 }
 
 struct RotatingMapInner<K, V> {
-    maps: Mutex<Maps<K, V>>,
+    shards: Box<[Mutex<Maps<K, V>>]>,
+    hash_builder: RandomState,
     interval: Duration,
     started: AtomicBool,
     stopped: AtomicBool,
     cancellation: CancellationToken,
     rotation_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
 }
+
+// Stream IDs are uniformly distributed, so a fixed power-of-two shard count keeps
+// the hot pending-request path off a single process-wide mutex without allocating
+// any HashMap buckets until a shard is actually used.
+const ROTATING_MAP_SHARDS: usize = 64;
 
 /// Hash map with periodic bucket-capacity reclamation after transient growth.
 /// Rotation never expires entries.
@@ -57,11 +64,16 @@ where
         assert!(!interval.is_zero(), "rotation interval must be positive");
         Self {
             inner: Arc::new(RotatingMapInner {
-                maps: Mutex::new(Maps {
-                    current: HashMap::new(),
-                    previous: HashMap::new(),
-                    high_water_mark: 0,
-                }),
+                shards: (0..ROTATING_MAP_SHARDS)
+                    .map(|_| {
+                        Mutex::new(Maps {
+                            current: HashMap::new(),
+                            previous: HashMap::new(),
+                            high_water_mark: 0,
+                        })
+                    })
+                    .collect(),
+                hash_builder: RandomState::new(),
                 interval,
                 started: AtomicBool::new(false),
                 stopped: AtomicBool::new(false),
@@ -71,8 +83,16 @@ where
         }
     }
 
+    fn shard<Q>(&self, key: &Q) -> &Mutex<Maps<K, V>>
+    where
+        Q: Hash + ?Sized,
+    {
+        let hash = self.inner.hash_builder.hash_one(key);
+        &self.inner.shards[hash as usize % self.inner.shards.len()]
+    }
+
     pub fn set(&self, key: K, value: V) -> RuntimeResult<()> {
-        let mut maps = self.inner.maps.lock().expect("rotating map lock poisoned");
+        let mut maps = self.shard(&key).lock().expect("rotating map lock poisoned");
         if maps.current.contains_key(&key) || maps.previous.contains_key(&key) {
             return Err(RuntimeError::DuplicateKey);
         }
@@ -80,22 +100,63 @@ where
         Ok(())
     }
 
-    pub fn get(&self, key: &K) -> Option<V>
+    pub fn get_or_create<F>(&self, key: K, factory: F) -> (V, bool)
     where
         V: Clone,
+        F: FnOnce() -> V,
     {
-        let maps = self.inner.maps.lock().expect("rotating map lock poisoned");
+        let mut maps = self.shard(&key).lock().expect("rotating map lock poisoned");
+        if let Some(value) = maps.current.get(&key).or_else(|| maps.previous.get(&key)) {
+            return (value.clone(), true);
+        }
+        let value = factory();
+        maps.current.insert(key, value.clone());
+        (value, false)
+    }
+
+    pub fn get<Q>(&self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Eq + Hash + ?Sized,
+        V: Clone,
+    {
+        let maps = self.shard(key).lock().expect("rotating map lock poisoned");
         maps.current
             .get(key)
             .or_else(|| maps.previous.get(key))
             .cloned()
     }
 
-    pub fn pop(&self, key: &K) -> Option<V> {
-        let mut maps = self.inner.maps.lock().expect("rotating map lock poisoned");
+    pub fn pop<Q>(&self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Eq + Hash + ?Sized,
+    {
+        let mut maps = self.shard(key).lock().expect("rotating map lock poisoned");
         maps.current
             .remove(key)
             .or_else(|| maps.previous.remove(key))
+    }
+
+    pub fn pop_if<Q, F>(&self, key: &Q, predicate: F) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Eq + Hash + ?Sized,
+        F: FnOnce(&V) -> bool,
+    {
+        let mut maps = self.shard(key).lock().expect("rotating map lock poisoned");
+        if let Some(value) = maps.current.get(key) {
+            if predicate(value) {
+                return maps.current.remove(key);
+            }
+            return None;
+        }
+        if let Some(value) = maps.previous.get(key)
+            && predicate(value)
+        {
+            return maps.previous.remove(key);
+        }
+        None
     }
 
     pub fn rotate(&self) {
@@ -107,7 +168,16 @@ fn rotate<K, V>(inner: &RotatingMapInner<K, V>)
 where
     K: Eq + Hash,
 {
-    let mut maps = inner.maps.lock().expect("rotating map lock poisoned");
+    for shard in &inner.shards {
+        rotate_shard(shard);
+    }
+}
+
+fn rotate_shard<K, V>(shard: &Mutex<Maps<K, V>>)
+where
+    K: Eq + Hash,
+{
+    let mut maps = shard.lock().expect("rotating map lock poisoned");
     let total = maps.current.len() + maps.previous.len();
     let should_rotate = maps.high_water_mark == 0
         || total.saturating_mul(ROTATING_MAP_SHRINK_FACTOR) < maps.high_water_mark;

@@ -361,6 +361,10 @@ impl StreamConfig {
         }
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "arguments map one-to-one to the generated graph configuration"
+    )]
     pub fn with_graph(
         mut self,
         id_service: i32,

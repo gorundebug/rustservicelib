@@ -24,6 +24,20 @@ fn rotating_map_reclaims_capacity_without_expiring_values() {
     }
 }
 
+#[test]
+fn rotating_map_get_or_create_and_conditional_pop_are_atomic() {
+    let map = RotatingMap::new(Duration::from_secs(60));
+    let (value, loaded) = map.get_or_create("stream".to_owned(), || 7);
+    assert_eq!((value, loaded), (7, false));
+
+    let (value, loaded) = map.get_or_create("stream".to_owned(), || 9);
+    assert_eq!((value, loaded), (7, true));
+    assert_eq!(map.pop_if("stream", |value| *value == 9), None);
+    assert_eq!(map.get("stream"), Some(7));
+    assert_eq!(map.pop_if("stream", |value| *value == 7), Some(7));
+    assert_eq!(map.get("stream"), None);
+}
+
 #[tokio::test]
 async fn rotating_map_rejects_duplicates_and_obeys_lifecycle() {
     let map = RotatingMap::new(Duration::from_millis(1));

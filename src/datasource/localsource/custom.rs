@@ -7,12 +7,12 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
 use tokio::{
-    sync::{Mutex as AsyncMutex, Notify},
+    sync::{Mutex as AsyncMutex, Notify, RwLock},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
@@ -28,8 +28,11 @@ use crate::{
             Lifecycle, RuntimeResult,
             metrics::{Float64Histogram, Int64Counter, Int64Gauge, Labels},
         },
+        store::RotatingMap,
     },
 };
+
+const PENDING_ROTATION_INTERVAL: Duration = Duration::from_secs(30);
 
 pub type HandlerError = Box<dyn Error + Send + Sync>;
 pub type HandlerResult = Result<(), HandlerError>;
@@ -152,6 +155,7 @@ where
 {
     handler_state: Arc<HandlerState>,
     result_context: Arc<ResultContext<HandlerState, T, R, E>>,
+    lifetime: RwLock<()>,
     span: tracing::Span,
 }
 
@@ -196,7 +200,7 @@ where
     input_stream: InputStream<T, R, E>,
     stream_context: StreamContext<T, R, E>,
     handler: H,
-    pending: AsyncMutex<HashMap<String, Arc<PendingRequest<HandlerState, T, R, E>>>>,
+    pending: RotatingMap<String, Arc<PendingRequest<HandlerState, T, R, E>>>,
     concurrency: Concurrency,
     metrics: EndpointMetrics,
 }
@@ -290,14 +294,36 @@ where
         self.metrics.active_requests.inc();
         let started_at = Instant::now();
         if has_result {
-            self.pending.lock().await.insert(
+            if let Err(error) = self.pending.set(
                 stream_id.clone(),
                 Arc::new(PendingRequest {
                     handler_state: Arc::clone(&handler_state),
                     result_context: Arc::clone(&result_context),
+                    lifetime: RwLock::new(()),
                     span: span.clone(),
                 }),
-            );
+            ) {
+                let result: HandlerResult = Err(Box::new(error));
+                crate::runtime::telemetry::record_span_error(
+                    &span,
+                    result.as_ref().expect_err("duplicate pending request"),
+                );
+                self.handler
+                    .end_request(
+                        handler_context,
+                        self.stream_context.clone(),
+                        &result,
+                        handler_state,
+                    )
+                    .instrument(span)
+                    .await;
+                self.metrics.active_requests.dec();
+                self.metrics
+                    .request_duration
+                    .observe(started_at.elapsed().as_secs_f64());
+                self.metrics.request_errors.inc();
+                return;
+            }
             self.metrics.pending_requests.add(&stream_id);
         }
 
@@ -347,10 +373,17 @@ where
                 }
             }
         }
-        if has_result {
-            self.pending.lock().await.remove(&stream_id);
+        let removed_pending = if has_result {
+            let pending = self.pending.pop(&stream_id);
             self.metrics.pending_requests.remove(&stream_id);
-        }
+            pending
+        } else {
+            None
+        };
+        let _lifetime = match &removed_pending {
+            Some(pending) => Some(pending.lifetime.write().await),
+            None => None,
+        };
         self.handler
             .end_request(
                 handler_context,
@@ -377,8 +410,7 @@ where
             tracing::error!("consumeResult called without streamID");
             return;
         };
-        let pending = self.pending.lock().await.get(&stream_id).cloned();
-        let Some(pending) = pending else {
+        let Some(pending) = self.pending.get(&stream_id) else {
             self.metrics.late_result.inc();
             tracing::warn!(
                 session_id = stream_id,
@@ -386,6 +418,18 @@ where
             );
             return;
         };
+        let _lifetime = pending.lifetime.read().await;
+        if !self
+            .pending
+            .get(&stream_id)
+            .is_some_and(|current| Arc::ptr_eq(&current, &pending))
+        {
+            self.metrics.late_result.inc();
+            pending
+                .span
+                .in_scope(|| tracing::warn!(event.name = "late_result"));
+            return;
+        }
         let message_id = pending.span.in_scope(|| {
             self.handler.get_message_id(
                 &context,
@@ -529,11 +573,12 @@ where
         .into_iter()
         .collect(),
     );
+    let pending = RotatingMap::new(PENDING_ROTATION_INTERVAL);
     let endpoint_consumer = Arc::new(CustomEndpointConsumer {
         stream_context: StreamContext::new(input_stream.clone()),
         input_stream: input_stream.clone(),
         handler,
-        pending: AsyncMutex::new(HashMap::new()),
+        pending: pending.clone(),
         concurrency: Concurrency {
             active: AtomicUsize::new(0),
             stopped: AtomicBool::new(false),
@@ -601,6 +646,13 @@ where
             )?,
         },
     });
+    if endpoint_consumer.input_stream.result_stream().is_some() {
+        endpoint_consumer
+            .input_stream
+            .stream()
+            .environment()
+            .register_storage(Arc::new(pending));
+    }
     endpoint_consumer
         .input_stream
         .stream()
