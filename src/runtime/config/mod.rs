@@ -126,6 +126,12 @@ pub struct GrpcDataConnectorConfig {
     pub id: i32,
     pub name: String,
     pub address: String,
+    #[serde(default = "default_connections_count")]
+    pub connections_count: usize,
+}
+
+fn default_connections_count() -> usize {
+    1
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

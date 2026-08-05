@@ -436,6 +436,8 @@ pub struct DataConnector {
     pub port: Option<i64>,
     #[serde(rename = "address", skip_serializing_if = "Option::is_none")]
     pub address: Option<String>,
+    #[serde(rename = "connectionsCount", skip_serializing_if = "Option::is_none")]
+    pub connections_count: Option<i64>,
     #[serde(rename = "brokers", skip_serializing_if = "Option::is_none")]
     pub brokers: Option<String>,
     #[serde(rename = "version", skip_serializing_if = "Option::is_none")]
