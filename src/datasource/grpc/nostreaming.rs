@@ -37,11 +37,19 @@ impl<ResR> UnarySender<ResR> {
 
     pub(super) async fn receive(&self, context: MessageContext) -> HandlerResult<ResR> {
         loop {
+            // Register the waiter before checking the slot. Otherwise a send
+            // can land between `take()` and `notified()`, and `notify_waiters`
+            // does not retain a permit for a waiter that was not registered
+            // yet. Under load that left a completed unary response asleep
+            // until the caller's gRPC deadline.
+            let notified = self.sent.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if let Some(value) = self.take() {
                 return Ok(value);
             }
             tokio::select! {
-                _ = self.sent.notified() => {}
+                _ = &mut notified => {}
                 _ = context.cancelled() => {
                     return Err("gRPC unary request context cancelled".into());
                 }
@@ -70,7 +78,7 @@ where
         {
             span.in_scope(|| tracing::info!(event.name = "send"));
         }
-        self.sent.notify_waiters();
+        self.sent.notify_one();
         Ok(())
     }
 }
@@ -162,5 +170,38 @@ where
             .await;
         result?;
         Ok(response.or_else(|| sender.take()).unwrap_or_default())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn unary_sender_does_not_lose_concurrent_notifications() {
+        const ATTEMPTS: usize = 20_000;
+        let mut tasks = Vec::with_capacity(ATTEMPTS);
+
+        for value in 0..ATTEMPTS {
+            let sender = Arc::new(UnarySender::new());
+            let receiver = Arc::clone(&sender);
+            tasks.push(tokio::spawn(async move {
+                let received = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    receiver.receive(MessageContext::new()),
+                )
+                .await
+                .expect("unary response notification was lost")
+                .unwrap();
+                assert_eq!(received, value);
+            }));
+            sender.send(MessageContext::new(), value).await.unwrap();
+        }
+
+        for task in tasks {
+            task.await.unwrap();
+        }
     }
 }

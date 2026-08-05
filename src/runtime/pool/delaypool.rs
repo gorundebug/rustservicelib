@@ -109,6 +109,13 @@ impl DelayPool {
             return Err(RuntimeError::ResourceStopped("delay".to_owned()));
         }
 
+        // JoinSet keeps completed task outputs until they are joined. A delay
+        // is created for every request in soft-deadline pipelines, so leaving
+        // those outputs in the set makes memory and scheduler bookkeeping grow
+        // without bound during sustained traffic. Reap them before accepting
+        // the next task; shutdown still joins the tasks that remain active.
+        while state.tasks.try_join_next().is_some() {}
+
         let duration = context
             .deadline()
             .map(|deadline| deadline.saturating_duration_since(tokio::time::Instant::now()))
@@ -168,5 +175,45 @@ impl DelayPool {
             tracing::warn!("delay pool stopped by timeout");
             wait.await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tokio::sync::oneshot;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn reaps_completed_tasks_while_running() {
+        let pool = DelayPool::new();
+        let completed = Arc::new(AtomicUsize::new(0));
+        const TASKS: usize = 1_000;
+
+        for _ in 0..TASKS {
+            let completed = Arc::clone(&completed);
+            pool.delay(MessageContext::new(), Duration::ZERO, async move {
+                completed.fetch_add(1, Ordering::Release);
+            })
+            .await
+            .unwrap();
+        }
+        while completed.load(Ordering::Acquire) != TASKS {
+            tokio::task::yield_now().await;
+        }
+        tokio::task::yield_now().await;
+
+        let (release, wait) = oneshot::channel();
+        pool.delay(MessageContext::new(), Duration::ZERO, async move {
+            let _ = wait.await;
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(pool.state.lock().await.tasks.len(), 1);
+        let _ = release.send(());
+        pool.stop().await;
     }
 }
