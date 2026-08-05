@@ -11,8 +11,8 @@ use tokio::{sync::Mutex as AsyncMutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    LinkConfig, PoolConfig, RuntimeConfig, RuntimeDataConnectorConfig, RuntimeEndpointConfig,
-    RuntimeStreamConfig, ServiceConfig,
+    LinkConfig, ModuleConfig, PoolConfig, RuntimeConfig, RuntimeDataConnectorConfig,
+    RuntimeEndpointConfig, RuntimeStreamConfig, ServiceConfig, TypeConfig,
 };
 use crate::runtime::{
     common::MessageContext,
@@ -55,6 +55,14 @@ pub trait Config: Clone + Serialize + DeserializeOwned + Send + Sync + 'static {
     }
 
     fn links(&self) -> Vec<LinkConfig> {
+        Vec::new()
+    }
+
+    fn modules(&self) -> Vec<ModuleConfig> {
+        Vec::new()
+    }
+
+    fn types(&self) -> Vec<TypeConfig> {
         Vec::new()
     }
 

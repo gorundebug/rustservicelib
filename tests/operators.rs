@@ -493,6 +493,7 @@ impl JoinFunction<String, i32, i32, i32> for SumJoin {
 #[tokio::test]
 async fn inner_join_waits_for_both_sides_and_removes_processed_key() {
     let join_config = JoinStreamConfig {
+        join_storage: servicelib::api::JoinStorageType::HashMap,
         stream: StreamConfig::new(3, "Join"),
         join_type: JoinType::Inner,
         ttl: Duration::from_secs(1),
@@ -560,6 +561,7 @@ impl JoinFunction<String, i32, i32, usize> for EmitOnExpiry {
 #[tokio::test]
 async fn join_invokes_the_same_callback_when_ttl_expires() {
     let join_config = JoinStreamConfig {
+        join_storage: servicelib::api::JoinStorageType::HashMap,
         stream: StreamConfig::new(3, "Join"),
         join_type: JoinType::Outer,
         ttl: Duration::from_millis(10),
@@ -623,6 +625,7 @@ impl MultiJoinFunction<String, String> for ThreeWayJoin {
 #[tokio::test]
 async fn multi_join_accepts_heterogeneous_typed_inputs() {
     let join_config = MultiJoinStreamConfig {
+        join_storage: servicelib::api::JoinStorageType::HashMap,
         stream: StreamConfig::new(4, "MultiJoin"),
         ttl: Duration::from_secs(1),
         renew_ttl: false,

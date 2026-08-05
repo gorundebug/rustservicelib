@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::api;
@@ -25,6 +27,7 @@ pub struct ServiceConfig {
     pub grpc_port: u16,
     pub default_grpc_timeout: i64,
     pub color: String,
+    pub log_level: api::LogLevel,
     pub environment: String,
     pub shutdown_timeout: i64,
 }
@@ -54,10 +57,49 @@ impl Default for ServiceConfig {
             grpc_port: 9090,
             default_grpc_timeout: 5_000,
             color: String::new(),
+            log_level: api::LogLevel::Undefined,
             environment: String::new(),
             shutdown_timeout: 30_000,
         }
     }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModuleConfig {
+    pub name: String,
+    pub path: String,
+    #[serde(default, flatten)]
+    pub properties: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypeConfig {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub data_type: api::DataType,
+    #[serde(default)]
+    pub type_definition: String,
+    #[serde(default)]
+    pub type_import: String,
+    #[serde(default)]
+    pub value_type: String,
+    #[serde(default)]
+    pub key_type: String,
+    #[serde(default)]
+    pub package: String,
+    #[serde(default)]
+    pub module: String,
+    pub definition_format: api::TypeDefinitionFormat,
+    #[serde(default)]
+    pub public_type: bool,
+    #[serde(default)]
+    pub transfer_by_value: bool,
+    #[serde(default)]
+    pub use_alias: bool,
+    #[serde(default, flatten)]
+    pub properties: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -119,11 +161,25 @@ pub struct KafkaEndpointConfig {
     pub replication_factor: i32,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CustomDataConnectorConfig {
+    pub id: i32,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CustomEndpointConfig {
+    pub id: i32,
+    pub name: String,
+    pub id_data_connector: i32,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum RuntimeDataConnectorConfig {
     Http(HttpDataConnectorConfig),
     Grpc(GrpcDataConnectorConfig),
     Kafka(KafkaDataConnectorConfig),
+    Custom(CustomDataConnectorConfig),
 }
 
 impl RuntimeDataConnectorConfig {
@@ -132,6 +188,7 @@ impl RuntimeDataConnectorConfig {
             Self::Http(config) => config.id,
             Self::Grpc(config) => config.id,
             Self::Kafka(config) => config.id,
+            Self::Custom(config) => config.id,
         }
     }
 
@@ -140,6 +197,7 @@ impl RuntimeDataConnectorConfig {
             Self::Http(config) => &config.name,
             Self::Grpc(config) => &config.name,
             Self::Kafka(config) => &config.name,
+            Self::Custom(config) => &config.name,
         }
     }
 
@@ -148,6 +206,7 @@ impl RuntimeDataConnectorConfig {
             Self::Http(_) => api::DataConnectorType::HTTP,
             Self::Grpc(_) => api::DataConnectorType::GRPC,
             Self::Kafka(_) => api::DataConnectorType::Kafka,
+            Self::Custom(_) => api::DataConnectorType::Custom,
         }
     }
 }
@@ -157,6 +216,7 @@ pub enum RuntimeEndpointConfig {
     Http(HttpEndpointConfig),
     Grpc(GrpcEndpointConfig),
     Kafka(KafkaEndpointConfig),
+    Custom(CustomEndpointConfig),
 }
 
 impl RuntimeEndpointConfig {
@@ -165,6 +225,7 @@ impl RuntimeEndpointConfig {
             Self::Http(config) => config.id,
             Self::Grpc(config) => config.id,
             Self::Kafka(config) => config.id,
+            Self::Custom(config) => config.id,
         }
     }
 
@@ -173,6 +234,7 @@ impl RuntimeEndpointConfig {
             Self::Http(config) => &config.name,
             Self::Grpc(config) => &config.name,
             Self::Kafka(config) => &config.name,
+            Self::Custom(config) => &config.name,
         }
     }
 
@@ -181,6 +243,7 @@ impl RuntimeEndpointConfig {
             Self::Http(config) => config.id_data_connector,
             Self::Grpc(config) => config.id_data_connector,
             Self::Kafka(config) => config.id_data_connector,
+            Self::Custom(config) => config.id_data_connector,
         }
     }
 }
@@ -203,6 +266,12 @@ impl From<KafkaDataConnectorConfig> for RuntimeDataConnectorConfig {
     }
 }
 
+impl From<CustomDataConnectorConfig> for RuntimeDataConnectorConfig {
+    fn from(config: CustomDataConnectorConfig) -> Self {
+        Self::Custom(config)
+    }
+}
+
 impl From<HttpEndpointConfig> for RuntimeEndpointConfig {
     fn from(config: HttpEndpointConfig) -> Self {
         Self::Http(config)
@@ -218,6 +287,12 @@ impl From<GrpcEndpointConfig> for RuntimeEndpointConfig {
 impl From<KafkaEndpointConfig> for RuntimeEndpointConfig {
     fn from(config: KafkaEndpointConfig) -> Self {
         Self::Kafka(config)
+    }
+}
+
+impl From<CustomEndpointConfig> for RuntimeEndpointConfig {
+    fn from(config: CustomEndpointConfig) -> Self {
+        Self::Custom(config)
     }
 }
 
@@ -412,6 +487,7 @@ impl From<SinkStreamConfig> for StreamConfig {
 pub struct JoinStreamConfig {
     pub stream: StreamConfig,
     pub join_type: JoinType,
+    pub join_storage: api::JoinStorageType,
     pub ttl: std::time::Duration,
     pub renew_ttl: bool,
 }
@@ -419,6 +495,7 @@ pub struct JoinStreamConfig {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MultiJoinStreamConfig {
     pub stream: StreamConfig,
+    pub join_storage: api::JoinStorageType,
     pub ttl: std::time::Duration,
     pub renew_ttl: bool,
 }

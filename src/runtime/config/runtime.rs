@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use super::{
-    CallSemantics, Config, LinkConfig, PoolConfig, RuntimeDataConnectorConfig,
-    RuntimeEndpointConfig, RuntimeStreamConfig, ServiceConfig,
+    CallSemantics, Config, LinkConfig, ModuleConfig, PoolConfig, RuntimeDataConnectorConfig,
+    RuntimeEndpointConfig, RuntimeStreamConfig, ServiceConfig, TypeConfig,
 };
 use crate::runtime::environment::{RuntimeError, RuntimeResult};
 
@@ -19,6 +19,8 @@ pub struct RuntimeConfig {
     endpoints_by_id: HashMap<i32, Arc<RuntimeEndpointConfig>>,
     endpoints_by_name: HashMap<String, Arc<RuntimeEndpointConfig>>,
     links: HashMap<(i32, i32), Arc<LinkConfig>>,
+    modules_by_name: HashMap<String, Arc<ModuleConfig>>,
+    types_by_name: HashMap<String, Arc<TypeConfig>>,
 }
 
 impl RuntimeConfig {
@@ -30,7 +32,7 @@ impl RuntimeConfig {
     }
 
     pub fn new<C: Config>(config: &C) -> RuntimeResult<Self> {
-        Self::from_parts(
+        let mut runtime = Self::from_parts(
             config.default_call_semantics(),
             config.services(),
             config.streams(),
@@ -38,7 +40,24 @@ impl RuntimeConfig {
             config.data_connectors(),
             config.endpoints(),
             config.links(),
-        )
+        )?;
+        for module in config.modules() {
+            if runtime.modules_by_name.contains_key(&module.name) {
+                return duplicate_name("module", &module.name);
+            }
+            runtime
+                .modules_by_name
+                .insert(module.name.clone(), Arc::new(module));
+        }
+        for data_type in config.types() {
+            if runtime.types_by_name.contains_key(&data_type.name) {
+                return duplicate_name("type", &data_type.name);
+            }
+            runtime
+                .types_by_name
+                .insert(data_type.name.clone(), Arc::new(data_type));
+        }
+        Ok(runtime)
     }
 
     pub fn from_parts(
@@ -228,6 +247,22 @@ impl RuntimeConfig {
 
     pub fn links(&self) -> Vec<Arc<LinkConfig>> {
         self.links.values().cloned().collect()
+    }
+
+    pub fn module_by_name(&self, name: &str) -> Option<Arc<ModuleConfig>> {
+        self.modules_by_name.get(name).cloned()
+    }
+
+    pub fn modules(&self) -> Vec<Arc<ModuleConfig>> {
+        self.modules_by_name.values().cloned().collect()
+    }
+
+    pub fn type_by_name(&self, name: &str) -> Option<Arc<TypeConfig>> {
+        self.types_by_name.get(name).cloned()
+    }
+
+    pub fn types(&self) -> Vec<Arc<TypeConfig>> {
+        self.types_by_name.values().cloned().collect()
     }
 
     pub fn default_call_semantics(&self) -> &CallSemantics {

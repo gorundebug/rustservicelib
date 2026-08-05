@@ -4,10 +4,13 @@ use std::sync::{
 };
 
 use serde::{Deserialize, Serialize};
-use servicelib::runtime::{
-    common::MessageContext,
-    config::{Config, ConfigLoader},
-    environment::{Lifecycle, metrics::Metrics},
+use servicelib::{
+    api::{DataType, TypeDefinitionFormat},
+    runtime::{
+        common::MessageContext,
+        config::{Config, ConfigLoader, ModuleConfig, RuntimeConfig, TypeConfig},
+        environment::{Lifecycle, metrics::Metrics},
+    },
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -171,4 +174,50 @@ async fn override_watcher_reloads_after_atomic_file_replacement() {
     .await
     .expect("configuration watcher did not publish the replacement");
     loader.stop(MessageContext::new()).await.unwrap();
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct MetadataConfig;
+
+impl Config for MetadataConfig {
+    fn apply_environment(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn modules(&self) -> Vec<ModuleConfig> {
+        vec![ModuleConfig {
+            name: "shared".to_owned(),
+            path: "example/shared".to_owned(),
+            properties: Default::default(),
+        }]
+    }
+
+    fn types(&self) -> Vec<TypeConfig> {
+        vec![TypeConfig {
+            name: "Message".to_owned(),
+            data_type: DataType::Struct,
+            type_definition: "Message".to_owned(),
+            type_import: "crate::message".to_owned(),
+            value_type: String::new(),
+            key_type: String::new(),
+            package: String::new(),
+            module: "shared".to_owned(),
+            definition_format: TypeDefinitionFormat::Native,
+            public_type: true,
+            transfer_by_value: false,
+            use_alias: false,
+            properties: Default::default(),
+        }]
+    }
+}
+
+#[test]
+fn runtime_indexes_generated_modules_and_types() {
+    let runtime = RuntimeConfig::new(&MetadataConfig).unwrap();
+
+    assert_eq!(
+        runtime.module_by_name("shared").unwrap().path,
+        "example/shared"
+    );
+    assert_eq!(runtime.type_by_name("Message").unwrap().module, "shared");
 }
