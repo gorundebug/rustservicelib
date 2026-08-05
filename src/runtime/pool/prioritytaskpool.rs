@@ -8,14 +8,10 @@ use std::{
     time::Instant,
 };
 
-use tokio::{
-    sync::{Mutex, Notify},
-    task::JoinHandle,
-};
-use tokio_util::sync::CancellationToken;
+use tokio::{sync::Notify, task::JoinHandle};
 
 use crate::runtime::{
-    common::MessageContext,
+    common::{CancellationCallbackRegistration, MessageContext},
     environment::{
         RuntimeEnvironment, RuntimeError, RuntimeResult,
         metrics::{Float64Histogram, Int64Counter, Int64Gauge, Labels},
@@ -28,7 +24,7 @@ struct PriorityTask {
     sequence: u64,
     context: MessageContext,
     task: BoxTask,
-    stop_cancellation_watch: CancellationToken,
+    _cancellation_registration: CancellationCallbackRegistration,
 }
 
 impl Eq for PriorityTask {}
@@ -70,7 +66,7 @@ struct PriorityTaskPoolMetrics {
 /// priorities preserve FIFO order.
 pub struct PriorityTaskPool {
     name: String,
-    queue: Mutex<BinaryHeap<PriorityTask>>,
+    queue: StdMutex<BinaryHeap<PriorityTask>>,
     notify: Notify,
     stopped: AtomicBool,
     started: AtomicBool,
@@ -89,7 +85,7 @@ impl PriorityTaskPool {
     ) -> RuntimeResult<Arc<Self>> {
         let pool = Arc::new(Self {
             name: name.into(),
-            queue: Mutex::new(BinaryHeap::new()),
+            queue: StdMutex::new(BinaryHeap::new()),
             notify: Notify::new(),
             stopped: AtomicBool::new(false),
             started: AtomicBool::new(false),
@@ -243,6 +239,25 @@ impl PriorityTaskPool {
         &self.name
     }
 
+    fn expire_task(&self, sequence: u64) {
+        let mut queue = self
+            .queue
+            .lock()
+            .expect("priority pool queue lock poisoned");
+        let mut tasks = std::mem::take(&mut *queue).into_vec();
+        let Some(task) = tasks.iter_mut().find(|task| task.sequence == sequence) else {
+            *queue = BinaryHeap::from(tasks);
+            return;
+        };
+        task.priority = i32::MIN;
+        if let Some(metrics) = self.metrics.get() {
+            metrics.task_expired.inc();
+        }
+        *queue = BinaryHeap::from(tasks);
+        drop(queue);
+        self.notify.notify_one();
+    }
+
     pub async fn add_task(
         self: &Arc<Self>,
         context: MessageContext,
@@ -262,8 +277,16 @@ impl PriorityTaskPool {
             return Err(RuntimeError::ResourceStopped(self.name.clone()));
         }
         let sequence = self.sequence.fetch_add(1, AtomicOrdering::Relaxed);
-        let stop_cancellation_watch = CancellationToken::new();
-        let mut queue = self.queue.lock().await;
+        let pool = Arc::downgrade(self);
+        let cancellation_registration = context.register_cancellation_callback(move || {
+            if let Some(pool) = pool.upgrade() {
+                pool.expire_task(sequence);
+            }
+        });
+        let mut queue = self
+            .queue
+            .lock()
+            .expect("priority pool queue lock poisoned");
         if self.stopped.load(AtomicOrdering::Acquire) {
             if let Some(metrics) = self.metrics.get() {
                 metrics.task_rejected.inc();
@@ -275,36 +298,16 @@ impl PriorityTaskPool {
             sequence,
             context: context.clone(),
             task,
-            stop_cancellation_watch: stop_cancellation_watch.clone(),
+            _cancellation_registration: cancellation_registration,
         });
         if let Some(metrics) = self.metrics.get() {
             metrics.queue_length.set(queue.len() as i64);
         }
         drop(queue);
         self.notify.notify_one();
-        let pool = Arc::downgrade(self);
-        tokio::spawn(async move {
-            tokio::select! {
-                _ = context.cancelled() => {}
-                _ = stop_cancellation_watch.cancelled() => return,
-            }
-            let Some(pool) = pool.upgrade() else {
-                return;
-            };
-            let mut queue = pool.queue.lock().await;
-            let mut tasks = std::mem::take(&mut *queue).into_vec();
-            let Some(task) = tasks.iter_mut().find(|task| task.sequence == sequence) else {
-                *queue = BinaryHeap::from(tasks);
-                return;
-            };
-            task.priority = i32::MIN;
-            if let Some(metrics) = pool.metrics.get() {
-                metrics.task_expired.inc();
-            }
-            *queue = BinaryHeap::from(tasks);
-            drop(queue);
-            pool.notify.notify_one();
-        });
+        if context.is_cancelled() {
+            self.expire_task(sequence);
+        }
         Ok(())
     }
 
@@ -341,7 +344,11 @@ impl PriorityTaskPool {
             _ = context.cancelled() => true,
         };
         if timed_out {
-            let tasks_count = self.queue.lock().await.len();
+            let tasks_count = self
+                .queue
+                .lock()
+                .expect("priority pool queue lock poisoned")
+                .len();
             if let Some(metrics) = self.metrics.get() {
                 metrics.stop_timeout.inc();
             }
@@ -377,7 +384,10 @@ impl PriorityTaskPool {
                 return;
             }
             let task = {
-                let mut queue = self.queue.lock().await;
+                let mut queue = self
+                    .queue
+                    .lock()
+                    .expect("priority pool queue lock poisoned");
                 let task = queue.pop();
                 if let Some(metrics) = self.metrics.get() {
                     metrics.queue_length.set(queue.len() as i64);
@@ -386,7 +396,6 @@ impl PriorityTaskPool {
             };
             match task {
                 Some(task) => {
-                    task.stop_cancellation_watch.cancel();
                     let _context = task.context;
                     let started_at = Instant::now();
                     if let Some(metrics) = self.metrics.get() {

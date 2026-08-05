@@ -1,8 +1,9 @@
 use std::{
     collections::HashMap,
+    fmt,
     ops::Deref,
     sync::{
-        Arc,
+        Arc, Mutex as StdMutex, Weak,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -20,6 +21,65 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 pub const STREAM_ID_HEADER: &str = "x-stream-id";
 pub const TRACE_SAMPLING_HEADER: &str = "x-trace";
+
+type CancellationCallback = Arc<dyn Fn() + Send + Sync + 'static>;
+
+struct CancellationCallbacks {
+    next_id: AtomicU64,
+    callbacks: StdMutex<HashMap<u64, CancellationCallback>>,
+}
+
+impl fmt::Debug for CancellationCallbacks {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CancellationCallbacks")
+            .finish_non_exhaustive()
+    }
+}
+
+impl CancellationCallbacks {
+    fn invoke(&self, id: u64) {
+        let callback = self
+            .callbacks
+            .lock()
+            .expect("message cancellation callback lock poisoned")
+            .remove(&id);
+        if let Some(callback) = callback {
+            callback();
+        }
+    }
+
+    fn invoke_all(&self) {
+        let callbacks = {
+            let mut callbacks = self
+                .callbacks
+                .lock()
+                .expect("message cancellation callback lock poisoned");
+            std::mem::take(&mut *callbacks)
+        };
+        for callback in callbacks.into_values() {
+            callback();
+        }
+    }
+}
+
+pub(crate) struct CancellationCallbackRegistration {
+    callbacks: Weak<CancellationCallbacks>,
+    id: Option<u64>,
+}
+
+impl Drop for CancellationCallbackRegistration {
+    fn drop(&mut self) {
+        let (Some(callbacks), Some(id)) = (self.callbacks.upgrade(), self.id) else {
+            return;
+        };
+        callbacks
+            .callbacks
+            .lock()
+            .expect("message cancellation callback lock poisoned")
+            .remove(&id);
+    }
+}
 
 struct MetadataExtractor<'a>(&'a HashMap<String, String>);
 
@@ -75,6 +135,7 @@ impl<T> Deref for Payload<T> {
 #[derive(Clone, Debug)]
 pub struct MessageContext {
     cancellation: CancellationToken,
+    cancellation_callbacks: Arc<CancellationCallbacks>,
     deadline: Option<Instant>,
     metadata: Arc<HashMap<String, String>>,
     open_telemetry: OpenTelemetryContext,
@@ -92,6 +153,10 @@ impl MessageContext {
     pub fn new() -> Self {
         Self {
             cancellation: CancellationToken::new(),
+            cancellation_callbacks: Arc::new(CancellationCallbacks {
+                next_id: AtomicU64::new(0),
+                callbacks: StdMutex::new(HashMap::new()),
+            }),
             deadline: None,
             metadata: Arc::new(HashMap::new()),
             open_telemetry: OpenTelemetryContext::new(),
@@ -251,6 +316,52 @@ impl MessageContext {
 
     pub fn cancel(&self) {
         self.cancellation.cancel();
+        self.cancellation_callbacks.invoke_all();
+    }
+
+    pub(crate) fn register_cancellation_callback(
+        &self,
+        callback: impl Fn() + Send + Sync + 'static,
+    ) -> CancellationCallbackRegistration {
+        let callback: CancellationCallback = Arc::new(callback);
+        if self.is_cancelled() {
+            callback();
+            return CancellationCallbackRegistration {
+                callbacks: Weak::new(),
+                id: None,
+            };
+        }
+        let id = self
+            .cancellation_callbacks
+            .next_id
+            .fetch_add(1, Ordering::Relaxed);
+        {
+            let mut callbacks = self
+                .cancellation_callbacks
+                .callbacks
+                .lock()
+                .expect("message cancellation callback lock poisoned");
+            if self.is_cancelled() {
+                drop(callbacks);
+                callback();
+                return CancellationCallbackRegistration {
+                    callbacks: Weak::new(),
+                    id: None,
+                };
+            }
+            callbacks.insert(id, callback);
+        }
+        if let Some(deadline) = self.deadline {
+            let callbacks = Arc::clone(&self.cancellation_callbacks);
+            tokio::spawn(async move {
+                tokio::time::sleep_until(deadline).await;
+                callbacks.invoke(id);
+            });
+        }
+        CancellationCallbackRegistration {
+            callbacks: Arc::downgrade(&self.cancellation_callbacks),
+            id: Some(id),
+        }
     }
 
     pub fn is_cancelled(&self) -> bool {

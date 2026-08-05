@@ -208,7 +208,7 @@ where
     input_stream: InputStream<T, R, E>,
     stream_context: StreamContext<T, R, E>,
     handler: Arc<H>,
-    pending: RwLock<HashMap<String, Arc<Pending<HandlerState, T, ResR, R, E>>>>,
+    pending: Mutex<HashMap<String, Arc<Pending<HandlerState, T, ResR, R, E>>>>,
     metrics: EndpointMetrics,
     endpoint_name: String,
     _request: std::marker::PhantomData<fn(ReqT)>,
@@ -247,7 +247,7 @@ where
             stream_context: StreamContext::new(input_stream.clone()),
             input_stream: input_stream.clone(),
             handler: Arc::new(handler),
-            pending: RwLock::new(HashMap::new()),
+            pending: Mutex::new(HashMap::new()),
             metrics: EndpointMetrics {
                 messages_total: scope.counter(
                     "messages_total",
@@ -391,8 +391,8 @@ where
         if self.has_result() {
             let replaced = self
                 .pending
-                .write()
-                .await
+                .lock()
+                .expect("gRPC pending lock poisoned")
                 .insert(stream_id.clone(), Arc::clone(&pending));
             if replaced.is_some() {
                 self.metrics.active_requests.dec();
@@ -484,7 +484,11 @@ where
         mut result: HandlerResult,
     ) -> HandlerResult {
         let removed = if self.has_result() {
-            let removed = self.pending.write().await.remove(stream_id);
+            let removed = self
+                .pending
+                .lock()
+                .expect("gRPC pending lock poisoned")
+                .remove(stream_id);
             self.metrics.pending_requests.remove(stream_id);
             removed
         } else {
@@ -528,7 +532,13 @@ where
             tracing::error!("consumeResult called without streamID");
             return;
         };
-        let Some(pending) = self.pending.read().await.get(&stream_id).cloned() else {
+        let Some(pending) = self
+            .pending
+            .lock()
+            .expect("gRPC pending lock poisoned")
+            .get(&stream_id)
+            .cloned()
+        else {
             self.metrics.late_result.inc();
             tracing::warn!(
                 session_id = stream_id,
@@ -539,8 +549,8 @@ where
         let _lifetime = pending.lifetime.read().await;
         if !self
             .pending
-            .read()
-            .await
+            .lock()
+            .expect("gRPC pending lock poisoned")
             .get(&stream_id)
             .is_some_and(|current| Arc::ptr_eq(current, &pending))
         {

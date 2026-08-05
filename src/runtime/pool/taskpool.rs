@@ -9,11 +9,10 @@ use std::{
     time::Instant,
 };
 
-use tokio::{sync::Mutex, task::JoinHandle};
-use tokio_util::sync::CancellationToken;
+use tokio::task::JoinHandle;
 
 use crate::runtime::{
-    common::MessageContext,
+    common::{CancellationCallbackRegistration, MessageContext},
     environment::{
         RuntimeEnvironment, RuntimeError, RuntimeResult,
         metrics::{Float64Histogram, Int64Counter, Int64Gauge, Labels},
@@ -26,7 +25,7 @@ struct QueuedTask {
     sequence: u64,
     context: MessageContext,
     task: BoxTask,
-    stop_cancellation_watch: CancellationToken,
+    _cancellation_registration: CancellationCallbackRegistration,
 }
 
 struct TaskPoolMetrics {
@@ -45,7 +44,7 @@ struct TaskPoolMetrics {
 /// queued task expedites it to the head, matching Go's task-pool behavior.
 pub struct TaskPool {
     name: String,
-    queue: Mutex<VecDeque<QueuedTask>>,
+    queue: StdMutex<VecDeque<QueuedTask>>,
     notify: tokio::sync::Notify,
     stopped: AtomicBool,
     started: AtomicBool,
@@ -64,7 +63,7 @@ impl TaskPool {
     ) -> RuntimeResult<Arc<Self>> {
         let pool = Arc::new(Self {
             name: name.into(),
-            queue: Mutex::new(VecDeque::new()),
+            queue: StdMutex::new(VecDeque::new()),
             notify: tokio::sync::Notify::new(),
             stopped: AtomicBool::new(false),
             started: AtomicBool::new(false),
@@ -211,6 +210,22 @@ impl TaskPool {
         &self.name
     }
 
+    fn expedite_task(&self, sequence: u64) {
+        let mut queue = self.queue.lock().expect("task pool queue lock poisoned");
+        let Some(index) = queue.iter().position(|task| task.sequence == sequence) else {
+            return;
+        };
+        if let Some(metrics) = self.metrics.get() {
+            metrics.task_cancelled.inc();
+        }
+        if index != 0 {
+            let task = queue.remove(index).expect("queued task index is valid");
+            queue.push_front(task);
+            drop(queue);
+            self.notify.notify_one();
+        }
+    }
+
     pub async fn add_task(
         self: &Arc<Self>,
         context: MessageContext,
@@ -223,8 +238,13 @@ impl TaskPool {
             return Err(RuntimeError::ContextCancelled);
         }
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
-        let stop_cancellation_watch = CancellationToken::new();
-        let mut queue = self.queue.lock().await;
+        let pool = Arc::downgrade(self);
+        let cancellation_registration = context.register_cancellation_callback(move || {
+            if let Some(pool) = pool.upgrade() {
+                pool.expedite_task(sequence);
+            }
+        });
+        let mut queue = self.queue.lock().expect("task pool queue lock poisoned");
         if self.stopped.load(Ordering::Acquire) {
             if let Some(metrics) = self.metrics.get() {
                 metrics.task_rejected.inc();
@@ -235,37 +255,16 @@ impl TaskPool {
             sequence,
             context: context.clone(),
             task,
-            stop_cancellation_watch: stop_cancellation_watch.clone(),
+            _cancellation_registration: cancellation_registration,
         });
         if let Some(metrics) = self.metrics.get() {
             metrics.queue_length.set(queue.len() as i64);
         }
         drop(queue);
         self.notify.notify_one();
-
-        let pool = Arc::downgrade(self);
-        tokio::spawn(async move {
-            tokio::select! {
-                _ = context.cancelled() => {}
-                _ = stop_cancellation_watch.cancelled() => return,
-            }
-            let Some(pool) = pool.upgrade() else {
-                return;
-            };
-            let mut queue = pool.queue.lock().await;
-            let Some(index) = queue.iter().position(|task| task.sequence == sequence) else {
-                return;
-            };
-            if let Some(metrics) = pool.metrics.get() {
-                metrics.task_cancelled.inc();
-            }
-            if index != 0 {
-                let task = queue.remove(index).expect("queued task index is valid");
-                queue.push_front(task);
-                drop(queue);
-                pool.notify.notify_one();
-            }
-        });
+        if context.is_cancelled() {
+            self.expedite_task(sequence);
+        }
         Ok(())
     }
 
@@ -302,7 +301,11 @@ impl TaskPool {
             _ = context.cancelled() => true,
         };
         if timed_out {
-            let tasks_count = self.queue.lock().await.len();
+            let tasks_count = self
+                .queue
+                .lock()
+                .expect("task pool queue lock poisoned")
+                .len();
             if let Some(metrics) = self.metrics.get() {
                 metrics.stop_timeout.inc();
             }
@@ -338,7 +341,7 @@ impl TaskPool {
                 return;
             }
             let queued = {
-                let mut queue = self.queue.lock().await;
+                let mut queue = self.queue.lock().expect("task pool queue lock poisoned");
                 let queued = queue.pop_front();
                 if let Some(metrics) = self.metrics.get() {
                     metrics.queue_length.set(queue.len() as i64);
@@ -347,7 +350,6 @@ impl TaskPool {
             };
             match queued {
                 Some(queued) => {
-                    queued.stop_cancellation_watch.cancel();
                     let _context = queued.context;
                     let started_at = Instant::now();
                     if let Some(metrics) = self.metrics.get() {

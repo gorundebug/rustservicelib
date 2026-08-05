@@ -149,6 +149,101 @@ async fn priority_pool_is_stable_and_cancelled_task_becomes_first() {
 }
 
 #[tokio::test]
+async fn fifo_pool_monitors_cancellation_for_a_large_queue() {
+    let pool = TaskPool::new("fifo-large", pool_environment(&[("fifo-large", 1)])).unwrap();
+    pool.start().unwrap();
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let release = Arc::new(Notify::new());
+    let first_release = Arc::clone(&release);
+    pool.add_task(
+        MessageContext::new(),
+        Box::pin(async move {
+            first_release.notified().await;
+        }),
+    )
+    .await
+    .unwrap();
+
+    let mut cancelled = None;
+    for value in 2..=257 {
+        let sender = sender.clone();
+        let context = MessageContext::new();
+        if value == 257 {
+            cancelled = Some(context.clone());
+        }
+        pool.add_task(
+            context,
+            Box::pin(async move {
+                sender.send(value).unwrap();
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    cancelled.unwrap().cancel();
+    tokio::task::yield_now().await;
+    release.notify_one();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap(),
+        Some(257)
+    );
+    assert_eq!(receiver.recv().await, Some(2));
+    pool.stop().await;
+}
+
+#[tokio::test]
+async fn priority_pool_monitors_cancellation_for_a_large_queue() {
+    let pool = PriorityTaskPool::new("priority-large", pool_environment(&[("priority-large", 1)]))
+        .unwrap();
+    pool.start().unwrap();
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let release = Arc::new(Notify::new());
+    let first_release = Arc::clone(&release);
+    pool.add_task(
+        MessageContext::new(),
+        0,
+        Box::pin(async move {
+            first_release.notified().await;
+        }),
+    )
+    .await
+    .unwrap();
+
+    let mut cancelled = None;
+    for value in 2..=257 {
+        let sender = sender.clone();
+        let context = MessageContext::new();
+        if value == 257 {
+            cancelled = Some(context.clone());
+        }
+        pool.add_task(
+            context,
+            10,
+            Box::pin(async move {
+                sender.send(value).unwrap();
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    cancelled.unwrap().cancel();
+    tokio::task::yield_now().await;
+    release.notify_one();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap(),
+        Some(257)
+    );
+    assert_eq!(receiver.recv().await, Some(2));
+    pool.stop().await;
+}
+
+#[tokio::test]
 async fn task_pool_queues_before_start_and_rejects_after_stop() {
     let pool = TaskPool::new("lifecycle", pool_environment(&[("lifecycle", 1)])).unwrap();
     let (sender, mut receiver) = mpsc::unbounded_channel();
