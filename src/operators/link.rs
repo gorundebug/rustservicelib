@@ -32,12 +32,9 @@ impl<T> LinkStream<T>
 where
     T: Serialize + DeserializeOwned + Send + Sync + 'static,
 {
-    pub fn make<C>(config: C, environment: RuntimeEnvironment) -> Arc<Self>
-    where
-        C: Into<CycleLinkStreamConfig>,
-    {
+    pub fn make(config: &CycleLinkStreamConfig, environment: RuntimeEnvironment) -> Arc<Self> {
         Arc::new(Self {
-            stream: Stream::new(config.into(), environment),
+            stream: Stream::new(&config.stream, environment),
             source: RwLock::new(None),
         })
     }

@@ -52,7 +52,7 @@ where
     F: KeyByFunction<T, K, V> + 'static,
 {
     pub fn make(
-        config: KeyByStreamConfig,
+        config: &KeyByStreamConfig,
         source: &Stream<T>,
         function: F,
     ) -> RuntimeResult<Stream<KeyValue<K, V>>> {
@@ -60,7 +60,7 @@ where
             Arc::new(JsonSerde::<K>::new()) as Arc<dyn ServiceSerde<K>>,
             Arc::new(JsonSerde::<V>::new()) as Arc<dyn ServiceSerde<V>>,
         );
-        let output = Stream::derived(config, source.environment().clone(), serde);
+        let output = Stream::derived(&config.stream, source.environment().clone(), serde);
         source.try_set_consumer(
             Arc::new(Self {
                 output: output.clone(),
@@ -79,7 +79,7 @@ where
 {
     pub fn key_by<K, V, F>(
         &self,
-        config: impl Into<KeyByStreamConfig>,
+        config: &KeyByStreamConfig,
         function: F,
     ) -> RuntimeResult<Stream<KeyValue<K, V>>>
     where
@@ -87,7 +87,7 @@ where
         V: Serialize + DeserializeOwned + Send + Sync + 'static,
         F: KeyByFunction<T, K, V> + 'static,
     {
-        KeyByStream::make(config.into(), self, function)
+        KeyByStream::make(config, self, function)
     }
 }
 

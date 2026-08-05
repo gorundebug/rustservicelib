@@ -46,11 +46,11 @@ where
     F: MapFunction<T, R> + 'static,
 {
     pub fn make(
-        config: MapStreamConfig,
+        config: &MapStreamConfig,
         source: &Stream<T>,
         function: F,
     ) -> RuntimeResult<Stream<R>> {
-        let output = Stream::new(config, source.environment().clone());
+        let output = Stream::new(&config.stream, source.environment().clone());
         let operator = Arc::new(Self {
             output: output.clone(),
             function,
@@ -65,16 +65,12 @@ impl<T> Stream<T>
 where
     T: Send + Sync + 'static,
 {
-    pub fn map<R, F>(
-        &self,
-        config: impl Into<MapStreamConfig>,
-        function: F,
-    ) -> RuntimeResult<Stream<R>>
+    pub fn map<R, F>(&self, config: &MapStreamConfig, function: F) -> RuntimeResult<Stream<R>>
     where
         R: Serialize + DeserializeOwned + Send + Sync + 'static,
         F: MapFunction<T, R> + 'static,
     {
-        MapStream::make(config.into(), self, function)
+        MapStream::make(config, self, function)
     }
 }
 

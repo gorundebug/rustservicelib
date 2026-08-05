@@ -155,7 +155,7 @@ impl ProcessFunction<i32, i32, String> for EvenOrError {
 async fn input_and_map_use_parent_stream_api() {
     let environment = test_environment(Vec::new(), Vec::new());
     let input = servicelib::operators::InputStream::<i32, (), ()>::new(
-        InputStreamConfig {
+        &InputStreamConfig {
             stream: StreamConfig::new(1, "Input"),
             endpoint_id: 10,
         },
@@ -163,7 +163,7 @@ async fn input_and_map_use_parent_stream_api() {
     );
     let mapped = input
         .stream()
-        .map(StreamConfig::new(2, "Double"), Double)
+        .map(&(StreamConfig::new(2, "Double").into()), Double)
         .unwrap();
     let capture = Arc::new(Capture::default());
     mapped.set_consumer(Arc::clone(&capture), 3);
@@ -178,7 +178,7 @@ async fn input_and_map_use_parent_stream_api() {
 fn stream_resolves_config_from_each_published_runtime_snapshot() {
     let environment = test_environment(Vec::new(), Vec::new());
     let stream = Stream::<i32>::new(
-        StreamConfig::new(1, "constructor value is not retained"),
+        &StreamConfig::new(1, "constructor value is not retained"),
         environment.clone(),
     );
     assert_eq!(stream.name(), "Stream 1");
@@ -199,9 +199,9 @@ fn stream_resolves_config_from_each_published_runtime_snapshot() {
 #[tokio::test]
 async fn key_by_and_process_are_available_from_the_parent_stream() {
     let environment = test_environment(Vec::new(), Vec::new());
-    let key_source = Stream::new(StreamConfig::new(1, "Key Input"), environment.clone());
+    let key_source = Stream::new(&StreamConfig::new(1, "Key Input"), environment.clone());
     let keyed = key_source
-        .key_by(StreamConfig::new(2, "Key By"), ToKeyValue)
+        .key_by(&(StreamConfig::new(2, "Key By").into()), ToKeyValue)
         .unwrap();
     let keyed_capture = Arc::new(Capture::default());
     keyed.set_consumer(Arc::clone(&keyed_capture), 3);
@@ -214,9 +214,9 @@ async fn key_by_and_process_are_available_from_the_parent_stream() {
         assert_eq!(keyed_values[0].1.value, 7);
     }
 
-    let process_source = Stream::new(StreamConfig::new(4, "Process Input"), environment);
+    let process_source = Stream::new(&StreamConfig::new(4, "Process Input"), environment);
     let (values, errors) = process_source
-        .process(StreamConfig::new(3, "Process"), EvenOrError)
+        .process(&(StreamConfig::new(3, "Process").into()), EvenOrError)
         .unwrap();
     let values_capture = Arc::new(Capture::default());
     let errors_capture = Arc::new(Capture::default());
@@ -237,7 +237,7 @@ async fn key_by_and_process_are_available_from_the_parent_stream() {
 async fn input_result_source_routes_pipeline_results_back_to_endpoint() {
     let environment = test_environment(Vec::new(), Vec::new());
     let input = servicelib::operators::InputStream::<i32, i32, String>::new(
-        InputStreamConfig {
+        &InputStreamConfig {
             stream: StreamConfig::new(1, "Input"),
             endpoint_id: 10,
         },
@@ -245,7 +245,7 @@ async fn input_result_source_routes_pipeline_results_back_to_endpoint() {
     );
     let mapped = input
         .stream()
-        .map(StreamConfig::new(2, "Double"), Double)
+        .map(&(StreamConfig::new(2, "Double").into()), Double)
         .unwrap();
     input.set_source(&mapped).unwrap();
     let capture = Arc::new(Capture::default());
@@ -278,11 +278,14 @@ impl MapFunction<i32, i32> for CountUntilThree {
 #[tokio::test]
 async fn link_stream_can_bind_its_source_after_graph_construction() {
     let environment = test_environment(Vec::new(), Vec::new());
-    let input = Stream::new(StreamConfig::new(1, "Input"), environment.clone());
-    let link = LinkStream::make(StreamConfig::new(2, "Cycle Link"), environment);
+    let input = Stream::new(&StreamConfig::new(1, "Input"), environment.clone());
+    let link = LinkStream::make(&(StreamConfig::new(2, "Cycle Link").into()), environment);
     let counted = link
         .stream()
-        .map(StreamConfig::new(3, "Count Until Three"), CountUntilThree)
+        .map(
+            &(StreamConfig::new(3, "Count Until Three").into()),
+            CountUntilThree,
+        )
         .unwrap();
     let capture = Arc::new(Capture::default());
     counted.set_consumer(Arc::clone(&capture), 4);
@@ -297,9 +300,9 @@ async fn link_stream_can_bind_its_source_after_graph_construction() {
 #[tokio::test]
 async fn flat_map_iterable_needs_no_user_function_like_go() {
     let environment = test_environment(Vec::new(), Vec::new());
-    let source = Stream::new(StreamConfig::new(1, "Input"), environment);
+    let source = Stream::new(&StreamConfig::new(1, "Input"), environment);
     let items = source
-        .flat_map_iterable::<i32>(StreamConfig::new(2, "Items"))
+        .flat_map_iterable::<i32>(&(StreamConfig::new(2, "Items").into()))
         .unwrap();
     let capture = Arc::new(Capture::default());
     items.set_consumer(Arc::clone(&capture), 3);
@@ -335,8 +338,10 @@ async fn split_shares_payload_and_dispatches_async_branch_first() {
             },
         ],
     );
-    let source = Stream::new(StreamConfig::new(1, "Input"), environment);
-    let [async_branch, direct_branch] = source.split(StreamConfig::new(2, "Split")).unwrap();
+    let source = Stream::new(&StreamConfig::new(1, "Input"), environment);
+    let [async_branch, direct_branch] = source
+        .split(&(StreamConfig::new(2, "Split").into()))
+        .unwrap();
     let async_capture = Arc::new(Capture::default());
     let direct_capture = Arc::new(Capture::default());
     async_branch.set_consumer(Arc::clone(&async_capture), 3);
@@ -370,10 +375,10 @@ impl DelayFunction<i32> for FixedDelay {
 #[tokio::test]
 async fn positive_delay_does_not_emit_after_context_cancellation() {
     let environment = test_environment(Vec::new(), Vec::new());
-    let source = Stream::new(StreamConfig::new(1, "Input"), environment);
+    let source = Stream::new(&StreamConfig::new(1, "Input"), environment);
     let delayed = source
         .delay(
-            StreamConfig::new(2, "Delay"),
+            &(StreamConfig::new(2, "Delay").into()),
             FixedDelay(Duration::from_secs(60)),
         )
         .unwrap();
@@ -391,9 +396,12 @@ async fn positive_delay_does_not_emit_after_context_cancellation() {
 #[tokio::test]
 async fn zero_delay_emits_even_if_context_is_already_cancelled() {
     let environment = test_environment(Vec::new(), Vec::new());
-    let source = Stream::new(StreamConfig::new(1, "Input"), environment);
+    let source = Stream::new(&StreamConfig::new(1, "Input"), environment);
     let delayed = source
-        .delay(StreamConfig::new(2, "Delay"), FixedDelay(Duration::ZERO))
+        .delay(
+            &(StreamConfig::new(2, "Delay").into()),
+            FixedDelay(Duration::ZERO),
+        )
         .unwrap();
     let capture = Arc::new(Capture::default());
     delayed.set_consumer(Arc::clone(&capture), 3);
@@ -414,21 +422,30 @@ enum Event {
 #[tokio::test]
 async fn case_routes_to_the_selected_typed_branch() {
     let environment = test_environment(Vec::new(), Vec::new());
-    let source = Stream::new(StreamConfig::new(1, "Input"), environment);
+    let source = Stream::new(&StreamConfig::new(1, "Input"), environment);
     let cases = source
-        .case(StreamConfig::new(2, "Case"), |event: &Event| match event {
-            Event::Number(_) => 0,
-            Event::Text(_) => 1,
-        })
+        .case(
+            &(StreamConfig::new(2, "Case").into()),
+            |event: &Event| match event {
+                Event::Number(_) => 0,
+                Event::Text(_) => 1,
+            },
+        )
         .unwrap();
-    let numbers = cases.when(StreamConfig::new(3, "Number"), |event| match event {
-        Event::Number(value) => *value,
-        Event::Text(_) => unreachable!(),
-    });
-    let texts = cases.when(StreamConfig::new(4, "Text"), |event| match event {
-        Event::Text(value) => value.clone(),
-        Event::Number(_) => unreachable!(),
-    });
+    let numbers = cases.when(
+        &(StreamConfig::new(3, "Number").into()),
+        |event| match event {
+            Event::Number(value) => *value,
+            Event::Text(_) => unreachable!(),
+        },
+    );
+    let texts = cases.when(
+        &(StreamConfig::new(4, "Text").into()),
+        |event| match event {
+            Event::Text(value) => value.clone(),
+            Event::Number(_) => unreachable!(),
+        },
+    );
     let number_capture = Arc::new(Capture::default());
     let text_capture = Arc::new(Capture::default());
     numbers.set_consumer(Arc::clone(&number_capture), 5);
@@ -482,9 +499,9 @@ async fn inner_join_waits_for_both_sides_and_removes_processed_key() {
         renew_ttl: false,
     };
     let environment = test_environment(vec![join_config.clone().into()], Vec::new());
-    let left = Stream::new(StreamConfig::new(1, "Left"), environment.clone());
-    let right = Stream::new(StreamConfig::new(2, "Right"), environment);
-    let joined = left.join(join_config, &right, SumJoin).unwrap();
+    let left = Stream::new(&StreamConfig::new(1, "Left"), environment.clone());
+    let right = Stream::new(&StreamConfig::new(2, "Right"), environment);
+    let joined = left.join(&join_config, &right, SumJoin).unwrap();
     let capture = Arc::new(Capture::default());
     joined.set_consumer(Arc::clone(&capture), 4);
     let context = MessageContext::new();
@@ -549,11 +566,11 @@ async fn join_invokes_the_same_callback_when_ttl_expires() {
         renew_ttl: false,
     };
     let environment = test_environment(vec![join_config.clone().into()], Vec::new());
-    let left = Stream::new(StreamConfig::new(1, "Left"), environment.clone());
-    let right = Stream::new(StreamConfig::new(2, "Right"), environment);
+    let left = Stream::new(&StreamConfig::new(1, "Left"), environment.clone());
+    let right = Stream::new(&StreamConfig::new(2, "Right"), environment);
     let joined = left
         .join(
-            join_config,
+            &join_config,
             &right,
             EmitOnExpiry {
                 calls: Mutex::new(0),
@@ -611,10 +628,10 @@ async fn multi_join_accepts_heterogeneous_typed_inputs() {
         renew_ttl: false,
     };
     let environment = test_environment(vec![join_config.clone().into()], Vec::new());
-    let left = Stream::new(StreamConfig::new(1, "Left"), environment.clone());
-    let names = Stream::new(StreamConfig::new(2, "Names"), environment.clone());
-    let flags = Stream::new(StreamConfig::new(3, "Flags"), environment);
-    let joined = left.multi_join(join_config, ThreeWayJoin).unwrap();
+    let left = Stream::new(&StreamConfig::new(1, "Left"), environment.clone());
+    let names = Stream::new(&StreamConfig::new(2, "Names"), environment.clone());
+    let flags = Stream::new(&StreamConfig::new(3, "Flags"), environment);
+    let joined = left.multi_join(&join_config, ThreeWayJoin).unwrap();
     joined.add(&names).unwrap();
     joined.add(&flags).unwrap();
     let capture = Arc::new(Capture::default());

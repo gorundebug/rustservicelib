@@ -108,7 +108,7 @@ where
     F: MultiJoinFunction<K, O> + 'static,
 {
     pub fn make<V>(
-        config: MultiJoinStreamConfig,
+        config: &MultiJoinStreamConfig,
         left: &Stream<KeyValue<K, V>>,
         function: F,
     ) -> RuntimeResult<Arc<Self>>
@@ -125,7 +125,7 @@ where
         left.environment().register_storage(hashmap_storage.clone());
         let store: Arc<dyn JoinStorage<K>> = hashmap_storage;
         let multi_join_stream = Arc::new(Self {
-            output: Stream::new(config, left.environment().clone()),
+            output: Stream::new(&config.stream, left.environment().clone()),
             store,
             function: Arc::new(function),
             next_index: AtomicUsize::new(1),
@@ -207,7 +207,7 @@ where
 {
     pub fn multi_join<O, F>(
         &self,
-        config: MultiJoinStreamConfig,
+        config: &MultiJoinStreamConfig,
         function: F,
     ) -> RuntimeResult<Arc<MultiJoinStream<K, O, F>>>
     where

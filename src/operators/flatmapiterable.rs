@@ -63,10 +63,10 @@ where
     R: Serialize + DeserializeOwned + Send + Sync + 'static,
 {
     pub fn make(
-        config: FlatMapIterableStreamConfig,
+        config: &FlatMapIterableStreamConfig,
         source: &Stream<T>,
     ) -> RuntimeResult<Stream<R>> {
-        let output = Stream::new(config, source.environment().clone());
+        let output = Stream::new(&config.stream, source.environment().clone());
         source.try_set_consumer(
             Arc::new(Self {
                 output: output.clone(),
@@ -84,13 +84,13 @@ where
 {
     pub fn flat_map_iterable<R>(
         &self,
-        config: impl Into<FlatMapIterableStreamConfig>,
+        config: &FlatMapIterableStreamConfig,
     ) -> RuntimeResult<Stream<R>>
     where
         T: StreamIterable<R>,
         R: Serialize + DeserializeOwned + Send + Sync + 'static,
     {
-        FlatMapIterableStream::make(config.into(), self)
+        FlatMapIterableStream::make(config, self)
     }
 }
 

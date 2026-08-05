@@ -77,9 +77,9 @@ async fn operator_future_is_executed_inside_its_tracing_span() {
         Arc::new(traces.clone()),
         Arc::new(logs.clone()),
     );
-    let input = Stream::new(StreamConfig::new(1, "input"), environment);
+    let input = Stream::new(&StreamConfig::new(1, "input"), environment);
     let _mapped = input
-        .map::<u32, _>(StreamConfig::new(2, "mapped"), LoggingMap)
+        .map::<u32, _>(&(StreamConfig::new(2, "mapped").into()), LoggingMap)
         .unwrap();
     let subscriber = tracing_subscriber::registry()
         .with(logs.clone())
@@ -116,9 +116,9 @@ async fn operator_does_not_create_a_span_without_explicit_sampling() {
         Arc::new(traces.clone()),
         Arc::new(logs.clone()),
     );
-    let input = Stream::new(StreamConfig::new(1, "input"), environment);
+    let input = Stream::new(&StreamConfig::new(1, "input"), environment);
     let _mapped = input
-        .map::<u32, _>(StreamConfig::new(2, "mapped"), LoggingMap)
+        .map::<u32, _>(&(StreamConfig::new(2, "mapped").into()), LoggingMap)
         .unwrap();
     let subscriber = tracing_subscriber::registry()
         .with(logs.clone())

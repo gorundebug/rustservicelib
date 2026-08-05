@@ -128,13 +128,13 @@ fn make_input(
 ) {
     let environment = RuntimeEnvironment::default();
     let input = InputStream::new(
-        InputStreamConfig {
+        &InputStreamConfig {
             stream: StreamConfig::new(id, "grpc input"),
             endpoint_id: id + 1,
         },
         environment.clone(),
     );
-    let results = Stream::new(StreamConfig::new(id + 2, "results"), environment);
+    let results = Stream::new(&StreamConfig::new(id + 2, "results"), environment);
     input.set_source(&results).unwrap();
     input
         .stream()

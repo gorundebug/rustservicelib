@@ -38,12 +38,16 @@ where
     F: FilterFunction<T> + 'static,
 {
     pub fn make(
-        config: FilterStreamConfig,
+        config: &FilterStreamConfig,
         source: &Stream<T>,
         function: F,
     ) -> RuntimeResult<Stream<T>> {
         // Go: stream.GetSerde() — type-preserving, reuse the source's serde.
-        let output = Stream::derived(config, source.environment().clone(), source.get_serde());
+        let output = Stream::derived(
+            &config.stream,
+            source.environment().clone(),
+            source.get_serde(),
+        );
         let operator = Arc::new(Self {
             output: output.clone(),
             function,
@@ -57,15 +61,11 @@ impl<T> Stream<T>
 where
     T: Send + Sync + 'static,
 {
-    pub fn filter<F>(
-        &self,
-        config: impl Into<FilterStreamConfig>,
-        function: F,
-    ) -> RuntimeResult<Stream<T>>
+    pub fn filter<F>(&self, config: &FilterStreamConfig, function: F) -> RuntimeResult<Stream<T>>
     where
         F: FilterFunction<T> + 'static,
     {
-        FilterStream::make(config.into(), self, function)
+        FilterStream::make(config, self, function)
     }
 }
 

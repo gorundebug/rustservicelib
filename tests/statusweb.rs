@@ -188,15 +188,15 @@ async fn status_graph_matches_the_go_runtime_contract() {
     environment.publish_runtime_config(Arc::new(RuntimeConfig::new(&StatusConfig).unwrap()));
     let environment = environment.for_service(7);
     let input = InputStream::<i32, (), String>::new(
-        InputStreamConfig {
+        &InputStreamConfig {
             stream: StreamConfig::new(1, "constructor config"),
             endpoint_id: 10,
         },
         environment.clone(),
     );
-    let _value = Stream::<i32>::new(StreamConfig::new(2, "value"), environment.clone());
-    let _error = Stream::<String>::new(StreamConfig::new(3, "error"), environment.clone());
-    let _flat_map = Stream::<i32>::new(StreamConfig::new(4, "flat map"), environment.clone());
+    let _value = Stream::<i32>::new(&StreamConfig::new(2, "value"), environment.clone());
+    let _error = Stream::<String>::new(&StreamConfig::new(3, "error"), environment.clone());
+    let _flat_map = Stream::<i32>::new(&StreamConfig::new(4, "flat map"), environment.clone());
     input.stream().set_consumer(Arc::new(Ignore), 2);
     input.error_stream().set_consumer(Arc::new(Ignore), 3);
     input.consume(MessageContext::new(), 1).await;

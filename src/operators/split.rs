@@ -22,14 +22,14 @@ impl<T, const N: usize> SplitStream<T, N>
 where
     T: Send + Sync + 'static,
 {
-    pub fn make(config: SplitStreamConfig, source: &Stream<T>) -> RuntimeResult<[Stream<T>; N]> {
+    pub fn make(config: &SplitStreamConfig, source: &Stream<T>) -> RuntimeResult<[Stream<T>; N]> {
         // Go: stream.GetSerde() — type-preserving, reuse the source's serde
         // for both the internal collector stream and each branch link.
         let serde = source.get_serde();
-        let stream = Stream::derived(config.clone(), source.environment().clone(), serde.clone());
+        let stream = Stream::derived(&config.stream, source.environment().clone(), serde.clone());
         let links = std::array::from_fn(|index| {
             Stream::derived_with_name(
-                config.clone(),
+                &config.stream,
                 source.environment().clone(),
                 format!("{}SplitLink{index}", config.stream.name),
                 serde.clone(),
@@ -50,9 +50,9 @@ where
 {
     pub fn split<const N: usize>(
         &self,
-        config: impl Into<SplitStreamConfig>,
+        config: &SplitStreamConfig,
     ) -> RuntimeResult<[Stream<T>; N]> {
-        SplitStream::make(config.into(), self)
+        SplitStream::make(config, self)
     }
 }
 

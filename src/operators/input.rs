@@ -55,12 +55,12 @@ where
     R: Send + Sync + 'static,
     E: Serialize + DeserializeOwned + Send + Sync + 'static,
 {
-    pub fn new(config: InputStreamConfig, environment: RuntimeEnvironment) -> Self {
+    pub fn new(config: &InputStreamConfig, environment: RuntimeEnvironment) -> Self {
         let error_stream =
             Stream::with_ids(-config.stream.id, config.stream.id, environment.clone());
         Self {
             inner: Arc::new(InputStreamInner {
-                stream: Stream::new(config, environment),
+                stream: Stream::new(&config.stream, environment),
                 result_source: RwLock::new(None),
                 result_consumer: RwLock::new(None),
                 error_stream,

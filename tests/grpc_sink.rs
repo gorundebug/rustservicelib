@@ -91,9 +91,9 @@ fn make_sink(
     Arc<servicelib::operators::SinkStreamWithResult<u32, u32, String>>,
     Arc<Mutex<Vec<u32>>>,
 ) {
-    let source = Stream::new(StreamConfig::new(id, "source"), environment);
+    let source = Stream::new(&StreamConfig::new(id, "source"), environment);
     let sink = source
-        .sink_with_result::<u32, String>(SinkStreamConfig {
+        .sink_with_result::<u32, String>(&SinkStreamConfig {
             stream: StreamConfig::new(id + 1, "grpc sink"),
             endpoint_id: id + 2,
         })

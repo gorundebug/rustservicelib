@@ -92,9 +92,9 @@ impl Consumer<String> for Capture {
 #[tokio::test]
 async fn custom_sink_preserves_the_go_handler_lifecycle() {
     let environment = RuntimeEnvironment::default();
-    let source = Stream::new(StreamConfig::new(1, "Output"), environment.clone());
+    let source = Stream::new(&StreamConfig::new(1, "Output"), environment.clone());
     let sink = source
-        .sink::<String>(SinkStreamConfig {
+        .sink::<String>(&SinkStreamConfig {
             stream: StreamConfig::new(2, "Custom Sink"),
             endpoint_id: 10,
         })

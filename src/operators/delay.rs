@@ -48,12 +48,16 @@ where
     F: DelayFunction<T> + 'static,
 {
     pub fn make(
-        config: DelayStreamConfig,
+        config: &DelayStreamConfig,
         source: &Stream<T>,
         function: F,
     ) -> RuntimeResult<Stream<T>> {
         // Go: stream.GetSerde() — type-preserving, reuse the source's serde.
-        let output = Stream::derived(config, source.environment().clone(), source.get_serde());
+        let output = Stream::derived(
+            &config.stream,
+            source.environment().clone(),
+            source.get_serde(),
+        );
         let operator = Arc::new(Self {
             output: output.clone(),
             function,
@@ -67,15 +71,11 @@ impl<T> Stream<T>
 where
     T: Send + Sync + 'static,
 {
-    pub fn delay<F>(
-        &self,
-        config: impl Into<DelayStreamConfig>,
-        function: F,
-    ) -> RuntimeResult<Stream<T>>
+    pub fn delay<F>(&self, config: &DelayStreamConfig, function: F) -> RuntimeResult<Stream<T>>
     where
         F: DelayFunction<T> + 'static,
     {
-        DelayStream::make(config.into(), self, function)
+        DelayStream::make(config, self, function)
     }
 }
 

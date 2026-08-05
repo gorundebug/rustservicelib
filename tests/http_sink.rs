@@ -122,9 +122,9 @@ async fn http_sink_preserves_lifecycle_correlation_and_metrics() {
         )
         .unwrap(),
     ));
-    let source = Stream::new(StreamConfig::new(1, "orders"), environment.clone());
+    let source = Stream::new(&StreamConfig::new(1, "orders"), environment.clone());
     let sink = source
-        .sink_with_result::<u32, String>(SinkStreamConfig {
+        .sink_with_result::<u32, String>(&SinkStreamConfig {
             stream: StreamConfig::new(2, "reserve inventory"),
             endpoint_id: 3,
         })

@@ -82,7 +82,7 @@ where
     F: BuildSwitchFunction<T> + 'static,
 {
     pub fn make(
-        config: CaseStreamConfig,
+        config: &CaseStreamConfig,
         source: &Stream<T>,
         selector: F,
     ) -> RuntimeResult<Arc<Self>> {
@@ -113,14 +113,14 @@ where
     T: Send + Sync + 'static,
     F: BuildSwitchFunction<T> + 'static,
 {
-    pub fn when<R, M>(&self, config: impl Into<WhenStreamConfig>, map: M) -> Stream<R>
+    pub fn when<R, M>(&self, config: &WhenStreamConfig, map: M) -> Stream<R>
     where
         // Go: runtime.MakeSerde[R](env) — fresh; each branch's map(&T) -> R
         // introduces a new type distinct from T (and from other branches).
         R: Serialize + DeserializeOwned + Send + Sync + 'static,
         M: Fn(&T) -> R + Send + Sync + 'static,
     {
-        let output = Stream::new(config.into(), self.environment.clone());
+        let output = Stream::new(&config.stream, self.environment.clone());
         self.inner
             .when_streams
             .write()
@@ -152,7 +152,7 @@ where
 {
     pub fn case<F>(
         &self,
-        config: impl Into<CaseStreamConfig>,
+        config: &CaseStreamConfig,
         selector: F,
     ) -> RuntimeResult<TypedCaseStream<T, F>>
     where
@@ -160,7 +160,7 @@ where
     {
         let environment = self.environment().clone();
         Ok(TypedCaseStream {
-            inner: CaseStream::make(config.into(), self, selector)?,
+            inner: CaseStream::make(config, self, selector)?,
             environment,
         })
     }

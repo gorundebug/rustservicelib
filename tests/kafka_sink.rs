@@ -27,9 +27,9 @@ impl Partitioner<u32> for FixedPartitioner {
 #[tokio::test]
 async fn kafka_sink_connector_owns_endpoints_and_obeys_lifecycle() {
     let environment = RuntimeEnvironment::default();
-    let source = Stream::new(StreamConfig::new(1, "orders"), environment);
+    let source = Stream::new(&StreamConfig::new(1, "orders"), environment);
     let sink_stream = source
-        .sink_with_result::<u32, String>(SinkStreamConfig {
+        .sink_with_result::<u32, String>(&SinkStreamConfig {
             stream: StreamConfig::new(2, "publish orders"),
             endpoint_id: 3,
         })
@@ -136,9 +136,9 @@ impl Consumer<u32> for ResultCollector {
 #[tokio::test]
 async fn kafka_sink_preserves_lifecycle_partition_and_delivery_result() {
     let environment = RuntimeEnvironment::default();
-    let source = Stream::new(StreamConfig::new(1, "orders"), environment.clone());
+    let source = Stream::new(&StreamConfig::new(1, "orders"), environment.clone());
     let sink = source
-        .sink_with_result::<u32, String>(SinkStreamConfig {
+        .sink_with_result::<u32, String>(&SinkStreamConfig {
             stream: StreamConfig::new(2, "publish orders"),
             endpoint_id: 3,
         })

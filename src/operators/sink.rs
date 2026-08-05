@@ -29,7 +29,7 @@ where
     // Go: SinkStream[T,E].errorConsumer — MakeErrorStream[E](id, env), fresh.
     E: Serialize + DeserializeOwned + Send + Sync + 'static,
 {
-    pub fn make(config: SinkStreamConfig, source: &Stream<T>) -> RuntimeResult<Arc<Self>> {
+    pub fn make(config: &SinkStreamConfig, source: &Stream<T>) -> RuntimeResult<Arc<Self>> {
         let error_stream = ErrorStream::new(&config.stream, source.environment().clone())
             .stream()
             .clone();
@@ -132,8 +132,8 @@ where
     R: Serialize + DeserializeOwned + Send + Sync + 'static,
     E: Serialize + DeserializeOwned + Send + Sync + 'static,
 {
-    pub fn make(config: SinkStreamConfig, source: &Stream<T>) -> RuntimeResult<Arc<Self>> {
-        let result_stream = Stream::new(config.clone(), source.environment().clone());
+    pub fn make(config: &SinkStreamConfig, source: &Stream<T>) -> RuntimeResult<Arc<Self>> {
+        let result_stream = Stream::new(&config.stream, source.environment().clone());
         let error_stream = ErrorStream::new(&config.stream, source.environment().clone())
             .stream()
             .clone();
@@ -230,7 +230,7 @@ impl<T> Stream<T>
 where
     T: Send + Sync + 'static,
 {
-    pub fn sink<E>(&self, config: SinkStreamConfig) -> RuntimeResult<Arc<SinkStream<T, E>>>
+    pub fn sink<E>(&self, config: &SinkStreamConfig) -> RuntimeResult<Arc<SinkStream<T, E>>>
     where
         E: Serialize + DeserializeOwned + Send + Sync + 'static,
     {
@@ -239,7 +239,7 @@ where
 
     pub fn sink_with_result<R, E>(
         &self,
-        config: SinkStreamConfig,
+        config: &SinkStreamConfig,
     ) -> RuntimeResult<Arc<SinkStreamWithResult<T, R, E>>>
     where
         R: Serialize + DeserializeOwned + Send + Sync + 'static,

@@ -117,7 +117,7 @@ impl EndpointHandler<(), i32, i32, String> for Handler {
 async fn custom_source_correlates_result_and_waits_for_done() {
     let environment = RuntimeEnvironment::default();
     let input = InputStream::<i32, i32, String>::new(
-        InputStreamConfig {
+        &InputStreamConfig {
             stream: StreamConfig::new(1, "Input"),
             endpoint_id: 10,
         },
@@ -125,7 +125,7 @@ async fn custom_source_correlates_result_and_waits_for_done() {
     );
     let result = input
         .stream()
-        .map(StreamConfig::new(2, "Double"), Double)
+        .map(&(StreamConfig::new(2, "Double").into()), Double)
         .unwrap();
     input.set_source(&result).unwrap();
     let (finished, wait_finished) = oneshot::channel();

@@ -110,14 +110,14 @@ where
     F: JoinFunction<K, L, R, O> + 'static,
 {
     pub fn make(
-        config: JoinStreamConfig,
+        config: &JoinStreamConfig,
         left: &Stream<KeyValue<K, L>>,
         right: &Stream<KeyValue<K, R>>,
         function: F,
     ) -> RuntimeResult<Stream<O>> {
         let stream_id = config.stream.id;
         let stream_name = config.stream.name.clone();
-        let output = Stream::new(config, left.environment().clone());
+        let output = Stream::new(&config.stream, left.environment().clone());
         let hashmap_storage = Arc::new(HashMapJoinStorage::from_stream(
             left.environment().clone(),
             stream_id,
@@ -205,7 +205,7 @@ where
 {
     pub fn join<R, O, F>(
         &self,
-        config: JoinStreamConfig,
+        config: &JoinStreamConfig,
         right: &Stream<KeyValue<K, R>>,
         function: F,
     ) -> RuntimeResult<Stream<O>>

@@ -5,7 +5,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use crate::runtime::{
     collector::{Collect, Collector},
     common::{Consumer, MessageContext, Payload, RuntimeStream},
-    config::RuntimeStreamConfig,
+    config::{RuntimeStreamConfig, StreamConfig},
     environment::{RuntimeEnvironment, RuntimeError, RuntimeResult},
     serde::{JsonSerde, Serde as ServiceSerde, StreamSerde, make_stream_serde},
 };
@@ -51,9 +51,8 @@ impl<T> Stream<T>
 where
     T: Serialize + DeserializeOwned + Send + Sync + 'static,
 {
-    pub fn new(config: impl Into<RuntimeStreamConfig>, environment: RuntimeEnvironment) -> Self {
-        let config = config.into();
-        let id = config.stream().id;
+    pub fn new(config: &StreamConfig, environment: RuntimeEnvironment) -> Self {
+        let id = config.id;
         Self::with_ids(id, id, environment)
     }
 
@@ -90,23 +89,21 @@ where
     }
 
     pub(crate) fn derived(
-        config: impl Into<RuntimeStreamConfig>,
+        config: &StreamConfig,
         environment: RuntimeEnvironment,
         serde: Arc<dyn StreamSerde<T>>,
     ) -> Self {
-        let config = config.into();
-        let id = config.stream().id;
+        let id = config.id;
         Self::with_ids_and_serde(id, id, environment, serde)
     }
 
     pub(crate) fn derived_with_name(
-        config: impl Into<RuntimeStreamConfig>,
+        config: &StreamConfig,
         environment: RuntimeEnvironment,
         name: String,
         serde: Arc<dyn StreamSerde<T>>,
     ) -> Self {
-        let config = config.into();
-        let id = config.stream().id;
+        let id = config.id;
         environment.register_runtime_stream(id);
         Self {
             inner: Arc::new(StreamInner {

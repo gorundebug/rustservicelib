@@ -54,13 +54,12 @@ where
     F: ProcessFunction<T, R, E> + 'static,
 {
     pub fn make(
-        config: ProcessStreamConfig,
+        config: &ProcessStreamConfig,
         source: &Stream<T>,
         function: F,
     ) -> RuntimeResult<(Stream<R>, Stream<E>)> {
-        let base = config.stream.clone();
-        let output = Stream::new(config, source.environment().clone());
-        let error = ErrorStream::new(&base, source.environment().clone())
+        let output = Stream::new(&config.stream, source.environment().clone());
+        let error = ErrorStream::new(&config.stream, source.environment().clone())
             .stream()
             .clone();
         source.try_set_consumer(
@@ -82,7 +81,7 @@ where
 {
     pub fn process<R, E, F>(
         &self,
-        config: impl Into<ProcessStreamConfig>,
+        config: &ProcessStreamConfig,
         function: F,
     ) -> RuntimeResult<(Stream<R>, Stream<E>)>
     where
@@ -90,7 +89,7 @@ where
         E: Serialize + DeserializeOwned + Send + Sync + 'static,
         F: ProcessFunction<T, R, E> + 'static,
     {
-        ProcessStream::make(config.into(), self, function)
+        ProcessStream::make(config, self, function)
     }
 }
 

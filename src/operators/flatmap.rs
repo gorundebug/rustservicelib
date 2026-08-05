@@ -46,11 +46,11 @@ where
     F: FlatMapFunction<T, R> + 'static,
 {
     pub fn make(
-        config: FlatMapStreamConfig,
+        config: &FlatMapStreamConfig,
         source: &Stream<T>,
         function: F,
     ) -> RuntimeResult<Stream<R>> {
-        let output = Stream::new(config, source.environment().clone());
+        let output = Stream::new(&config.stream, source.environment().clone());
         let operator = Arc::new(Self {
             output: output.clone(),
             function,
@@ -67,14 +67,14 @@ where
 {
     pub fn flat_map<R, F>(
         &self,
-        config: impl Into<FlatMapStreamConfig>,
+        config: &FlatMapStreamConfig,
         function: F,
     ) -> RuntimeResult<Stream<R>>
     where
         R: Serialize + DeserializeOwned + Send + Sync + 'static,
         F: FlatMapFunction<T, R> + 'static,
     {
-        FlatMapStream::make(config.into(), self, function)
+        FlatMapStream::make(config, self, function)
     }
 }
 

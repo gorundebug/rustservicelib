@@ -128,13 +128,13 @@ async fn http_source_correlates_pipeline_result_and_waits_for_done() {
         .unwrap(),
     ));
     let input = InputStream::new(
-        InputStreamConfig {
+        &InputStreamConfig {
             stream: StreamConfig::new(1, "process order"),
             endpoint_id: 7,
         },
         environment.clone(),
     );
-    let result_stream = Stream::new(StreamConfig::new(2, "order result"), environment.clone());
+    let result_stream = Stream::new(&StreamConfig::new(2, "order result"), environment.clone());
     input.set_source(&result_stream).unwrap();
     input
         .stream()

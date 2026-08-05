@@ -50,7 +50,7 @@ async fn kafka_datasource_owns_typed_endpoints_like_go_connector() {
     };
     let datasource = RdkafkaKafkaDataSource::new(connector_config).unwrap();
     let input = InputStream::<u32, u32, String>::new(
-        InputStreamConfig {
+        &InputStreamConfig {
             stream: StreamConfig::new(1, "orders input"),
             endpoint_id: 2,
         },
@@ -152,7 +152,7 @@ impl EndpointHandler<(), u32, u32, String> for Handler {
 async fn kafka_source_correlates_result_then_commits_and_ends() {
     let environment = RuntimeEnvironment::default();
     let input = InputStream::<u32, u32, String>::new(
-        InputStreamConfig {
+        &InputStreamConfig {
             stream: StreamConfig::new(1, "orders input"),
             endpoint_id: 2,
         },
@@ -160,7 +160,7 @@ async fn kafka_source_correlates_result_then_commits_and_ends() {
     );
     let doubled = input
         .stream()
-        .map(StreamConfig::new(3, "double"), Double)
+        .map(&(StreamConfig::new(3, "double").into()), Double)
         .unwrap();
     input.set_source(&doubled).unwrap();
 
