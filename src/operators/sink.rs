@@ -1,4 +1,4 @@
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use tracing::Instrument;
@@ -7,9 +7,9 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use super::error::ErrorStream;
 use crate::runtime::{
-    common::{Consumer, MessageContext, Payload, RuntimeStream},
+    common::{ConstructionCell, Consumer, MessageContext, Payload, RuntimeStream},
     config::{RuntimeStreamConfig, SinkStreamConfig},
-    environment::{RuntimeEnvironment, RuntimeError, RuntimeResult},
+    environment::{RuntimeEnvironment, RuntimeResult},
     stream::Stream,
 };
 
@@ -19,7 +19,7 @@ where
     E: Send + Sync + 'static,
 {
     id: i32,
-    sink_consumer: RwLock<Option<Arc<dyn Consumer<T>>>>,
+    sink_consumer: ConstructionCell<Arc<dyn Consumer<T>>>,
     error_stream: Stream<E>,
 }
 
@@ -36,7 +36,7 @@ where
         let id = config.stream.id;
         let sink_stream = Arc::new(Self {
             id,
-            sink_consumer: RwLock::new(None),
+            sink_consumer: ConstructionCell::empty(),
             error_stream,
         });
         source.try_set_consumer(Arc::clone(&sink_stream), sink_stream.id)?;
@@ -61,16 +61,7 @@ where
     }
 
     pub fn set_sink_consumer(&self, consumer: Arc<dyn Consumer<T>>) -> RuntimeResult<()> {
-        let mut sink_consumer = self
-            .sink_consumer
-            .write()
-            .expect("sink consumer lock poisoned");
-        if sink_consumer.is_some() {
-            return Err(RuntimeError::ConsumerAlreadySet {
-                stream: self.name(),
-            });
-        }
-        *sink_consumer = Some(consumer);
+        self.sink_consumer.replace(consumer);
         Ok(())
     }
 }
@@ -101,12 +92,7 @@ where
 {
     async fn consume(&self, context: MessageContext, payload: Payload<T>) {
         let (context, span) = RuntimeStream::start_span(self, context, "stream.sink");
-        let consumer = self
-            .sink_consumer
-            .read()
-            .expect("sink consumer lock poisoned")
-            .clone();
-        if let Some(consumer) = consumer {
+        if let Some(consumer) = self.sink_consumer.get() {
             consumer.consume(context, payload).instrument(span).await;
         }
     }
@@ -119,7 +105,7 @@ where
     E: Send + Sync + 'static,
 {
     result_stream: Stream<R>,
-    sink_consumer: RwLock<Option<Arc<dyn Consumer<T>>>>,
+    sink_consumer: ConstructionCell<Arc<dyn Consumer<T>>>,
     error_stream: Stream<E>,
 }
 
@@ -139,7 +125,7 @@ where
             .clone();
         let sink_stream = Arc::new(Self {
             result_stream,
-            sink_consumer: RwLock::new(None),
+            sink_consumer: ConstructionCell::empty(),
             error_stream,
         });
         source.try_set_consumer(Arc::clone(&sink_stream), sink_stream.result_stream.id())?;
@@ -169,16 +155,7 @@ where
     }
 
     pub fn set_sink_consumer(&self, consumer: Arc<dyn Consumer<T>>) -> RuntimeResult<()> {
-        let mut sink_consumer = self
-            .sink_consumer
-            .write()
-            .expect("sink consumer lock poisoned");
-        if sink_consumer.is_some() {
-            return Err(RuntimeError::ConsumerAlreadySet {
-                stream: self.result_stream.name(),
-            });
-        }
-        *sink_consumer = Some(consumer);
+        self.sink_consumer.replace(consumer);
         Ok(())
     }
 
@@ -196,12 +173,7 @@ where
 {
     async fn consume(&self, context: MessageContext, payload: Payload<T>) {
         let (context, span) = RuntimeStream::start_span(self, context, "stream.sink");
-        let consumer = self
-            .sink_consumer
-            .read()
-            .expect("sink consumer lock poisoned")
-            .clone();
-        if let Some(consumer) = consumer {
+        if let Some(consumer) = self.sink_consumer.get() {
             consumer.consume(context, payload).instrument(span).await;
         }
     }

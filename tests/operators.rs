@@ -248,12 +248,15 @@ async fn input_result_source_routes_pipeline_results_back_to_endpoint() {
         .map(&(StreamConfig::new(2, "Double").into()), Double)
         .unwrap();
     input.set_source(&mapped).unwrap();
+    let generated_router = Arc::new(Capture::default());
+    input.set_result_consumer(generated_router.clone());
     let capture = Arc::new(Capture::default());
     input.set_result_consumer(capture.clone());
 
     input.consume(MessageContext::new(), 21).await;
 
     assert_eq!(*capture.0.lock().unwrap()[0].1, 42);
+    assert!(generated_router.0.lock().unwrap().is_empty());
     assert_eq!(input.result_stream().unwrap().id(), 2);
     assert_eq!(input.error_stream().id(), -1);
 }
@@ -348,9 +351,10 @@ async fn split_shares_payload_and_dispatches_async_branch_first() {
     let direct_capture = Arc::new(Capture::default());
     async_branch.set_consumer(Arc::clone(&async_capture), 3);
     direct_branch.set_consumer(Arc::clone(&direct_capture), 4);
-    let payload = Payload::new(String::from("message"));
-    let expected = payload.clone().into_arc();
+    let (expected_payload, payload) = Payload::new(String::from("message")).share();
+    let expected = expected_payload.into_arc();
 
+    source.environment().build_runtime_streams().unwrap();
     source.emit(MessageContext::new(), payload).await;
     tokio::task::yield_now().await;
 
@@ -452,6 +456,7 @@ async fn case_routes_to_the_selected_typed_branch() {
     let text_capture = Arc::new(Capture::default());
     numbers.set_consumer(Arc::clone(&number_capture), 5);
     texts.set_consumer(Arc::clone(&text_capture), 6);
+    source.environment().build_runtime_streams().unwrap();
 
     source
         .emit(MessageContext::new(), Payload::new(Event::Number(42)))

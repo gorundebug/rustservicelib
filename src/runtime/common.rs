@@ -1,4 +1,5 @@
 use std::{
+    cell::UnsafeCell,
     collections::HashMap,
     fmt,
     ops::Deref,
@@ -21,6 +22,81 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 pub const STREAM_ID_HEADER: &str = "x-stream-id";
 pub const TRACE_SAMPLING_HEADER: &str = "x-trace";
+
+/// A value wired while a service graph is constructed and read-only after
+/// `ServiceApp::start`. Unlike `Mutex`, `RwLock`, or `OnceLock`, reads are a
+/// plain pointer dereference with no lock or atomic operation.
+///
+/// The runtime constructs graphs on one thread before publishing them to
+/// workers. Keeping this lifecycle rule here mirrors Go's plain downstream
+/// fields while containing the required Rust interior mutability in one place.
+pub(crate) struct ConstructionCell<T> {
+    value: UnsafeCell<Option<T>>,
+}
+
+// SAFETY: mutation is restricted to the single-threaded graph construction
+// phase. Once the graph is published, only shared immutable reads are allowed.
+unsafe impl<T: Send + Sync> Sync for ConstructionCell<T> {}
+
+impl<T> ConstructionCell<T> {
+    pub(crate) const fn empty() -> Self {
+        Self {
+            value: UnsafeCell::new(None),
+        }
+    }
+
+    pub(crate) fn get(&self) -> Option<&T> {
+        // SAFETY: values are immutable after graph construction.
+        unsafe { (&*self.value.get()).as_ref() }
+    }
+
+    pub(crate) fn set(&self, value: T) -> Result<(), T> {
+        // SAFETY: all setters run during single-threaded graph construction.
+        let slot = unsafe { &mut *self.value.get() };
+        if slot.is_some() {
+            return Err(value);
+        }
+        *slot = Some(value);
+        Ok(())
+    }
+
+    pub(crate) fn replace(&self, value: T) -> Option<T> {
+        // SAFETY: graph wiring, including endpoint rebinding, is completed by
+        // one thread before the graph is published to runtime workers.
+        unsafe { (&mut *self.value.get()).replace(value) }
+    }
+
+}
+
+/// A field that always has a value and may only be mutated while the graph is
+/// being built. Runtime reads compile to a plain field access: there is no
+/// state flag, lock, atomic operation, or initialization check.
+pub(crate) struct ConstructionValue<T> {
+    value: UnsafeCell<T>,
+}
+
+// SAFETY: the graph builder is single-threaded and finishes all writes before
+// the graph is published to runtime workers.
+unsafe impl<T: Send + Sync> Sync for ConstructionValue<T> {}
+
+impl<T> ConstructionValue<T> {
+    pub(crate) const fn new(value: T) -> Self {
+        Self {
+            value: UnsafeCell::new(value),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get(&self) -> &T {
+        // SAFETY: the value is immutable after graph construction.
+        unsafe { &*self.value.get() }
+    }
+
+    pub(crate) fn with_mut<R>(&self, function: impl FnOnce(&mut T) -> R) -> R {
+        // SAFETY: all mutations run during single-threaded graph construction.
+        function(unsafe { &mut *self.value.get() })
+    }
+}
 
 type CancellationCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 
@@ -106,25 +182,42 @@ impl Injector for MetadataInjector<'_> {
 }
 
 #[derive(Debug)]
-pub struct Payload<T>(Arc<T>);
-
-impl<T> Clone for Payload<T> {
-    fn clone(&self) -> Self {
-        Self(Arc::clone(&self.0))
-    }
+pub enum Payload<T> {
+    Owned(T),
+    Shared(Arc<T>),
 }
 
 impl<T> Payload<T> {
     pub fn new(value: T) -> Self {
-        Self(Arc::new(value))
+        Self::Owned(value)
     }
 
     pub fn from_arc(value: Arc<T>) -> Self {
-        Self(value)
+        Self::Shared(value)
     }
 
     pub fn into_arc(self) -> Arc<T> {
-        self.0
+        match self {
+            Self::Owned(value) => Arc::new(value),
+            Self::Shared(value) => value,
+        }
+    }
+
+    /// Produces two payload handles while allocating only when an owned value
+    /// actually needs to fan out. Linear stream chains keep the value inline.
+    pub fn share(self) -> (Self, Self) {
+        let value = self.into_arc();
+        (Self::Shared(Arc::clone(&value)), Self::Shared(value))
+    }
+
+    pub fn into_value(self) -> T
+    where
+        T: Clone,
+    {
+        match self {
+            Self::Owned(value) => value,
+            Self::Shared(value) => Arc::try_unwrap(value).unwrap_or_else(|value| (*value).clone()),
+        }
     }
 }
 
@@ -132,7 +225,10 @@ impl<T> Deref for Payload<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        match self {
+            Self::Owned(value) => value,
+            Self::Shared(value) => value,
+        }
     }
 }
 

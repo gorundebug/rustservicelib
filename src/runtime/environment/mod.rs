@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        Arc, RwLock,
+        Arc, RwLock, Weak,
         atomic::{AtomicI64, Ordering},
     },
 };
@@ -48,7 +48,7 @@ pub struct GraphLink {
     pub calls: CallStatistics,
 }
 use crate::runtime::{
-    common::{MessageContext, RuntimeEndpointConsumer},
+    common::{ConstructionValue, MessageContext, RuntimeEndpointConsumer},
     config::{CallSemantics, RuntimeConfig, RuntimeStreamConfig, ServiceConfig},
     pool::{DelayPool, PriorityTaskPool, TaskPool},
     store::Storage,
@@ -86,12 +86,17 @@ pub enum RuntimeError {
 
 pub type RuntimeResult<T> = Result<T, RuntimeError>;
 
+pub(crate) trait RuntimeBuildable: Send + Sync {
+    fn build(&self) -> RuntimeResult<()>;
+}
+
 #[derive(Clone)]
 pub struct RuntimeEnvironment {
     service_id: Option<i32>,
     runtime_config: Arc<ArcSwap<RuntimeConfig>>,
     graph_links: Arc<RwLock<Vec<GraphLink>>>,
     runtime_streams: Arc<RwLock<HashSet<i32>>>,
+    runtime_buildables: Arc<ConstructionValue<Vec<Weak<dyn RuntimeBuildable>>>>,
     endpoint_consumers: Arc<RwLock<HashMap<i32, Arc<dyn RuntimeEndpointConsumer>>>>,
     task_pools: Arc<RwLock<HashMap<String, Arc<TaskPool>>>>,
     priority_task_pools: Arc<RwLock<HashMap<String, Arc<PriorityTaskPool>>>>,
@@ -111,6 +116,7 @@ impl Default for RuntimeEnvironment {
             runtime_config: Arc::new(ArcSwap::from_pointee(RuntimeConfig::default())),
             graph_links: Arc::new(RwLock::new(Vec::new())),
             runtime_streams: Arc::new(RwLock::new(HashSet::new())),
+            runtime_buildables: Arc::new(ConstructionValue::new(Vec::new())),
             endpoint_consumers: Arc::new(RwLock::new(HashMap::new())),
             task_pools: Arc::new(RwLock::new(HashMap::new())),
             priority_task_pools: Arc::new(RwLock::new(HashMap::new())),
@@ -240,6 +246,24 @@ impl RuntimeEnvironment {
             .read()
             .expect("runtime streams lock poisoned")
             .clone()
+    }
+
+    pub(crate) fn register_runtime_buildable(&self, buildable: Weak<dyn RuntimeBuildable>) {
+        self.runtime_buildables
+            .with_mut(|buildables| buildables.push(buildable));
+    }
+
+    pub fn build_runtime_streams(&self) -> RuntimeResult<()> {
+        let buildables = self
+            .runtime_buildables
+            .get()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect::<Vec<_>>();
+        for buildable in buildables {
+            buildable.build()?;
+        }
+        Ok(())
     }
 
     pub fn register_endpoint_consumer(

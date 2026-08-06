@@ -44,8 +44,8 @@ where
 {
     output: Stream<O>,
     store: Arc<dyn JoinStorage<K>>,
-    function: Arc<F>,
-    _types: std::marker::PhantomData<fn(L, R)>,
+    callback: JoinCallback<K>,
+    _types: std::marker::PhantomData<fn(L, R, F)>,
 }
 
 impl<K, L, R, O, F> JoinStream<K, L, R, O, F>
@@ -56,9 +56,7 @@ where
     O: Send + Sync + 'static,
     F: JoinFunction<K, L, R, O> + 'static,
 {
-    fn callback(&self) -> JoinCallback<K> {
-        let output = self.output.clone();
-        let function = Arc::clone(&self.function);
+    fn make_callback(output: Stream<O>, function: Arc<F>) -> JoinCallback<K> {
         Arc::new(move |context, key, values| {
             let output = output.clone();
             let function = Arc::clone(&function);
@@ -93,7 +91,7 @@ where
     async fn consume_value(&self, context: MessageContext, key: K, index: usize, value: DynValue) {
         let (context, span) = self.output.start_span(context, "stream.join");
         self.store
-            .join_value(context, key, index, value, self.callback())
+            .join_value(context, key, index, value, Arc::clone(&self.callback))
             .instrument(span)
             .await;
     }
@@ -125,10 +123,12 @@ where
         hashmap_storage.configure_metrics(left.environment(), &stream_name)?;
         left.environment().register_storage(hashmap_storage.clone());
         let store: Arc<dyn JoinStorage<K>> = hashmap_storage;
+        let function = Arc::new(function);
+        let callback = Self::make_callback(output.clone(), Arc::clone(&function));
         let join_stream = Arc::new(Self {
             output: output.clone(),
             store,
-            function: Arc::new(function),
+            callback,
             _types: std::marker::PhantomData,
         });
         left.try_set_consumer(Arc::clone(&join_stream), output.id())?;
@@ -176,8 +176,8 @@ where
     F: JoinFunction<K, L, R, O> + 'static,
 {
     async fn consume(&self, context: MessageContext, payload: Payload<KeyValue<K, L>>) {
-        let key = payload.key.clone();
-        let value: DynValue = Arc::new(payload.value.clone());
+        let KeyValue { key, value } = payload.into_value();
+        let value: DynValue = Arc::new(value);
         self.consume_value(context, key, 0, value).await;
     }
 }
@@ -192,8 +192,8 @@ where
     F: JoinFunction<K, L, R, O> + 'static,
 {
     async fn consume(&self, context: MessageContext, payload: Payload<KeyValue<K, R>>) {
-        let key = payload.key.clone();
-        let value: DynValue = Arc::new(payload.value.clone());
+        let KeyValue { key, value } = payload.into_value();
+        let value: DynValue = Arc::new(value);
         self.join_stream.consume_value(context, key, 1, value).await;
     }
 }

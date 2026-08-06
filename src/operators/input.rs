@@ -1,4 +1,4 @@
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use tracing::Instrument;
@@ -6,7 +6,7 @@ use tracing::Instrument;
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::runtime::{
-    common::{Consumer, MessageContext, Payload},
+    common::{ConstructionCell, Consumer, MessageContext, Payload},
     config::{InputStreamConfig, RuntimeStreamConfig},
     environment::{RuntimeEnvironment, RuntimeResult},
     stream::Stream,
@@ -28,8 +28,8 @@ where
     E: Send + Sync + 'static,
 {
     stream: Stream<T>,
-    result_source: RwLock<Option<Stream<R>>>,
-    result_consumer: RwLock<Option<Arc<dyn Consumer<R>>>>,
+    result_source: ConstructionCell<Stream<R>>,
+    result_consumer: ConstructionCell<Arc<dyn Consumer<R>>>,
     error_stream: Stream<E>,
 }
 
@@ -61,8 +61,8 @@ where
         Self {
             inner: Arc::new(InputStreamInner {
                 stream: Stream::new(&config.stream, environment),
-                result_source: RwLock::new(None),
-                result_consumer: RwLock::new(None),
+                result_source: ConstructionCell::empty(),
+                result_consumer: ConstructionCell::empty(),
                 error_stream,
             }),
         }
@@ -96,19 +96,14 @@ where
     }
 
     pub fn result_stream(&self) -> Option<Stream<R>> {
-        self.inner
-            .result_source
-            .read()
-            .expect("input result source lock poisoned")
-            .clone()
+        self.inner.result_source.get().cloned()
     }
 
     pub fn set_result_consumer(&self, consumer: Arc<dyn Consumer<R>>) {
-        *self
-            .inner
-            .result_consumer
-            .write()
-            .expect("input result consumer lock poisoned") = Some(consumer);
+        // Go's SetResultConsumer is a build-time assignment. A generated
+        // ResultRouter may be replaced by the concrete transport endpoint
+        // while the graph is wired.
+        self.inner.result_consumer.replace(consumer);
     }
 
     pub fn set_source(&self, source: &Stream<R>) -> RuntimeResult<()> {
@@ -118,12 +113,11 @@ where
             }),
             self.stream().id(),
         )?;
-        *self
-            .inner
-            .result_source
-            .write()
-            .expect("input result source lock poisoned") = Some(source.clone());
-        Ok(())
+        self.inner.result_source.set(source.clone()).map_err(|_| {
+            crate::runtime::environment::RuntimeError::SourceAlreadySet {
+                stream: self.inner.stream.name(),
+            }
+        })
     }
 
     pub async fn consume(&self, context: MessageContext, value: T) {
@@ -140,13 +134,7 @@ where
     }
 
     async fn consume_result(&self, context: MessageContext, payload: Payload<R>) {
-        let consumer = self
-            .inner
-            .result_consumer
-            .read()
-            .expect("input result consumer lock poisoned")
-            .clone();
-        if let Some(consumer) = consumer {
+        if let Some(consumer) = self.inner.result_consumer.get() {
             consumer.consume(context, payload).await;
         }
     }

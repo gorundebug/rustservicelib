@@ -78,9 +78,10 @@ where
     async fn consume(&self, context: MessageContext, payload: Payload<T>) {
         let (context, span) = self.output.start_span(context, "stream.filter");
         async {
+            let (function_payload, payload) = payload.share();
             if self
                 .function
-                .filter(context.clone(), &self.output, payload.clone())
+                .filter(context.clone(), &self.output, function_payload)
                 .await
             {
                 self.output.emit(context, payload).await;

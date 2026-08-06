@@ -12,16 +12,20 @@ use crate::runtime::{
     stream::Stream,
 };
 
-pub trait StreamIterable<R>: Send + Sync {
-    fn stream_items(&self) -> Vec<R>;
+pub trait StreamIterable<R>: Clone + Send + Sync {
+    type Items: IntoIterator<Item = R>;
+
+    fn into_stream_items(self) -> Self::Items;
 }
 
 impl<R> StreamIterable<R> for Vec<R>
 where
     R: Clone + Send + Sync,
 {
-    fn stream_items(&self) -> Vec<R> {
-        self.clone()
+    type Items = std::vec::IntoIter<R>;
+
+    fn into_stream_items(self) -> Self::Items {
+        self.into_iter()
     }
 }
 
@@ -29,20 +33,26 @@ impl<R, const N: usize> StreamIterable<R> for [R; N]
 where
     R: Clone + Send + Sync,
 {
-    fn stream_items(&self) -> Vec<R> {
-        self.to_vec()
+    type Items = std::array::IntoIter<R, N>;
+
+    fn into_stream_items(self) -> Self::Items {
+        self.into_iter()
     }
 }
 
 impl StreamIterable<char> for String {
-    fn stream_items(&self) -> Vec<char> {
-        self.chars().collect()
+    type Items = std::vec::IntoIter<char>;
+
+    fn into_stream_items(self) -> Self::Items {
+        self.chars().collect::<Vec<_>>().into_iter()
     }
 }
 
 impl StreamIterable<u8> for String {
-    fn stream_items(&self) -> Vec<u8> {
-        self.bytes().collect()
+    type Items = std::vec::IntoIter<u8>;
+
+    fn into_stream_items(self) -> Self::Items {
+        self.into_bytes().into_iter()
     }
 }
 
@@ -61,6 +71,7 @@ where
     // Go: runtime.MakeSerde[R](env) — fresh, R (the element type) is a new
     // type at this point, distinct from the iterable T.
     R: Serialize + DeserializeOwned + Send + Sync + 'static,
+    <T::Items as IntoIterator>::IntoIter: Send,
 {
     pub fn make(
         config: &FlatMapIterableStreamConfig,
@@ -89,6 +100,7 @@ where
     where
         T: StreamIterable<R>,
         R: Serialize + DeserializeOwned + Send + Sync + 'static,
+        <T::Items as IntoIterator>::IntoIter: Send,
     {
         FlatMapIterableStream::make(config, self)
     }
@@ -99,12 +111,27 @@ impl<T, R> Consumer<T> for FlatMapIterableStream<T, R>
 where
     T: StreamIterable<R> + Send + Sync + 'static,
     R: Send + Sync + 'static,
+    <T::Items as IntoIterator>::IntoIter: Send,
 {
     async fn consume(&self, context: MessageContext, value: Payload<T>) {
         let (context, span) = self.output.start_span(context, "stream.flatmap_iterable");
         async {
-            for item in value.stream_items() {
-                self.output.emit(context.clone(), Payload::new(item)).await;
+            let mut items = value
+                .into_value()
+                .into_stream_items()
+                .into_iter()
+                .peekable();
+            let mut context = Some(context);
+            while let Some(item) = items.next() {
+                let item_context = if items.peek().is_none() {
+                    context.take().expect("flat-map context is available")
+                } else {
+                    context
+                        .as_ref()
+                        .expect("flat-map context is available")
+                        .clone()
+                };
+                self.output.emit(item_context, Payload::new(item)).await;
             }
         }
         .instrument(span)

@@ -434,6 +434,7 @@ impl ServiceApp {
         let components = self.components.clone();
 
         let result = async {
+            self.environment.build_runtime_streams()?;
             for resource in &data_sources {
                 resource.start(context.clone()).await?;
             }

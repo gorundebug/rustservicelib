@@ -1,11 +1,11 @@
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
 use tracing::Instrument;
 
 use crate::runtime::{
-    common::{Consumer, MessageContext, Payload, RuntimeStream},
+    common::{ConstructionValue, Consumer, MessageContext, Payload, RuntimeStream},
     config::{CaseStreamConfig, WhenStreamConfig},
     environment::RuntimeResult,
     stream::Stream,
@@ -73,7 +73,7 @@ where
     F: BuildSwitchFunction<T> + 'static,
 {
     selector: F,
-    when_streams: RwLock<Vec<Arc<dyn When<T>>>>,
+    when_streams: ConstructionValue<Vec<Arc<dyn When<T>>>>,
 }
 
 impl<T, F> CaseStream<T, F>
@@ -89,7 +89,7 @@ where
         let id = config.stream.id;
         let case_stream = Arc::new(Self {
             selector,
-            when_streams: RwLock::new(Vec::new()),
+            when_streams: ConstructionValue::new(Vec::new()),
         });
         source.try_set_consumer(Arc::clone(&case_stream), id)?;
         Ok(case_stream)
@@ -121,24 +121,18 @@ where
         M: Fn(&T) -> R + Send + Sync + 'static,
     {
         let output = Stream::new(&config.stream, self.environment.clone());
-        self.inner
-            .when_streams
-            .write()
-            .expect("case branches lock poisoned")
-            .push(Arc::new(WhenStream {
+        self.inner.when_streams.with_mut(|branches| {
+            branches.push(Arc::new(WhenStream {
                 output: output.clone(),
                 map,
                 _input: std::marker::PhantomData,
             }));
+        });
         output
     }
 
     pub fn len(&self) -> usize {
-        self.inner
-            .when_streams
-            .read()
-            .expect("case branches lock poisoned")
-            .len()
+        self.inner.when_streams.get().len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -174,15 +168,12 @@ where
 {
     async fn consume(&self, context: MessageContext, payload: Payload<T>) {
         let index = self.selector.select(&payload);
-        let (branch, branch_count) = {
-            let when_streams = self
-                .when_streams
-                .read()
-                .expect("case when streams lock poisoned");
-            (when_streams.get(index).cloned(), when_streams.len())
-        };
-        let branch = branch.unwrap_or_else(|| {
-            panic!("case selector returned branch {index}, but only {branch_count} branches exist")
+        let branches = self.when_streams.get();
+        let branch = branches.get(index).unwrap_or_else(|| {
+            panic!(
+                "case selector returned branch {index}, but only {} branches exist",
+                branches.len()
+            )
         });
         let (context, span) = branch.stream().start_span(context, "stream.case");
         branch.consume_case(context, payload).instrument(span).await;

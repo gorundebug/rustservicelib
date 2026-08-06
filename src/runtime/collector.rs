@@ -24,22 +24,6 @@ where
     call_statistics: CallStatistics,
 }
 
-impl<T> Clone for Collector<T>
-where
-    T: Send + Sync + 'static,
-{
-    fn clone(&self) -> Self {
-        Self {
-            consumer: Arc::clone(&self.consumer),
-            caller: self.caller.clone(),
-            from: self.from.clone(),
-            to: self.to.clone(),
-            messages_total: self.messages_total.clone(),
-            call_statistics: self.call_statistics.clone(),
-        }
-    }
-}
-
 #[derive(Clone)]
 enum Caller {
     FunctionCall(bool),

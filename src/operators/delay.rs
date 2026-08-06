@@ -88,9 +88,10 @@ where
     async fn consume(&self, context: MessageContext, payload: Payload<T>) {
         let (context, span) = self.output.start_span(context, "stream.delay");
         async {
+            let (duration_payload, payload) = payload.share();
             let duration = self
                 .function
-                .duration(context.clone(), &self.output, payload.clone())
+                .duration(context.clone(), &self.output, duration_payload)
                 .await;
             if duration.is_zero() {
                 // Go deliberately emits a non-positive delay even for an already
@@ -101,7 +102,7 @@ where
             let output = self.output.clone();
             let delayed_context = context.clone();
             let error_context = context.clone();
-            let error_payload = payload.clone();
+            let (error_payload, payload) = payload.share();
             let scheduled = self
                 .output
                 .environment()

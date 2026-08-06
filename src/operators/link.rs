@@ -1,11 +1,11 @@
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
 use tracing::Instrument;
 
 use crate::runtime::{
-    common::{Consumer, MessageContext, Payload},
+    common::{ConstructionCell, Consumer, MessageContext, Payload},
     config::CycleLinkStreamConfig,
     environment::{RuntimeEnvironment, RuntimeError, RuntimeResult},
     stream::Stream,
@@ -25,7 +25,7 @@ where
     T: Send + Sync + 'static,
 {
     stream: Stream<T>,
-    source: RwLock<Option<Stream<T>>>,
+    source: ConstructionCell<Stream<T>>,
 }
 
 impl<T> LinkStream<T>
@@ -35,7 +35,7 @@ where
     pub fn make(config: &CycleLinkStreamConfig, environment: RuntimeEnvironment) -> Arc<Self> {
         Arc::new(Self {
             stream: Stream::new(&config.stream, environment),
-            source: RwLock::new(None),
+            source: ConstructionCell::empty(),
         })
     }
 
@@ -44,22 +44,21 @@ where
     }
 
     pub fn set_source(self: &Arc<Self>, source: &Stream<T>) -> RuntimeResult<()> {
-        let mut registered_source = self.source.write().expect("link source lock poisoned");
-        if registered_source.is_some() {
+        if self.source.get().is_some() {
             return Err(RuntimeError::SourceAlreadySet {
                 stream: self.stream.name(),
             });
         }
         source.try_set_consumer(Arc::clone(self), self.stream.id())?;
-        *registered_source = Some(source.clone());
-        Ok(())
+        self.source
+            .set(source.clone())
+            .map_err(|_| RuntimeError::SourceAlreadySet {
+                stream: self.stream.name(),
+            })
     }
 
     pub fn source(&self) -> Option<Stream<T>> {
-        self.source
-            .read()
-            .expect("link source lock poisoned")
-            .clone()
+        self.source.get().cloned()
     }
 }
 

@@ -1,10 +1,10 @@
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::runtime::{
     collector::{Collect, Collector},
-    common::{Consumer, MessageContext, Payload, RuntimeStream},
+    common::{ConstructionCell, Consumer, MessageContext, Payload, RuntimeStream},
     config::{RuntimeStreamConfig, StreamConfig},
     environment::{RuntimeEnvironment, RuntimeError, RuntimeResult},
     serde::{JsonSerde, Serde as ServiceSerde, StreamSerde, make_stream_serde},
@@ -25,7 +25,7 @@ where
     config_id: i32,
     environment: RuntimeEnvironment,
     name_override: Option<String>,
-    downstream: RwLock<Option<Collector<T>>>,
+    downstream: ConstructionCell<Collector<T>>,
     serde: Arc<dyn StreamSerde<T>>,
 }
 
@@ -82,7 +82,7 @@ where
                 config_id,
                 environment,
                 name_override: None,
-                downstream: RwLock::new(None),
+                downstream: ConstructionCell::empty(),
                 serde,
             }),
         }
@@ -111,7 +111,7 @@ where
                 config_id: id,
                 environment,
                 name_override: Some(name),
-                downstream: RwLock::new(None),
+                downstream: ConstructionCell::empty(),
                 serde,
             }),
         }
@@ -155,22 +155,12 @@ where
     where
         C: Consumer<T> + 'static,
     {
-        let mut downstream = self
-            .inner
-            .downstream
-            .write()
-            .expect("stream downstream lock poisoned");
-        if downstream.is_some() {
-            return Err(RuntimeError::ConsumerAlreadySet {
-                stream: self.name(),
-            });
-        }
         let semantics = self.inner.environment.call_semantics(self.id(), target_id);
         let function_call_async = self
             .inner
             .environment
             .function_call_async(self.id(), target_id);
-        *downstream = Some(Collector::new(
+        let collector = Collector::new(
             consumer,
             semantics,
             &self.inner.environment,
@@ -178,16 +168,17 @@ where
             target_id,
             self.name(),
             function_call_async,
-        )?);
-        Ok(())
-    }
-
-    pub fn collector(&self) -> Option<Collector<T>> {
+        )?;
         self.inner
             .downstream
-            .read()
-            .expect("stream downstream lock poisoned")
-            .clone()
+            .set(collector)
+            .map_err(|_| RuntimeError::ConsumerAlreadySet {
+                stream: self.name(),
+            })
+    }
+
+    pub(crate) fn collector(&self) -> Option<&Collector<T>> {
+        self.inner.downstream.get()
     }
 
     /// Starts the same per-operator span as Go's ServiceStream.StartSpan.
@@ -203,8 +194,7 @@ where
     }
 
     pub async fn emit(&self, context: MessageContext, payload: Payload<T>) {
-        let collector = self.collector();
-        if let Some(collector) = collector {
+        if let Some(collector) = self.inner.downstream.get() {
             collector.out_payload(context, payload).await;
         }
     }

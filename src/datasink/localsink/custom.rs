@@ -186,13 +186,14 @@ where
         span.in_scope(|| tracing::info!(event.name = "begin_request"));
         self.active_requests.inc();
         let started_at = Instant::now();
+        let (consume_value, value) = value.share();
         let result = self
             .handler
             .consume_message(
                 handler_context.clone(),
                 stream.as_ref(),
                 &mut handler_state,
-                value.clone(),
+                consume_value,
                 &self.result_stream,
             )
             .instrument(span.clone())
