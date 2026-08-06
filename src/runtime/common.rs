@@ -15,7 +15,7 @@ use opentelemetry::{
     propagation::{Extractor, Injector},
     trace::TraceContextExt,
 };
-use tokio::time::Instant;
+use tokio::{task::AbortHandle, time::Instant};
 use tokio_util::sync::CancellationToken;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -66,10 +66,14 @@ impl CancellationCallbacks {
 pub(crate) struct CancellationCallbackRegistration {
     callbacks: Weak<CancellationCallbacks>,
     id: Option<u64>,
+    deadline_task: Option<AbortHandle>,
 }
 
 impl Drop for CancellationCallbackRegistration {
     fn drop(&mut self) {
+        if let Some(deadline_task) = self.deadline_task.take() {
+            deadline_task.abort();
+        }
         let (Some(callbacks), Some(id)) = (self.callbacks.upgrade(), self.id) else {
             return;
         };
@@ -329,6 +333,7 @@ impl MessageContext {
             return CancellationCallbackRegistration {
                 callbacks: Weak::new(),
                 id: None,
+                deadline_task: None,
             };
         }
         let id = self
@@ -347,20 +352,23 @@ impl MessageContext {
                 return CancellationCallbackRegistration {
                     callbacks: Weak::new(),
                     id: None,
+                    deadline_task: None,
                 };
             }
             callbacks.insert(id, callback);
         }
-        if let Some(deadline) = self.deadline {
+        let deadline_task = self.deadline.map(|deadline| {
             let callbacks = Arc::clone(&self.cancellation_callbacks);
             tokio::spawn(async move {
                 tokio::time::sleep_until(deadline).await;
                 callbacks.invoke(id);
-            });
-        }
+            })
+            .abort_handle()
+        });
         CancellationCallbackRegistration {
             callbacks: Arc::downgrade(&self.cancellation_callbacks),
             id: Some(id),
+            deadline_task,
         }
     }
 
@@ -381,6 +389,42 @@ impl MessageContext {
             }
             None => self.cancellation.cancelled().await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_callback_still_fires() {
+        let context = MessageContext::with_timeout(Duration::from_secs(60));
+        let invoked = Arc::new(AtomicBool::new(false));
+        let callback_invoked = Arc::clone(&invoked);
+        let _registration = context.register_cancellation_callback(move || {
+            callback_invoked.store(true, Ordering::Release);
+        });
+
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
+
+        assert!(invoked.load(Ordering::Acquire));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_registration_aborts_deadline_task() {
+        let context = MessageContext::with_timeout(Duration::from_secs(60));
+        let callbacks = Arc::downgrade(&context.cancellation_callbacks);
+        let registration = context.register_cancellation_callback(|| {});
+        drop(context);
+
+        assert!(callbacks.upgrade().is_some());
+        drop(registration);
+        tokio::task::yield_now().await;
+
+        assert!(callbacks.upgrade().is_none());
     }
 }
 

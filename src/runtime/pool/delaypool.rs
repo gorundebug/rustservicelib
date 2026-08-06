@@ -1,10 +1,18 @@
 use std::{
     future::Future,
-    sync::{Arc, OnceLock},
+    pin::Pin,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
-use tokio::{sync::Mutex, task::JoinSet};
+use futures::{StreamExt, stream::FuturesUnordered};
+use tokio::{
+    sync::{Mutex, mpsc},
+    task::JoinHandle,
+};
 
 use crate::runtime::{
     common::MessageContext,
@@ -14,10 +22,20 @@ use crate::runtime::{
     },
 };
 
-#[derive(Default)]
 struct DelayPoolState {
     stopped: bool,
-    tasks: JoinSet<()>,
+    sender: Option<mpsc::UnboundedSender<ScheduledDelay>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+type BoxDelayTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
+struct ScheduledDelay {
+    context: MessageContext,
+    duration: Duration,
+    task: BoxDelayTask,
+    metrics: Option<DelayPoolMetrics>,
+    active_tasks: Arc<AtomicUsize>,
 }
 
 /// Go-compatible delay pool.
@@ -25,10 +43,24 @@ struct DelayPoolState {
 /// Context cancellation expedites an accepted task; the callback itself
 /// decides whether cancellation means "run now" or "skip". `DelayStream`
 /// uses the latter, exactly like the Go operator.
-#[derive(Default)]
 pub struct DelayPool {
     state: Mutex<DelayPoolState>,
     metrics: OnceLock<DelayPoolMetrics>,
+    active_tasks: Arc<AtomicUsize>,
+}
+
+impl Default for DelayPool {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(DelayPoolState {
+                stopped: false,
+                sender: None,
+                worker: None,
+            }),
+            metrics: OnceLock::new(),
+            active_tasks: Arc::new(AtomicUsize::new(0)),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -91,6 +123,24 @@ impl DelayPool {
         Ok(())
     }
 
+    async fn run(mut receiver: mpsc::UnboundedReceiver<ScheduledDelay>) {
+        let mut delays: FuturesUnordered<BoxDelayTask> = FuturesUnordered::new();
+        let mut accepting = true;
+        loop {
+            if !accepting {
+                while delays.next().await.is_some() {}
+                return;
+            }
+            tokio::select! {
+                scheduled = receiver.recv() => match scheduled {
+                    Some(scheduled) => delays.push(Box::pin(scheduled.run())),
+                    None => accepting = false,
+                },
+                _ = delays.next(), if !delays.is_empty() => {}
+            }
+        }
+    }
+
     pub async fn delay<F>(
         &self,
         context: MessageContext,
@@ -109,13 +159,6 @@ impl DelayPool {
             return Err(RuntimeError::ResourceStopped("delay".to_owned()));
         }
 
-        // JoinSet keeps completed task outputs until they are joined. A delay
-        // is created for every request in soft-deadline pipelines, so leaving
-        // those outputs in the set makes memory and scheduler bookkeeping grow
-        // without bound during sustained traffic. Reap them before accepting
-        // the next task; shutdown still joins the tasks that remain active.
-        while state.tasks.try_join_next().is_some() {}
-
         let duration = context
             .deadline()
             .map(|deadline| deadline.saturating_duration_since(tokio::time::Instant::now()))
@@ -124,31 +167,32 @@ impl DelayPool {
         if let Some(metrics) = &metrics {
             metrics.wait_queue_length.inc();
         }
-        state.tasks.spawn(async move {
-            let mut cancelled = false;
-            if !duration.is_zero() {
-                tokio::select! {
-                    _ = tokio::time::sleep(duration) => {}
-                    _ = context.cancelled() => {
-                        cancelled = true;
-                    }
-                }
-            }
+        self.active_tasks.fetch_add(1, Ordering::Relaxed);
+        if state.sender.is_none() {
+            let (sender, receiver) = mpsc::unbounded_channel();
+            state.sender = Some(sender);
+            state.worker = Some(tokio::spawn(Self::run(receiver)));
+        }
+        let scheduled = ScheduledDelay {
+            context,
+            duration,
+            task: Box::pin(task),
+            metrics: metrics.clone(),
+            active_tasks: Arc::clone(&self.active_tasks),
+        };
+        if state
+            .sender
+            .as_ref()
+            .expect("delay worker sender initialized")
+            .send(scheduled)
+            .is_err()
+        {
             if let Some(metrics) = &metrics {
                 metrics.wait_queue_length.dec();
-                if cancelled {
-                    metrics.task_cancelled.inc();
-                }
             }
-            let started_at = Instant::now();
-            super::run_task("delay", Box::pin(task)).await;
-            if let Some(metrics) = &metrics {
-                metrics.tasks_total.inc();
-                metrics
-                    .execution_duration
-                    .observe(started_at.elapsed().as_secs_f64());
-            }
-        });
+            self.active_tasks.fetch_sub(1, Ordering::Relaxed);
+            return Err(RuntimeError::ResourceStopped("delay".to_owned()));
+        }
         Ok(())
     }
 
@@ -157,15 +201,17 @@ impl DelayPool {
     }
 
     pub async fn stop_with_context(&self, context: MessageContext) {
-        let mut tasks = {
+        let worker = {
             let mut state = self.state.lock().await;
             state.stopped = true;
-            std::mem::take(&mut state.tasks)
+            state.sender.take();
+            state.worker.take()
         };
-        let wait = async move { while tasks.join_next().await.is_some() {} };
-        tokio::pin!(wait);
+        let Some(mut worker) = worker else {
+            return;
+        };
         let timed_out = tokio::select! {
-            _ = &mut wait => false,
+            _ = &mut worker => false,
             _ = context.cancelled() => true,
         };
         if timed_out {
@@ -173,8 +219,44 @@ impl DelayPool {
                 metrics.stop_timeout.inc();
             }
             tracing::warn!("delay pool stopped by timeout");
-            wait.await;
+            let _ = worker.await;
         }
+    }
+}
+
+impl ScheduledDelay {
+    async fn run(self) {
+        let Self {
+            context,
+            duration,
+            task,
+            metrics,
+            active_tasks,
+        } = self;
+        let mut cancelled = false;
+        if !duration.is_zero() {
+            tokio::select! {
+                _ = tokio::time::sleep(duration) => {}
+                _ = context.cancelled() => {
+                    cancelled = true;
+                }
+            }
+        }
+        if let Some(metrics) = &metrics {
+            metrics.wait_queue_length.dec();
+            if cancelled {
+                metrics.task_cancelled.inc();
+            }
+        }
+        let started_at = Instant::now();
+        super::run_task("delay", task).await;
+        if let Some(metrics) = &metrics {
+            metrics.tasks_total.inc();
+            metrics
+                .execution_duration
+                .observe(started_at.elapsed().as_secs_f64());
+        }
+        active_tasks.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -187,7 +269,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn reaps_completed_tasks_while_running() {
+    async fn does_not_retain_completed_tasks_while_running() {
         let pool = DelayPool::new();
         let completed = Arc::new(AtomicUsize::new(0));
         const TASKS: usize = 1_000;
@@ -212,7 +294,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(pool.state.lock().await.tasks.len(), 1);
+        assert_eq!(pool.active_tasks.load(Ordering::Acquire), 1);
         let _ = release.send(());
         pool.stop().await;
     }
