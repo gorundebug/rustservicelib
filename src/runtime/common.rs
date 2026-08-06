@@ -11,6 +11,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use axum::http::HeaderMap;
 use opentelemetry::{
     Context as OpenTelemetryContext, global,
     propagation::{Extractor, Injector},
@@ -65,7 +66,6 @@ impl<T> ConstructionCell<T> {
         // one thread before the graph is published to runtime workers.
         unsafe { (&mut *self.value.get()).replace(value) }
     }
-
 }
 
 /// A field that always has a value and may only be mutated while the graph is
@@ -170,6 +170,18 @@ impl Extractor for MetadataExtractor<'_> {
 
     fn keys(&self) -> Vec<&str> {
         self.0.keys().map(String::as_str).collect()
+    }
+}
+
+struct HeaderExtractor<'a>(&'a HeaderMap);
+
+impl Extractor for HeaderExtractor<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key)?.to_str().ok()
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.keys().map(axum::http::HeaderName::as_str).collect()
     }
 }
 
@@ -286,6 +298,25 @@ impl MessageContext {
             || self.open_telemetry.span().span_context().is_sampled();
         self.metadata = Arc::new(metadata);
         self
+    }
+
+    /// Builds the transport tracing state without copying every HTTP header
+    /// into framework metadata. HTTP datasource endpoints still preserve all
+    /// request headers in their own `MessageContext`; this constructor is for
+    /// transport middleware that only needs propagation and sampling state.
+    pub(crate) fn from_http_headers(headers: &HeaderMap) -> Self {
+        let open_telemetry = global::get_text_map_propagator(|propagator| {
+            propagator.extract(&HeaderExtractor(headers))
+        });
+        let sampling_enabled = headers
+            .get(TRACE_SAMPLING_HEADER)
+            .is_some_and(|value| !value.is_empty())
+            || open_telemetry.span().span_context().is_sampled();
+        Self {
+            open_telemetry,
+            sampling_enabled,
+            ..Self::new()
+        }
     }
 
     pub fn with_stream_id(mut self, stream_id: impl Into<String>) -> Self {

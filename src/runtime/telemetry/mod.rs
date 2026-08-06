@@ -1,8 +1,9 @@
 use std::{
-    collections::BTreeMap,
+    collections::HashMap,
     fmt::Display,
     future::Future,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
     time::Instant,
 };
@@ -10,7 +11,7 @@ use std::{
 use axum::{
     body::Body,
     extract::{MatchedPath, Request, State},
-    http::{HeaderMap, Response},
+    http::{HeaderMap, Method, Response},
     middleware::Next,
 };
 use http_body::{Body as HttpBody, Frame, SizeHint};
@@ -21,7 +22,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::runtime::{
     common::MessageContext,
-    environment::metrics::{Labels, Metrics},
+    environment::metrics::{Float64Histogram, Int64Gauge, Labels, Metrics, MetricsScope},
 };
 
 pub mod opentelemetry;
@@ -60,6 +61,9 @@ pub(crate) const DURATION_BUCKETS_SECONDS: &[f64] = &[
 const BODY_SIZE_BUCKETS_BYTES: &[f64] = &[
     64.0, 256.0, 1024.0, 4096.0, 16384.0, 65536.0, 262144.0, 1048576.0,
 ];
+pub(crate) const HTTP_STATUS_CODES: &[u16] = &[
+    200, 201, 202, 204, 400, 401, 403, 404, 405, 408, 409, 413, 415, 422, 429, 500, 502, 503, 504,
+];
 
 /// Record the OpenTelemetry error status as well as a human-readable error
 /// field. The special `otel.status_*` fields are consumed by
@@ -72,19 +76,23 @@ pub(crate) fn record_span_error(span: &tracing::Span, error: impl Display) {
 }
 
 pub(crate) struct HttpClientObservation {
-    metrics: Metrics,
-    labels: Labels,
+    metrics: HttpClientMetrics,
     started_at: Instant,
     request_body_size: usize,
 }
 
-impl HttpClientObservation {
-    pub(crate) fn start(
-        metrics: Metrics,
-        method: &str,
-        url: &str,
-        request_body_size: usize,
-    ) -> Self {
+#[derive(Clone)]
+pub(crate) struct HttpClientMetrics {
+    inner: Arc<HttpClientMetricsInner>,
+}
+
+struct HttpClientMetricsInner {
+    outcomes: HashMap<u16, HttpOutcomeMetrics>,
+    transport_error: HttpOutcomeMetrics,
+}
+
+impl HttpClientMetrics {
+    pub(crate) fn new(metrics: Metrics, method: &str, url: &str) -> Self {
         let parsed = reqwest::Url::parse(url).ok();
         let server_address = parsed
             .as_ref()
@@ -95,61 +103,69 @@ impl HttpClientObservation {
             .as_ref()
             .and_then(reqwest::Url::port_or_known_default)
             .map_or_else(String::new, |port| port.to_string());
+        let labels = [
+            ("http_request_method".to_owned(), method.to_owned()),
+            ("url_full".to_owned(), url.to_owned()),
+            ("server_address".to_owned(), server_address),
+            ("server_port".to_owned(), server_port),
+            ("network_protocol_version".to_owned(), String::new()),
+        ]
+        .into_iter()
+        .collect::<Labels>();
+        let scope = metrics.scope("http_client", Labels::new());
+        let outcomes = HTTP_STATUS_CODES
+            .iter()
+            .copied()
+            .map(|status| {
+                let mut labels = labels.clone();
+                labels.insert("http_response_status_code".to_owned(), status.to_string());
+                labels.insert("error_type".to_owned(), String::new());
+                (status, HttpOutcomeMetrics::new_with_labels(&scope, labels))
+            })
+            .collect();
+        let mut error_labels = labels;
+        error_labels.insert("http_response_status_code".to_owned(), "500".to_owned());
+        error_labels.insert("error_type".to_owned(), "transport_error".to_owned());
         Self {
-            metrics,
-            labels: [
-                ("http_request_method".to_owned(), method.to_owned()),
-                ("url_full".to_owned(), url.to_owned()),
-                ("server_address".to_owned(), server_address),
-                ("server_port".to_owned(), server_port),
-                ("network_protocol_version".to_owned(), String::new()),
-            ]
-            .into_iter()
-            .collect(),
+            inner: Arc::new(HttpClientMetricsInner {
+                outcomes,
+                transport_error: HttpOutcomeMetrics::new_with_labels(&scope, error_labels),
+            }),
+        }
+    }
+
+    pub(crate) fn start(&self, request_body_size: usize) -> HttpClientObservation {
+        HttpClientObservation {
+            metrics: self.clone(),
             started_at: Instant::now(),
             request_body_size,
         }
     }
+}
 
+impl HttpClientObservation {
     pub(crate) fn finish(
         self,
         status: Option<u16>,
         response_body_size: Option<usize>,
-        error: Option<&str>,
+        error: bool,
     ) {
-        let mut labels = self.labels;
-        labels.insert(
-            "http_response_status_code".to_owned(),
-            status.map_or_else(|| "500".to_owned(), |status| status.to_string()),
-        );
-        labels.insert(
-            "error_type".to_owned(),
-            error.unwrap_or_default().to_owned(),
-        );
-        let scope = self.metrics.scope("http_client", Labels::new());
-        if let Ok(duration) = scope.histogram(
-            "request_duration_seconds",
-            "Duration of an HTTP client request in seconds",
-            labels.clone(),
-            Some(DURATION_BUCKETS_SECONDS.to_vec()),
-        ) {
+        let metrics = if error {
+            &self.metrics.inner.transport_error
+        } else {
+            status
+                .and_then(|status| self.metrics.inner.outcomes.get(&status))
+                .or_else(|| self.metrics.inner.outcomes.get(&500))
+                .expect("HTTP client metrics must register status 500")
+        };
+        if let Some(duration) = &metrics.request_duration {
             duration.observe(self.started_at.elapsed().as_secs_f64());
         }
-        if let Ok(size) = scope.histogram(
-            "request_body_size_bytes",
-            "Size of an HTTP client request body in bytes",
-            labels.clone(),
-            Some(BODY_SIZE_BUCKETS_BYTES.to_vec()),
-        ) {
+        if let Some(size) = &metrics.request_body_size {
             size.observe(self.request_body_size as f64);
         }
         if let Some(response_body_size) = response_body_size
-            && let Ok(size) = scope.histogram(
-                "response_body_size_bytes",
-                "Size of an HTTP client response body in bytes",
-                labels,
-                Some(BODY_SIZE_BUCKETS_BYTES.to_vec()),
-            )
+            && let Some(size) = &metrics.response_body_size
         {
             size.observe(response_body_size as f64);
         }
@@ -157,52 +173,238 @@ impl HttpClientObservation {
 }
 
 pub(crate) struct GrpcClientObservation {
-    metrics: Metrics,
-    method: String,
+    metrics: GrpcClientMetrics,
     started_at: Instant,
 }
 
-impl GrpcClientObservation {
-    pub(crate) fn start(metrics: Metrics, method: impl Into<String>) -> Self {
+#[derive(Clone)]
+pub(crate) struct GrpcClientMetrics {
+    inner: Arc<GrpcClientMetricsInner>,
+}
+
+struct GrpcClientMetricsInner {
+    durations: HashMap<&'static str, Option<Float64Histogram>>,
+}
+
+impl GrpcClientMetrics {
+    pub(crate) fn new(metrics: Metrics, method: &str) -> Self {
+        let scope = metrics.scope("rpc_client", Labels::new());
+        let base_labels = [
+            ("rpc_system_name".to_owned(), "grpc".to_owned()),
+            ("rpc_method".to_owned(), method.to_owned()),
+        ]
+        .into_iter()
+        .collect::<Labels>();
+        let durations = GRPC_STATUS_NAMES
+            .into_iter()
+            .map(|status| {
+                let mut labels = base_labels.clone();
+                labels.insert("rpc_response_status_code".to_owned(), status.to_owned());
+                let histogram = scope
+                    .histogram(
+                        "call_duration_seconds",
+                        "Duration of a gRPC client call in seconds",
+                        labels,
+                        Some(DURATION_BUCKETS_SECONDS.to_vec()),
+                    )
+                    .ok();
+                (status, histogram)
+            })
+            .collect();
         Self {
-            metrics,
-            method: method.into(),
+            inner: Arc::new(GrpcClientMetricsInner { durations }),
+        }
+    }
+
+    pub(crate) fn start(&self) -> GrpcClientObservation {
+        GrpcClientObservation {
+            metrics: self.clone(),
             started_at: Instant::now(),
         }
     }
 
-    pub(crate) fn finish(self, status: &str) {
-        let labels = [
-            ("rpc_system_name".to_owned(), "grpc".to_owned()),
-            ("rpc_method".to_owned(), self.method),
-            ("rpc_response_status_code".to_owned(), status.to_owned()),
-        ]
-        .into_iter()
-        .collect();
-        if let Ok(duration) = self.metrics.scope("rpc_client", Labels::new()).histogram(
-            "call_duration_seconds",
-            "Duration of a gRPC client call in seconds",
-            labels,
-            Some(DURATION_BUCKETS_SECONDS.to_vec()),
-        ) {
-            duration.observe(self.started_at.elapsed().as_secs_f64());
+    pub(crate) fn observe(&self, status: &str, duration: f64) {
+        let status = grpc_status_name(status);
+        if let Some(Some(histogram)) = self.inner.durations.get(status) {
+            histogram.observe(duration);
         }
     }
 }
 
+impl GrpcClientObservation {
+    pub(crate) fn finish(self, status: &str) {
+        self.metrics
+            .observe(status, self.started_at.elapsed().as_secs_f64());
+    }
+}
+
+type HttpRouteMap = HashMap<Method, HashMap<String, Arc<HttpRouteMetrics>>>;
+
 #[derive(Clone)]
 pub(crate) struct HttpServerMetrics {
-    metrics: Metrics,
-    host: String,
+    routes: Arc<HttpRouteMap>,
+    fallback: Arc<HttpRouteMetrics>,
+    host: Arc<str>,
     port: u16,
 }
 
+pub(crate) struct HttpRouteMetricSpec {
+    pub(crate) method: Method,
+    pub(crate) route: String,
+    pub(crate) statuses: Vec<u16>,
+}
+
+struct HttpRouteMetrics {
+    method: String,
+    route: String,
+    active_requests: Option<Int64Gauge>,
+    outcomes: HashMap<u16, HttpOutcomeMetrics>,
+}
+
+struct HttpOutcomeMetrics {
+    request_duration: Option<Float64Histogram>,
+    request_body_size: Option<Float64Histogram>,
+    response_body_size: Option<Float64Histogram>,
+}
+
 impl HttpServerMetrics {
-    pub(crate) fn new(metrics: Metrics, host: String, port: u16) -> Self {
+    pub(crate) fn new(
+        metrics: Metrics,
+        host: String,
+        port: u16,
+        specs: Vec<HttpRouteMetricSpec>,
+    ) -> Self {
+        let host: Arc<str> = host.into();
+        let scope = metrics.scope("http_server", Labels::new());
+        let base_labels = [
+            ("url_scheme".to_owned(), "http".to_owned()),
+            ("server_address".to_owned(), host.to_string()),
+            ("server_port".to_owned(), port.to_string()),
+        ]
+        .into_iter()
+        .collect::<Labels>();
+        let mut routes = HttpRouteMap::new();
+        for spec in specs {
+            let metrics = Arc::new(HttpRouteMetrics::new(
+                scope.clone(),
+                base_labels.clone(),
+                &spec.method,
+                &spec.route,
+                spec.statuses,
+            ));
+            routes
+                .entry(spec.method)
+                .or_default()
+                .insert(spec.route, metrics);
+        }
+        let fallback = Arc::new(HttpRouteMetrics::new(
+            scope,
+            base_labels,
+            &Method::GET,
+            "<unmatched>",
+            HTTP_STATUS_CODES.to_vec(),
+        ));
         Self {
-            metrics,
+            routes: Arc::new(routes),
+            fallback,
             host,
             port,
+        }
+    }
+
+    fn route(&self, method: &Method, route: &str) -> Arc<HttpRouteMetrics> {
+        self.routes
+            .get(method)
+            .and_then(|routes| routes.get(route))
+            .map_or_else(|| Arc::clone(&self.fallback), Arc::clone)
+    }
+}
+
+impl HttpRouteMetrics {
+    fn new(
+        scope: MetricsScope,
+        mut base_labels: Labels,
+        method: &Method,
+        route: &str,
+        statuses: Vec<u16>,
+    ) -> Self {
+        let method = method.as_str().to_owned();
+        let route = route.to_owned();
+        base_labels.insert("http_request_method".to_owned(), method.clone());
+        base_labels.insert("http_route".to_owned(), route.clone());
+        let active_requests = scope
+            .gauge(
+                "active_requests",
+                "Number of active HTTP server requests",
+                base_labels.clone(),
+            )
+            .ok();
+        let outcomes = statuses
+            .into_iter()
+            .map(|status| {
+                (
+                    status,
+                    HttpOutcomeMetrics::new(&scope, &base_labels, status),
+                )
+            })
+            .collect();
+        Self {
+            method,
+            route,
+            active_requests,
+            outcomes,
+        }
+    }
+
+    fn outcome(&self, status: u16) -> &HttpOutcomeMetrics {
+        self.outcomes
+            .get(&status)
+            .or_else(|| self.outcomes.get(&500))
+            .expect("HTTP metric route must register status 500")
+    }
+}
+
+impl HttpOutcomeMetrics {
+    fn new(scope: &MetricsScope, base_labels: &Labels, status: u16) -> Self {
+        let mut labels = base_labels.clone();
+        labels.insert("http_response_status_code".to_owned(), status.to_string());
+        labels.insert(
+            "error_type".to_owned(),
+            if status >= 500 {
+                "http_server_error".to_owned()
+            } else {
+                String::new()
+            },
+        );
+        Self::new_with_labels(scope, labels)
+    }
+
+    fn new_with_labels(scope: &MetricsScope, labels: Labels) -> Self {
+        Self {
+            request_duration: scope
+                .histogram(
+                    "request_duration_seconds",
+                    "Duration of an HTTP server request in seconds",
+                    labels.clone(),
+                    Some(DURATION_BUCKETS_SECONDS.to_vec()),
+                )
+                .ok(),
+            request_body_size: scope
+                .histogram(
+                    "request_body_size_bytes",
+                    "Size of an HTTP server request body in bytes",
+                    labels.clone(),
+                    Some(BODY_SIZE_BUCKETS_BYTES.to_vec()),
+                )
+                .ok(),
+            response_body_size: scope
+                .histogram(
+                    "response_body_size_bytes",
+                    "Size of an HTTP server response body in bytes",
+                    labels,
+                    Some(BODY_SIZE_BUCKETS_BYTES.to_vec()),
+                )
+                .ok(),
         }
     }
 }
@@ -216,51 +418,20 @@ fn content_length(headers: &HeaderMap) -> Option<f64> {
         .ok()
 }
 
-fn base_labels(state: &HttpServerMetrics, method: &str, route: &str) -> BTreeMap<String, String> {
-    [
-        ("http_request_method".to_owned(), method.to_owned()),
-        ("http_route".to_owned(), route.to_owned()),
-        ("url_scheme".to_owned(), "http".to_owned()),
-        ("server_address".to_owned(), state.host.clone()),
-        ("server_port".to_owned(), state.port.to_string()),
-    ]
-    .into_iter()
-    .collect()
-}
-
 pub(crate) async fn observe_http_server_request(
     State(state): State<HttpServerMetrics>,
     request: Request,
     next: Next,
 ) -> Response<Body> {
-    let method = request.method().as_str().to_owned();
-    let route = request.extensions().get::<MatchedPath>().map_or_else(
-        || request.uri().path().to_owned(),
-        |path| path.as_str().to_owned(),
-    );
+    let method = request.method().clone();
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or_else(|| request.uri().path(), MatchedPath::as_str);
+    let route_metrics = state.route(&method, route);
     let request_body_size = content_length(request.headers());
-    let incoming_context = MessageContext::new().with_metadata(
-        request
-            .headers()
-            .iter()
-            .filter_map(|(name, value)| {
-                value
-                    .to_str()
-                    .ok()
-                    .map(|value| (name.as_str().to_owned(), value.to_owned()))
-            })
-            .collect(),
-    );
-    let base_labels = base_labels(&state, &method, &route);
-    let scope = state.metrics.scope("http_server", Labels::new());
-    let active = scope
-        .gauge(
-            "active_requests",
-            "Number of active HTTP server requests",
-            base_labels.clone(),
-        )
-        .ok();
-    if let Some(active) = &active {
+    let incoming_context = MessageContext::from_http_headers(request.headers());
+    if let Some(active) = &route_metrics.active_requests {
         active.inc();
     }
 
@@ -268,8 +439,8 @@ pub(crate) async fn observe_http_server_request(
     let span = if incoming_context.sampling_enabled() {
         let span = tracing::info_span!(
             "http.server.request",
-            http.request.method = %method,
-            http.route = %route,
+            http.request.method = %route_metrics.method,
+            http.route = %route_metrics.route,
             server.address = %state.host,
             server.port = state.port,
             error = tracing::field::Empty,
@@ -282,7 +453,7 @@ pub(crate) async fn observe_http_server_request(
         tracing::Span::none()
     };
     let response = next.run(request).instrument(span.clone()).await;
-    if let Some(active) = &active {
+    if let Some(active) = &route_metrics.active_requests {
         active.dec();
     }
 
@@ -290,52 +461,26 @@ pub(crate) async fn observe_http_server_request(
     if status.is_server_error() {
         record_span_error(&span, format!("HTTP status {}", status.as_u16()));
     }
-    let mut labels = base_labels;
-    labels.insert(
-        "http_response_status_code".to_owned(),
-        status.as_u16().to_string(),
-    );
-    labels.insert(
-        "error_type".to_owned(),
-        if status.is_server_error() {
-            "http_server_error".to_owned()
-        } else {
-            String::new()
-        },
-    );
-    if let Ok(duration) = scope.histogram(
-        "request_duration_seconds",
-        "Duration of an HTTP server request in seconds",
-        labels.clone(),
-        Some(DURATION_BUCKETS_SECONDS.to_vec()),
-    ) {
-        duration.observe(started_at.elapsed().as_secs_f64());
+    let metrics = route_metrics.outcome(status.as_u16());
+    let elapsed = started_at.elapsed().as_secs_f64();
+    if let Some(duration) = &metrics.request_duration {
+        duration.observe(elapsed);
     }
     if let Some(size) = request_body_size
-        && let Ok(histogram) = scope.histogram(
-            "request_body_size_bytes",
-            "Size of an HTTP server request body in bytes",
-            labels.clone(),
-            Some(BODY_SIZE_BUCKETS_BYTES.to_vec()),
-        )
+        && let Some(histogram) = &metrics.request_body_size
     {
         histogram.observe(size);
     }
     if let Some(size) = content_length(response.headers())
-        && let Ok(histogram) = scope.histogram(
-            "response_body_size_bytes",
-            "Size of an HTTP server response body in bytes",
-            labels,
-            Some(BODY_SIZE_BUCKETS_BYTES.to_vec()),
-        )
+        && let Some(histogram) = &metrics.response_body_size
     {
         histogram.observe(size);
     }
     tracing::info!(
-        http.request.method = %method,
-        http.route = %route,
+        http.request.method = %route_metrics.method,
+        http.route = %route_metrics.route,
         http.response.status_code = status.as_u16(),
-        duration_seconds = started_at.elapsed().as_secs_f64(),
+        duration_seconds = elapsed,
         "HTTP request completed"
     );
     response
@@ -343,12 +488,14 @@ pub(crate) async fn observe_http_server_request(
 
 #[derive(Clone)]
 pub(crate) struct GrpcServerMetricsLayer {
-    metrics: Metrics,
+    metrics: GrpcServerMetrics,
 }
 
 impl GrpcServerMetricsLayer {
-    pub(crate) fn new(metrics: Metrics) -> Self {
-        Self { metrics }
+    pub(crate) fn new(metrics: Metrics, methods: Vec<String>) -> Self {
+        Self {
+            metrics: GrpcServerMetrics::new(metrics, methods),
+        }
     }
 }
 
@@ -366,17 +513,107 @@ impl<S> Layer<S> for GrpcServerMetricsLayer {
 #[derive(Clone)]
 pub(crate) struct GrpcServerMetricsService<S> {
     inner: S,
-    metrics: Metrics,
+    metrics: GrpcServerMetrics,
+}
+
+type GrpcMethodMap = HashMap<String, Arc<GrpcMethodMetrics>>;
+
+#[derive(Clone)]
+struct GrpcServerMetrics {
+    methods: Arc<GrpcMethodMap>,
+    fallback: Arc<GrpcMethodMetrics>,
+}
+
+struct GrpcMethodMetrics {
+    method: String,
+    durations: HashMap<&'static str, Option<Float64Histogram>>,
 }
 
 struct GrpcCallObservation {
-    metrics: Metrics,
-    method: String,
+    metrics: Arc<GrpcMethodMetrics>,
     started_at: Instant,
     span: tracing::Span,
 }
 
-fn grpc_status_name(status: &str) -> String {
+const GRPC_STATUS_NAMES: [&str; 17] = [
+    "OK",
+    "CANCELLED",
+    "UNKNOWN",
+    "INVALID_ARGUMENT",
+    "DEADLINE_EXCEEDED",
+    "NOT_FOUND",
+    "ALREADY_EXISTS",
+    "PERMISSION_DENIED",
+    "RESOURCE_EXHAUSTED",
+    "FAILED_PRECONDITION",
+    "ABORTED",
+    "OUT_OF_RANGE",
+    "UNIMPLEMENTED",
+    "INTERNAL",
+    "UNAVAILABLE",
+    "DATA_LOSS",
+    "UNAUTHENTICATED",
+];
+
+impl GrpcServerMetrics {
+    fn new(metrics: Metrics, methods: Vec<String>) -> Self {
+        let scope = metrics.scope("rpc_server", Labels::new());
+        let methods = methods
+            .into_iter()
+            .map(|method| {
+                let metrics = Arc::new(GrpcMethodMetrics::new(&scope, &method));
+                (method, metrics)
+            })
+            .collect();
+        Self {
+            methods: Arc::new(methods),
+            fallback: Arc::new(GrpcMethodMetrics::new(&scope, "<unmatched>")),
+        }
+    }
+
+    fn method(&self, method: &str) -> Arc<GrpcMethodMetrics> {
+        self.methods
+            .get(method)
+            .map_or_else(|| Arc::clone(&self.fallback), Arc::clone)
+    }
+}
+
+impl GrpcMethodMetrics {
+    fn new(scope: &MetricsScope, method: &str) -> Self {
+        let method = method.to_owned();
+        let base_labels = [
+            ("rpc_system_name".to_owned(), "grpc".to_owned()),
+            ("rpc_method".to_owned(), method.clone()),
+        ]
+        .into_iter()
+        .collect::<Labels>();
+        let durations = GRPC_STATUS_NAMES
+            .into_iter()
+            .map(|status| {
+                let mut labels = base_labels.clone();
+                labels.insert("rpc_response_status_code".to_owned(), status.to_owned());
+                let histogram = scope
+                    .histogram(
+                        "call_duration_seconds",
+                        "Duration of a gRPC server call in seconds",
+                        labels,
+                        Some(DURATION_BUCKETS_SECONDS.to_vec()),
+                    )
+                    .ok();
+                (status, histogram)
+            })
+            .collect();
+        Self { method, durations }
+    }
+
+    fn observe(&self, status: &'static str, duration: f64) {
+        if let Some(Some(histogram)) = self.durations.get(status) {
+            histogram.observe(duration);
+        }
+    }
+}
+
+fn grpc_status_name(status: &str) -> &'static str {
     match status {
         "0" => "OK",
         "1" => "CANCELLED",
@@ -395,9 +632,12 @@ fn grpc_status_name(status: &str) -> String {
         "14" => "UNAVAILABLE",
         "15" => "DATA_LOSS",
         "16" => "UNAUTHENTICATED",
-        other => other,
+        _ => GRPC_STATUS_NAMES
+            .iter()
+            .copied()
+            .find(|candidate| *candidate == status)
+            .unwrap_or("UNKNOWN"),
     }
-    .to_owned()
 }
 
 fn tonic_code_name(code: tonic::Code) -> &'static str {
@@ -429,32 +669,19 @@ pub(crate) fn grpc_error_status(error: &(dyn std::error::Error + 'static)) -> &'
 }
 
 impl GrpcCallObservation {
-    fn finish(self, status: impl Into<String>) {
-        let status = grpc_status_name(&status.into());
+    fn finish(self, status: &str) {
+        let status = grpc_status_name(status);
         if status != "OK" {
             record_span_error(&self.span, format!("gRPC status {status}"));
         }
-        let labels = [
-            ("rpc_system_name".to_owned(), "grpc".to_owned()),
-            ("rpc_method".to_owned(), self.method.clone()),
-            ("rpc_response_status_code".to_owned(), status.clone()),
-        ]
-        .into_iter()
-        .collect();
-        if let Ok(duration) = self.metrics.scope("rpc_server", Labels::new()).histogram(
-            "call_duration_seconds",
-            "Duration of a gRPC server call in seconds",
-            labels,
-            Some(DURATION_BUCKETS_SECONDS.to_vec()),
-        ) {
-            duration.observe(self.started_at.elapsed().as_secs_f64());
-        }
+        let elapsed = self.started_at.elapsed().as_secs_f64();
+        self.metrics.observe(status, elapsed);
         let _guard = self.span.enter();
         tracing::info!(
             rpc.system.name = "grpc",
-            rpc.method = %self.method,
+            rpc.method = %self.metrics.method,
             rpc.response.status_code = %status,
-            duration_seconds = self.started_at.elapsed().as_secs_f64(),
+            duration_seconds = elapsed,
             "gRPC call completed"
         );
     }
@@ -466,7 +693,7 @@ struct ObservedGrpcBody {
 }
 
 impl ObservedGrpcBody {
-    fn finish(&mut self, status: impl Into<String>) {
+    fn finish(&mut self, status: &str) {
         if let Some(observation) = self.observation.take() {
             observation.finish(status);
         }
@@ -498,8 +725,7 @@ impl HttpBody for ObservedGrpcBody {
                     let status = trailers
                         .get("grpc-status")
                         .and_then(|value| value.to_str().ok())
-                        .unwrap_or("OK")
-                        .to_owned();
+                        .unwrap_or("OK");
                     self.finish(status);
                 }
                 Poll::Ready(Some(Ok(frame)))
@@ -542,27 +768,17 @@ where
     }
 
     fn call(&mut self, request: axum::http::Request<B>) -> Self::Future {
-        let method = request.uri().path().trim_start_matches('/').to_owned();
-        let incoming_context = MessageContext::new().with_metadata(
-            request
-                .headers()
-                .iter()
-                .filter_map(|(name, value)| {
-                    value
-                        .to_str()
-                        .ok()
-                        .map(|value| (name.as_str().to_owned(), value.to_owned()))
-                })
-                .collect(),
-        );
+        let metrics = self
+            .metrics
+            .method(request.uri().path().trim_start_matches('/'));
+        let incoming_context = MessageContext::from_http_headers(request.headers());
         let started_at = Instant::now();
-        let metrics = self.metrics.clone();
         let future = self.inner.call(request);
         let span = if incoming_context.sampling_enabled() {
             let span = tracing::info_span!(
                 "grpc.server.call",
                 rpc.system.name = "grpc",
-                rpc.method = %method,
+                rpc.method = %metrics.method,
                 error = tracing::field::Empty,
                 otel.status_code = tracing::field::Empty,
                 otel.status_message = tracing::field::Empty,
@@ -578,7 +794,6 @@ where
                 Err(error) => {
                     GrpcCallObservation {
                         metrics,
-                        method,
                         started_at,
                         span,
                     }
@@ -590,13 +805,12 @@ where
                 .headers()
                 .get("grpc-status")
                 .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned);
+                .map(grpc_status_name);
             let (parts, body) = response.into_parts();
             let mut observed = ObservedGrpcBody {
                 inner: body,
                 observation: Some(GrpcCallObservation {
                     metrics,
-                    method,
                     started_at,
                     span,
                 }),

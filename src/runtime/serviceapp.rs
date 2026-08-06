@@ -25,12 +25,15 @@ use tonic::{
 
 use crate::runtime::{
     common::MessageContext,
-    config::{CallSemantics, ServiceConfig},
+    config::{CallSemantics, RuntimeEndpointConfig, RuntimeStreamConfig, ServiceConfig},
     datasink::DataSink,
     datasource::DataSource,
     environment::metrics::{Labels, Metrics},
     environment::{Lifecycle, RuntimeEnvironment, RuntimeError, RuntimeResult},
-    telemetry::{GrpcServerMetricsLayer, HttpServerMetrics, observe_http_server_request},
+    telemetry::{
+        GrpcServerMetricsLayer, HTTP_STATUS_CODES, HttpRouteMetricSpec, HttpServerMetrics,
+        observe_http_server_request,
+    },
 };
 
 async fn stop_with_connector_telemetry<T: ?Sized + Lifecycle>(
@@ -124,6 +127,7 @@ pub struct ServiceApp {
     http_shutdown: Mutex<CancellationToken>,
     http_task: AsyncMutex<Option<JoinHandle<Result<(), String>>>>,
     grpc_routes: Option<Routes>,
+    grpc_service_names: Vec<String>,
     grpc_shutdown: Mutex<CancellationToken>,
     grpc_task: AsyncMutex<Option<JoinHandle<Result<(), String>>>>,
     state: AsyncMutex<State>,
@@ -162,6 +166,7 @@ impl ServiceApp {
             http_shutdown: Mutex::new(CancellationToken::new()),
             http_task: AsyncMutex::new(None),
             grpc_routes: None,
+            grpc_service_names: Vec::new(),
             grpc_shutdown: Mutex::new(CancellationToken::new()),
             grpc_task: AsyncMutex::new(None),
             state: AsyncMutex::new(State::Created),
@@ -268,6 +273,7 @@ impl ServiceApp {
         S::Future: Send + 'static,
     {
         self.ensure_created()?;
+        self.grpc_service_names.push(S::NAME.to_owned());
         self.grpc_routes = Some(match self.grpc_routes.take() {
             Some(routes) => routes.add_service(service),
             None => Routes::new(service),
@@ -291,6 +297,7 @@ impl ServiceApp {
             .lock()
             .expect("service gRPC shutdown lock poisoned") = shutdown.clone();
         let routes_metrics = self.environment.metrics().clone();
+        let grpc_methods = self.grpc_metric_methods();
         *self.grpc_task.lock().await = Some(tokio::spawn(async move {
             tracing::info!(address = %address, "gRPC service listening");
             TonicServer::builder()
@@ -299,6 +306,7 @@ impl ServiceApp {
                     // This keeps transport and stream metrics in one scrape.
                     // The layer itself must not own transport lifecycle.
                     routes_metrics,
+                    grpc_methods,
                 ))
                 .add_routes(routes)
                 .serve_with_incoming_shutdown(
@@ -398,6 +406,7 @@ impl ServiceApp {
                 self.environment.metrics().clone(),
                 config.http_host.clone(),
                 config.http_port,
+                self.http_metric_specs(&config),
             ),
             observe_http_server_request,
         ));
@@ -417,6 +426,91 @@ impl ServiceApp {
                 .map_err(|error| error.to_string())
         }));
         Ok(())
+    }
+
+    fn http_metric_specs(&self, config: &ServiceConfig) -> Vec<HttpRouteMetricSpec> {
+        let runtime = self.environment.runtime_config();
+        let mut specs = runtime
+            .streams()
+            .into_iter()
+            .filter_map(|stream| match stream.as_ref() {
+                RuntimeStreamConfig::Input(input) => runtime.endpoint_by_id(input.endpoint_id),
+                _ => None,
+            })
+            .filter_map(|endpoint| match endpoint.as_ref() {
+                RuntimeEndpointConfig::Http(endpoint) => {
+                    let method = match endpoint.http_method_type {
+                        crate::api::HTTPMethodType::GET => axum::http::Method::GET,
+                        crate::api::HTTPMethodType::POST => axum::http::Method::POST,
+                        crate::api::HTTPMethodType::Undefined => return None,
+                    };
+                    Some(HttpRouteMetricSpec {
+                        method,
+                        route: endpoint.path.clone(),
+                        statuses: HTTP_STATUS_CODES.to_vec(),
+                    })
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if !config.status_handler.is_empty() {
+            let path = format!("/{}", config.status_handler.trim_start_matches('/'));
+            for suffix in ["", "/data", "/graph", "/vis.min.js", "/vis.min.css"] {
+                specs.push(HttpRouteMetricSpec {
+                    method: axum::http::Method::GET,
+                    route: format!("{path}{suffix}"),
+                    statuses: vec![200, 500],
+                });
+            }
+        }
+        if !config.metrics_handler.is_empty() && !self.environment.metrics().has_otel() {
+            specs.push(HttpRouteMetricSpec {
+                method: axum::http::Method::GET,
+                route: format!("/{}", config.metrics_handler.trim_start_matches('/')),
+                statuses: vec![200, 500],
+            });
+        }
+        specs
+    }
+
+    fn grpc_metric_methods(&self) -> Vec<String> {
+        let runtime = self.environment.runtime_config();
+        let endpoint_methods = runtime
+            .streams()
+            .into_iter()
+            .filter_map(|stream| match stream.as_ref() {
+                RuntimeStreamConfig::Input(input) => runtime.endpoint_by_id(input.endpoint_id),
+                _ => None,
+            })
+            .filter_map(|endpoint| match endpoint.as_ref() {
+                RuntimeEndpointConfig::Grpc(endpoint) => Some(
+                    endpoint
+                        .name
+                        .split(|character: char| !character.is_ascii_alphanumeric())
+                        .filter(|part| !part.is_empty())
+                        .map(|part| {
+                            let mut characters = part.chars();
+                            characters
+                                .next()
+                                .map(char::to_uppercase)
+                                .into_iter()
+                                .flatten()
+                                .chain(characters)
+                                .collect::<String>()
+                        })
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        self.grpc_service_names
+            .iter()
+            .flat_map(|service| {
+                endpoint_methods
+                    .iter()
+                    .map(move |method| format!("{service}/{method}"))
+            })
+            .collect()
     }
 
     pub async fn start(&self, context: MessageContext) -> RuntimeResult<()> {

@@ -19,7 +19,7 @@ use crate::{
             RuntimeResult,
             metrics::{Float64Histogram, Int64Counter, Int64Gauge, Labels},
         },
-        telemetry::{DURATION_BUCKETS_SECONDS, GrpcClientObservation, grpc_error_status},
+        telemetry::{GrpcClientMetrics, GrpcClientObservation, grpc_error_status},
     },
 };
 
@@ -199,7 +199,7 @@ pub(crate) struct EndpointMetrics {
     pub(crate) begin_request_failed: Int64Counter,
     pub(crate) active_requests: Int64Gauge,
     pub(crate) request_duration: Float64Histogram,
-    transport_metrics: crate::runtime::environment::metrics::Metrics,
+    grpc_client_metrics: GrpcClientMetrics,
     rpc_method: String,
 }
 
@@ -257,7 +257,10 @@ impl EndpointMetrics {
                 Labels::new(),
                 None,
             )?,
-            transport_metrics: stream.stream().environment().metrics().clone(),
+            grpc_client_metrics: GrpcClientMetrics::new(
+                stream.stream().environment().metrics().clone(),
+                endpoint_name,
+            ),
             rpc_method: endpoint_name.to_owned(),
         })
     }
@@ -279,7 +282,7 @@ impl EndpointMetrics {
     }
 
     pub(crate) fn grpc_client_start(&self) -> GrpcClientObservation {
-        GrpcClientObservation::start(self.transport_metrics.clone(), self.rpc_method.clone())
+        self.grpc_client_metrics.start()
     }
 
     pub(crate) fn grpc_client_end(&self, started_at: Instant, result: &HandlerResult) {
@@ -287,25 +290,8 @@ impl EndpointMetrics {
             Ok(()) => "OK",
             Err(error) => grpc_error_status(error.as_ref()),
         };
-        let labels = [
-            ("rpc_system_name".to_owned(), "grpc".to_owned()),
-            ("rpc_method".to_owned(), self.rpc_method.clone()),
-            ("rpc_response_status_code".to_owned(), status.to_owned()),
-        ]
-        .into_iter()
-        .collect();
-        if let Ok(duration) = self
-            .transport_metrics
-            .scope("rpc_client", Labels::new())
-            .histogram(
-                "call_duration_seconds",
-                "Duration of a gRPC client call in seconds",
-                labels,
-                Some(DURATION_BUCKETS_SECONDS.to_vec()),
-            )
-        {
-            duration.observe(started_at.elapsed().as_secs_f64());
-        }
+        self.grpc_client_metrics
+            .observe(status, started_at.elapsed().as_secs_f64());
     }
 
     pub(crate) fn rpc_method(&self) -> &str {

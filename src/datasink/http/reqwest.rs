@@ -16,7 +16,7 @@ use crate::{
         config::{HttpDataConnectorConfig, HttpEndpointConfig},
         datasink::SinkStreamContext,
         environment::{RuntimeResult, metrics::Labels},
-        telemetry::HttpClientObservation,
+        telemetry::HttpClientMetrics,
     },
 };
 
@@ -249,6 +249,7 @@ where
     begin_request_failed: crate::runtime::environment::metrics::Int64Counter,
     active_requests: crate::runtime::environment::metrics::Int64Gauge,
     request_duration: crate::runtime::environment::metrics::Float64Histogram,
+    http_client_metrics: HttpClientMetrics,
     _state: std::marker::PhantomData<fn(HandlerState)>,
 }
 
@@ -266,6 +267,23 @@ where
     E: Send + Sync + 'static,
     H: EndpointHandler<HandlerState, T, R, E> + 'static,
 {
+    let method = match endpoint_config.http_method_type {
+        crate::api::HTTPMethodType::GET => "GET",
+        crate::api::HTTPMethodType::POST => "POST",
+        crate::api::HTTPMethodType::Undefined => "",
+    };
+    let metric_url = format!(
+        "{}{}{}",
+        data_connector_config.address.trim_end_matches('/'),
+        if endpoint_config.path.starts_with('/') {
+            ""
+        } else {
+            "/"
+        },
+        endpoint_config.path
+    );
+    let http_client_metrics =
+        HttpClientMetrics::new(stream.environment().metrics().clone(), method, &metric_url);
     let scope = stream.environment().metrics().scope(
         "datasink_endpoint",
         labels(&[
@@ -309,6 +327,7 @@ where
             Labels::new(),
             None,
         )?,
+        http_client_metrics,
         _state: std::marker::PhantomData,
     });
     stream.set_sink_consumer(consumer.clone())?;
@@ -403,12 +422,7 @@ where
         };
         match request {
             Ok(request) => {
-                let observation = HttpClientObservation::start(
-                    stream.environment().metrics().clone(),
-                    &request.method,
-                    &request.url,
-                    request.body.len(),
-                );
+                let observation = self.http_client_metrics.start(request.body.len());
                 result = match self
                     .client
                     .perform(handler_context.clone(), request)
@@ -416,7 +430,7 @@ where
                     .await
                 {
                     Ok(response) => {
-                        observation.finish(Some(response.status), Some(response.body.len()), None);
+                        observation.finish(Some(response.status), Some(response.body.len()), false);
                         span.in_scope(|| {
                             tracing::info!(event.name = "http_call", status_code = response.status);
                         });
@@ -445,7 +459,7 @@ where
                     }
                     Err(error) => {
                         crate::runtime::telemetry::record_span_error(&span, &error);
-                        observation.finish(None, None, Some("transport_error"));
+                        observation.finish(None, None, true);
                         span.in_scope(|| {
                             tracing::error!(
                                 event.name = "http_call.error",
