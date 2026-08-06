@@ -330,11 +330,13 @@ async fn split_shares_payload_and_dispatches_async_branch_first() {
                 from: 2,
                 to: 3,
                 call_semantics: CallSemantics::ParallelCall,
+                r#async: false,
             },
             LinkConfig {
                 from: 2,
                 to: 4,
                 call_semantics: CallSemantics::FunctionCall,
+                r#async: false,
             },
         ],
     );

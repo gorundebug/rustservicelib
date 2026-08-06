@@ -42,13 +42,22 @@ where
 
 #[derive(Clone)]
 enum Caller {
-    FunctionCall,
+    FunctionCall(bool),
     ParallelCall,
     TaskPool(Arc<TaskPool>),
     PriorityTaskPool {
         pool: Arc<PriorityTaskPool>,
         priority: i32,
     },
+}
+
+impl Caller {
+    fn is_async(&self) -> bool {
+        match self {
+            Self::FunctionCall(r#async) => *r#async,
+            _ => true,
+        }
+    }
 }
 
 pub trait Collect<T>: Send + Sync
@@ -79,9 +88,10 @@ where
         source_id: i32,
         target_id: i32,
         source_name: String,
+        function_call_async: bool,
     ) -> RuntimeResult<Self> {
         let caller = match call_semantics.clone() {
-            CallSemantics::FunctionCall => Caller::FunctionCall,
+            CallSemantics::FunctionCall => Caller::FunctionCall(function_call_async),
             CallSemantics::ParallelCall => Caller::ParallelCall,
             CallSemantics::TaskPool { pool_name } => {
                 Caller::TaskPool(environment.task_pool(&pool_name)?)
@@ -132,7 +142,7 @@ where
     }
 
     pub fn is_async(&self) -> bool {
-        !matches!(self.caller, Caller::FunctionCall)
+        self.caller.is_async()
     }
 
     fn start_span(
@@ -179,6 +189,18 @@ where
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::Caller;
+
+    #[test]
+    fn function_call_async_flag_only_changes_caller_metadata() {
+        assert!(!Caller::FunctionCall(false).is_async());
+        assert!(Caller::FunctionCall(true).is_async());
+        assert!(Caller::ParallelCall.is_async());
+    }
+}
+
 fn short_type_name<T>() -> String {
     std::any::type_name::<T>()
         .rsplit("::")
@@ -199,7 +221,7 @@ where
         self.call_statistics.inc();
         self.messages_total.inc();
         match &self.caller {
-            Caller::FunctionCall => {
+            Caller::FunctionCall(_) => {
                 let (context, span) = self.start_span(context, None, None);
                 self.consumer
                     .consume(context, payload)

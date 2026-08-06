@@ -333,6 +333,13 @@ impl RuntimeEnvironment {
             .unwrap_or_else(|| self.runtime_config().default_call_semantics().clone())
     }
 
+    pub fn function_call_async(&self, from: i32, to: i32) -> bool {
+        self.runtime_config()
+            .link(from, to)
+            .filter(|link| matches!(link.call_semantics, CallSemantics::FunctionCall))
+            .is_some_and(|link| link.r#async)
+    }
+
     pub fn register_task_pool(&self, pool: Arc<TaskPool>) -> RuntimeResult<()> {
         pool.configure_metrics(self)?;
         let name = pool.name().to_owned();

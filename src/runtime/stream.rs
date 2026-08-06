@@ -166,6 +166,10 @@ where
             });
         }
         let semantics = self.inner.environment.call_semantics(self.id(), target_id);
+        let function_call_async = self
+            .inner
+            .environment
+            .function_call_async(self.id(), target_id);
         *downstream = Some(Collector::new(
             consumer,
             semantics,
@@ -173,6 +177,7 @@ where
             self.id(),
             target_id,
             self.name(),
+            function_call_async,
         )?);
         Ok(())
     }

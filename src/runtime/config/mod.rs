@@ -327,6 +327,8 @@ pub struct LinkConfig {
     pub from: i32,
     pub to: i32,
     pub call_semantics: CallSemantics,
+    #[serde(default)]
+    pub r#async: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

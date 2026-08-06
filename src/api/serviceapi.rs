@@ -402,6 +402,8 @@ pub struct Link {
     pub to: i64,
     #[serde(rename = "callSemantics")]
     pub call_semantics: CallSemantics,
+    #[serde(rename = "async", skip_serializing_if = "Option::is_none")]
+    pub r#async: Option<bool>,
     #[serde(rename = "poolName", skip_serializing_if = "Option::is_none")]
     pub pool_name: Option<String>,
     #[serde(rename = "priority", skip_serializing_if = "Option::is_none")]
