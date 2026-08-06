@@ -20,6 +20,7 @@ use crate::runtime::{
 };
 
 const ROTATING_MAP_SHRINK_FACTOR: usize = 4;
+const DEFAULT_ROTATING_MAP_MIN_CAPACITY: usize = 1_000;
 
 struct Maps<K, V> {
     current: HashMap<K, V>,
@@ -35,6 +36,7 @@ struct RotatingMapInner<K, V> {
     stopped: AtomicBool,
     cancellation: CancellationToken,
     rotation_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    min_capacity: usize,
 }
 
 // Stream IDs are uniformly distributed, so a fixed power-of-two shard count keeps
@@ -43,7 +45,8 @@ struct RotatingMapInner<K, V> {
 const ROTATING_MAP_SHARDS: usize = 64;
 
 /// Hash map with periodic bucket-capacity reclamation after transient growth.
-/// Rotation never expires entries.
+/// Each shard is rotated independently and must first reach the configured
+/// minimum capacity. Rotation never expires entries.
 pub struct RotatingMap<K, V> {
     inner: Arc<RotatingMapInner<K, V>>,
 }
@@ -61,6 +64,10 @@ where
     K: Eq + Hash,
 {
     pub fn new(interval: Duration) -> Self {
+        Self::with_min_capacity(interval, DEFAULT_ROTATING_MAP_MIN_CAPACITY)
+    }
+
+    pub fn with_min_capacity(interval: Duration, min_capacity: usize) -> Self {
         assert!(!interval.is_zero(), "rotation interval must be positive");
         Self {
             inner: Arc::new(RotatingMapInner {
@@ -79,6 +86,7 @@ where
                 stopped: AtomicBool::new(false),
                 cancellation: CancellationToken::new(),
                 rotation_task: tokio::sync::Mutex::new(None),
+                min_capacity,
             }),
         }
     }
@@ -169,11 +177,11 @@ where
     K: Eq + Hash,
 {
     for shard in &inner.shards {
-        rotate_shard(shard);
+        rotate_shard(shard, inner.min_capacity);
     }
 }
 
-fn rotate_shard<K, V>(shard: &Mutex<Maps<K, V>>)
+fn rotate_shard<K, V>(shard: &Mutex<Maps<K, V>>, min_capacity: usize)
 where
     K: Eq + Hash,
 {
@@ -182,6 +190,9 @@ where
     let should_rotate = maps.high_water_mark == 0
         || total.saturating_mul(ROTATING_MAP_SHRINK_FACTOR) < maps.high_water_mark;
     maps.high_water_mark = maps.high_water_mark.max(total);
+    if maps.high_water_mark < min_capacity {
+        return;
+    }
     if !should_rotate {
         return;
     }
@@ -248,5 +259,28 @@ async fn rotation_loop<K, V>(
             return;
         };
         rotate(&inner);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shard_does_not_rotate_below_its_minimum_capacity() {
+        let map = RotatingMap::<usize, usize>::new(Duration::from_secs(60));
+        {
+            let mut shard = map.inner.shards[0]
+                .lock()
+                .expect("rotating map lock poisoned");
+            for value in 0..DEFAULT_ROTATING_MAP_MIN_CAPACITY - 1 {
+                shard.current.insert(value, value);
+            }
+        }
+        map.rotate();
+        let shard = map.inner.shards[0]
+            .lock()
+            .expect("rotating map lock poisoned");
+        assert!(shard.previous.is_empty());
     }
 }

@@ -6,13 +6,36 @@ use std::{
     },
 };
 
-use servicelib::runtime::environment::metrics::{Labels, Metrics, MetricsError};
+use servicelib::runtime::environment::metrics::{
+    Labels, Metrics, MetricsEngine, MetricsError, NoopMetricsEngine,
+};
 
 fn labels(values: &[(&str, &str)]) -> Labels {
     values
         .iter()
         .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
         .collect::<BTreeMap<_, _>>()
+}
+
+#[test]
+fn noop_metrics_discard_all_observations() {
+    let engine = NoopMetricsEngine::default();
+    let metrics = engine.metrics();
+    let scope = metrics.scope("noop", Labels::new());
+    let counter = scope
+        .counter("requests", "Requests", Labels::new())
+        .unwrap();
+    let gauge = scope.gauge("active", "Active", Labels::new()).unwrap();
+    let histogram = scope
+        .histogram("latency", "Latency", Labels::new(), None)
+        .unwrap();
+    counter.inc();
+    gauge.set(42);
+    histogram.observe(1.5);
+    assert_eq!(counter.get(), 0);
+    assert_eq!(gauge.get(), 0);
+    assert_eq!(histogram.count(), 0);
+    assert!(metrics.render_prometheus().is_empty());
 }
 
 #[test]

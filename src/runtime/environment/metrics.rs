@@ -32,6 +32,37 @@ pub struct PrometheusMetricsEngine {
     metrics: Metrics,
 }
 
+/// Metrics engine for benchmarks and deployments that need the complete
+/// instrumentation call surface without retaining or exporting observations.
+#[derive(Clone)]
+pub struct NoopMetricsEngine {
+    metrics: Metrics,
+}
+
+impl Default for NoopMetricsEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NoopMetricsEngine {
+    pub fn new() -> Self {
+        Self {
+            metrics: Metrics::noop(),
+        }
+    }
+}
+
+#[async_trait]
+impl MetricsEngine for NoopMetricsEngine {
+    fn metrics(&self) -> &Metrics {
+        &self.metrics
+    }
+    async fn shutdown(&self) -> RuntimeResult<()> {
+        Ok(())
+    }
+}
+
 impl PrometheusMetricsEngine {
     pub fn new() -> Self {
         Self::default()
@@ -61,6 +92,7 @@ pub enum MetricsError {
 pub struct Metrics {
     registry: Arc<RwLock<BTreeMap<MetricKey, Metric>>>,
     meter: Option<Meter>,
+    noop: bool,
 }
 
 #[derive(Clone)]
@@ -123,6 +155,7 @@ pub struct Int64Counter {
     value: Arc<AtomicI64>,
     otel: Option<Counter<u64>>,
     attributes: Arc<Vec<KeyValue>>,
+    enabled: bool,
 }
 
 impl Int64Counter {
@@ -131,6 +164,9 @@ impl Int64Counter {
     }
 
     pub fn add(&self, value: i64) {
+        if !self.enabled {
+            return;
+        }
         debug_assert!(value >= 0, "counter cannot decrease");
         if let Some(counter) = &self.otel {
             counter.add(value as u64, &self.attributes);
@@ -140,6 +176,9 @@ impl Int64Counter {
     }
 
     pub fn get(&self) -> i64 {
+        if !self.enabled {
+            return 0;
+        }
         self.value.load(Ordering::Relaxed)
     }
 }
@@ -149,6 +188,7 @@ pub struct Int64Gauge {
     value: Arc<AtomicI64>,
     otel: Option<UpDownCounter<i64>>,
     attributes: Arc<Vec<KeyValue>>,
+    enabled: bool,
 }
 
 impl Int64Gauge {
@@ -167,6 +207,9 @@ impl Int64Gauge {
     // `self.value` from the gauge's real value and corrupt the next set()'s
     // delta. So this one metric type keeps writing both unconditionally.
     pub fn add(&self, value: i64) {
+        if !self.enabled {
+            return;
+        }
         self.value.fetch_add(value, Ordering::Relaxed);
         if let Some(gauge) = &self.otel {
             gauge.add(value, &self.attributes);
@@ -174,6 +217,9 @@ impl Int64Gauge {
     }
 
     pub fn set(&self, value: i64) {
+        if !self.enabled {
+            return;
+        }
         let previous = self.value.swap(value, Ordering::Relaxed);
         if let Some(gauge) = &self.otel {
             gauge.add(value - previous, &self.attributes);
@@ -181,6 +227,9 @@ impl Int64Gauge {
     }
 
     pub fn get(&self) -> i64 {
+        if !self.enabled {
+            return 0;
+        }
         self.value.load(Ordering::Relaxed)
     }
 }
@@ -190,10 +239,14 @@ pub struct Float64Histogram {
     value: Arc<Mutex<HistogramValue>>,
     otel: Option<Histogram<f64>>,
     attributes: Arc<Vec<KeyValue>>,
+    enabled: bool,
 }
 
 impl Float64Histogram {
     pub fn observe(&self, value: f64) {
+        if !self.enabled {
+            return;
+        }
         let mut histogram = self.value.lock().expect("histogram lock poisoned");
         histogram.count += 1;
         histogram.sum += value;
@@ -207,19 +260,33 @@ impl Float64Histogram {
     }
 
     pub fn count(&self) -> u64 {
+        if !self.enabled {
+            return 0;
+        }
         self.value.lock().expect("histogram lock poisoned").count
     }
 
     pub fn sum(&self) -> f64 {
+        if !self.enabled {
+            return 0.0;
+        }
         self.value.lock().expect("histogram lock poisoned").sum
     }
 }
 
 impl Metrics {
+    pub fn noop() -> Self {
+        Self {
+            noop: true,
+            ..Self::default()
+        }
+    }
+
     pub fn with_meter(meter: Meter) -> Self {
         Self {
             registry: Arc::default(),
             meter: Some(meter),
+            noop: false,
         }
     }
 
@@ -241,6 +308,9 @@ impl Metrics {
     }
 
     pub fn render_prometheus(&self) -> String {
+        if self.noop {
+            return String::new();
+        }
         let registry = self
             .registry
             .read()
@@ -336,6 +406,14 @@ impl MetricsScope {
         help: &str,
         labels: Labels,
     ) -> Result<Int64Counter, MetricsError> {
+        if self.metrics.noop {
+            return Ok(Int64Counter {
+                value: Arc::new(AtomicI64::new(0)),
+                otel: None,
+                attributes: Arc::new(Vec::new()),
+                enabled: false,
+            });
+        }
         let key = self.key(name, labels);
         let mut registry = self
             .metrics
@@ -353,6 +431,7 @@ impl MetricsScope {
                 value: Arc::clone(value),
                 otel: otel.clone(),
                 attributes: Arc::clone(attributes),
+                enabled: true,
             }),
             Some(_) => Err(MetricsError::TypeConflict(key.name)),
             None => {
@@ -377,6 +456,7 @@ impl MetricsScope {
                     value,
                     otel,
                     attributes,
+                    enabled: true,
                 })
             }
         }
@@ -388,6 +468,14 @@ impl MetricsScope {
         help: &str,
         labels: Labels,
     ) -> Result<Int64Gauge, MetricsError> {
+        if self.metrics.noop {
+            return Ok(Int64Gauge {
+                value: Arc::new(AtomicI64::new(0)),
+                otel: None,
+                attributes: Arc::new(Vec::new()),
+                enabled: false,
+            });
+        }
         let key = self.key(name, labels);
         let mut registry = self
             .metrics
@@ -405,6 +493,7 @@ impl MetricsScope {
                 value: Arc::clone(value),
                 otel: otel.clone(),
                 attributes: Arc::clone(attributes),
+                enabled: true,
             }),
             Some(_) => Err(MetricsError::TypeConflict(key.name)),
             None => {
@@ -429,6 +518,7 @@ impl MetricsScope {
                     value,
                     otel,
                     attributes,
+                    enabled: true,
                 })
             }
         }
@@ -441,6 +531,19 @@ impl MetricsScope {
         labels: Labels,
         bounds: Option<Vec<f64>>,
     ) -> Result<Float64Histogram, MetricsError> {
+        if self.metrics.noop {
+            return Ok(Float64Histogram {
+                value: Arc::new(Mutex::new(HistogramValue {
+                    bounds: Vec::new(),
+                    buckets: Vec::new(),
+                    count: 0,
+                    sum: 0.0,
+                })),
+                otel: None,
+                attributes: Arc::new(Vec::new()),
+                enabled: false,
+            });
+        }
         let key = self.key(name, labels);
         let mut registry = self
             .metrics
@@ -458,6 +561,7 @@ impl MetricsScope {
                 value: Arc::clone(value),
                 otel: otel.clone(),
                 attributes: Arc::clone(attributes),
+                enabled: true,
             }),
             Some(_) => Err(MetricsError::TypeConflict(key.name)),
             None => {
@@ -490,6 +594,7 @@ impl MetricsScope {
                     value,
                     otel,
                     attributes,
+                    enabled: true,
                 })
             }
         }
@@ -502,6 +607,9 @@ impl MetricsScope {
         labels: Labels,
         observe: Arc<dyn Fn() -> f64 + Send + Sync>,
     ) -> Result<(), MetricsError> {
+        if self.metrics.noop {
+            return Ok(());
+        }
         let key = self.key(name, labels);
         let mut registry = self
             .metrics

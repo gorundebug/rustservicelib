@@ -10,7 +10,7 @@ use servicelib::{
 
 #[test]
 fn rotating_map_reclaims_capacity_without_expiring_values() {
-    let map = RotatingMap::new(Duration::from_secs(60));
+    let map = RotatingMap::with_min_capacity(Duration::from_secs(60), 0);
     for key in 0..1_000 {
         map.set(key, key).unwrap();
     }
