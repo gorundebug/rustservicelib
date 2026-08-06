@@ -272,6 +272,44 @@ async fn task_pool_queues_before_start_and_rejects_after_stop() {
 }
 
 #[tokio::test]
+async fn task_pools_drain_queued_tasks_when_stopped_before_start() {
+    let environment = pool_environment(&[("fifo", 1), ("priority", 1)]);
+    let fifo = TaskPool::new("fifo", environment.clone()).unwrap();
+    let priority = PriorityTaskPool::new("priority", environment).unwrap();
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+
+    let fifo_sender = sender.clone();
+    fifo.add_task(
+        MessageContext::new(),
+        Box::pin(async move {
+            fifo_sender.send("fifo").unwrap();
+        }),
+    )
+    .await
+    .unwrap();
+    priority
+        .add_task(
+            MessageContext::new(),
+            0,
+            Box::pin(async move {
+                sender.send("priority").unwrap();
+            }),
+        )
+        .await
+        .unwrap();
+
+    fifo.stop().await;
+    priority.stop().await;
+
+    let mut completed = vec![
+        receiver.recv().await.unwrap(),
+        receiver.recv().await.unwrap(),
+    ];
+    completed.sort_unstable();
+    assert_eq!(completed, ["fifo", "priority"]);
+}
+
+#[tokio::test]
 async fn task_pool_resizes_from_the_published_runtime_config() {
     let environment = pool_environment(&[("resize", 1)]);
     let pool = TaskPool::new("resize", environment.clone()).unwrap();

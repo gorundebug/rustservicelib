@@ -167,9 +167,10 @@ impl PriorityTaskPool {
                     .collect(),
             )?,
         };
-        metrics
-            .executors_target
-            .set(self.configured_executors()? as i64);
+        let executors = self.configured_executors()?;
+        self.executors_target
+            .store(executors, AtomicOrdering::Release);
+        metrics.executors_target.set(executors as i64);
         let _ = self.metrics.set(metrics);
         Ok(())
     }
@@ -226,12 +227,14 @@ impl PriorityTaskPool {
     }
 
     fn spawn_workers(self: &Arc<Self>, generation: u64, executors: usize) {
+        let mut workers = self
+            .workers
+            .lock()
+            .expect("priority pool workers lock poisoned");
+        workers.retain(|worker| !worker.is_finished());
         for _ in 0..executors {
             let worker = Arc::clone(self);
-            self.workers
-                .lock()
-                .expect("priority pool workers lock poisoned")
-                .push(tokio::spawn(async move { worker.run(generation).await }));
+            workers.push(tokio::spawn(async move { worker.run(generation).await }));
         }
     }
 
