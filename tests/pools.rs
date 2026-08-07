@@ -379,6 +379,71 @@ async fn delay_pool_expedites_on_cancel_and_rejects_after_stop() {
 }
 
 #[tokio::test]
+async fn delay_pool_stop_timeout_returns_while_accepted_task_keeps_running() {
+    let pool = DelayPool::new();
+    let release = Arc::new(Notify::new());
+    let task_release = Arc::clone(&release);
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let (completed_tx, mut completed_rx) = mpsc::unbounded_channel();
+    pool.delay(MessageContext::new(), Duration::ZERO, async move {
+        started_tx.send(()).unwrap();
+        task_release.notified().await;
+        completed_tx.send(()).unwrap();
+    })
+    .await
+    .unwrap();
+    started_rx.recv().await.unwrap();
+
+    let stop_context = MessageContext::new();
+    stop_context.cancel();
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        pool.stop_with_context(stop_context),
+    )
+    .await
+    .expect("delay pool stop exceeded its context");
+    assert!(completed_rx.try_recv().is_err());
+
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), completed_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn delay_pool_wait_queue_length_includes_executing_callback() {
+    let environment = pool_environment(&[]);
+    let pool = environment.delay_pool();
+    let release = Arc::new(Notify::new());
+    let task_release = Arc::clone(&release);
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    pool.delay(MessageContext::new(), Duration::ZERO, async move {
+        started_tx.send(()).unwrap();
+        task_release.notified().await;
+    })
+    .await
+    .unwrap();
+    started_rx.recv().await.unwrap();
+
+    assert!(
+        environment
+            .metrics()
+            .render_prometheus()
+            .contains(r#"delay_pool_wait_queue_length{service="orders"} 1"#)
+    );
+
+    release.notify_one();
+    pool.stop().await;
+    assert!(
+        environment
+            .metrics()
+            .render_prometheus()
+            .contains(r#"delay_pool_wait_queue_length{service="orders"} 0"#)
+    );
+}
+
+#[tokio::test]
 async fn registered_pools_publish_the_go_metric_contract() {
     let environment = pool_environment(&[("default", 1), ("priority", 1)]);
     let task_pool = TaskPool::new("default", environment.clone()).unwrap();
@@ -456,20 +521,74 @@ async fn stop_timeout_is_observable_but_pool_still_drains_safely() {
     let pool = TaskPool::new("slow", environment.clone()).unwrap();
     environment.register_task_pool(pool.clone()).unwrap();
     pool.start().unwrap();
+    let release = Arc::new(Notify::new());
+    let task_release = Arc::clone(&release);
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let (completed_tx, mut completed_rx) = mpsc::unbounded_channel();
     pool.add_task(
         MessageContext::new(),
-        Box::pin(async {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        Box::pin(async move {
+            started_tx.send(()).unwrap();
+            task_release.notified().await;
+            completed_tx.send(()).unwrap();
         }),
     )
     .await
     .unwrap();
+    started_rx.recv().await.unwrap();
 
     let context = MessageContext::new();
     context.cancel();
-    pool.stop_with_context(context).await;
+    tokio::time::timeout(Duration::from_millis(100), pool.stop_with_context(context))
+        .await
+        .expect("task pool stop exceeded its context");
+    assert!(completed_rx.try_recv().is_err());
 
     assert!(environment.metrics().render_prometheus().contains(
         r#"task_pool_events_total{event="stop_timeout",name="slow",service="orders"} 1"#
     ));
+
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), completed_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn priority_pool_stop_timeout_returns_while_worker_keeps_running() {
+    let pool = PriorityTaskPool::new("slow", pool_environment(&[("slow", 1)])).unwrap();
+    pool.start().unwrap();
+    let release = Arc::new(Notify::new());
+    let task_release = Arc::clone(&release);
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let (completed_tx, mut completed_rx) = mpsc::unbounded_channel();
+    pool.add_task(
+        MessageContext::new(),
+        0,
+        Box::pin(async move {
+            started_tx.send(()).unwrap();
+            task_release.notified().await;
+            completed_tx.send(()).unwrap();
+        }),
+    )
+    .await
+    .unwrap();
+    started_rx.recv().await.unwrap();
+
+    let stop_context = MessageContext::new();
+    stop_context.cancel();
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        pool.stop_with_context(stop_context),
+    )
+    .await
+    .expect("priority pool stop exceeded its context");
+    assert!(completed_rx.try_recv().is_err());
+
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), completed_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
 }

@@ -2,17 +2,14 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        Arc, OnceLock,
+        Arc, OnceLock, RwLock as StdRwLock,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
 
 use futures::{StreamExt, stream::FuturesUnordered};
-use tokio::{
-    sync::{Mutex, mpsc},
-    task::JoinHandle,
-};
+use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::runtime::{
     common::MessageContext,
@@ -44,7 +41,7 @@ struct ScheduledDelay {
 /// decides whether cancellation means "run now" or "skip". `DelayStream`
 /// uses the latter, exactly like the Go operator.
 pub struct DelayPool {
-    state: Mutex<DelayPoolState>,
+    state: StdRwLock<DelayPoolState>,
     metrics: OnceLock<DelayPoolMetrics>,
     active_tasks: Arc<AtomicUsize>,
 }
@@ -52,7 +49,7 @@ pub struct DelayPool {
 impl Default for DelayPool {
     fn default() -> Self {
         Self {
-            state: Mutex::new(DelayPoolState {
+            state: StdRwLock::new(DelayPoolState {
                 stopped: false,
                 sender: None,
                 worker: None,
@@ -141,6 +138,25 @@ impl DelayPool {
         }
     }
 
+    fn send_scheduled(
+        sender: &mpsc::UnboundedSender<ScheduledDelay>,
+        scheduled: ScheduledDelay,
+    ) -> RuntimeResult<()> {
+        if let Some(metrics) = &scheduled.metrics {
+            metrics.wait_queue_length.inc();
+        }
+        scheduled.active_tasks.fetch_add(1, Ordering::Relaxed);
+        if let Err(error) = sender.send(scheduled) {
+            let scheduled = error.0;
+            if let Some(metrics) = &scheduled.metrics {
+                metrics.wait_queue_length.dec();
+            }
+            scheduled.active_tasks.fetch_sub(1, Ordering::Relaxed);
+            return Err(RuntimeError::ResourceStopped("delay".to_owned()));
+        }
+        Ok(())
+    }
+
     pub async fn delay<F>(
         &self,
         context: MessageContext,
@@ -154,46 +170,44 @@ impl DelayPool {
             return Err(RuntimeError::ContextCancelled);
         }
 
-        let mut state = self.state.lock().await;
-        if state.stopped {
-            return Err(RuntimeError::ResourceStopped("delay".to_owned()));
-        }
-
         let duration = context
             .deadline()
             .map(|deadline| deadline.saturating_duration_since(tokio::time::Instant::now()))
             .map_or(duration, |remaining| remaining.min(duration));
         let metrics = self.metrics.get().cloned();
-        if let Some(metrics) = &metrics {
-            metrics.wait_queue_length.inc();
+        let scheduled = ScheduledDelay {
+            context,
+            duration,
+            task: Box::pin(task),
+            metrics,
+            active_tasks: Arc::clone(&self.active_tasks),
+        };
+
+        let state = self.state.read().expect("delay pool state lock poisoned");
+        if state.stopped {
+            return Err(RuntimeError::ResourceStopped("delay".to_owned()));
         }
-        self.active_tasks.fetch_add(1, Ordering::Relaxed);
+        if let Some(sender) = &state.sender {
+            return Self::send_scheduled(sender, scheduled);
+        }
+        drop(state);
+
+        let mut state = self.state.write().expect("delay pool state lock poisoned");
+        if state.stopped {
+            return Err(RuntimeError::ResourceStopped("delay".to_owned()));
+        }
         if state.sender.is_none() {
             let (sender, receiver) = mpsc::unbounded_channel();
             state.sender = Some(sender);
             state.worker = Some(tokio::spawn(Self::run(receiver)));
         }
-        let scheduled = ScheduledDelay {
-            context,
-            duration,
-            task: Box::pin(task),
-            metrics: metrics.clone(),
-            active_tasks: Arc::clone(&self.active_tasks),
-        };
-        if state
-            .sender
-            .as_ref()
-            .expect("delay worker sender initialized")
-            .send(scheduled)
-            .is_err()
-        {
-            if let Some(metrics) = &metrics {
-                metrics.wait_queue_length.dec();
-            }
-            self.active_tasks.fetch_sub(1, Ordering::Relaxed);
-            return Err(RuntimeError::ResourceStopped("delay".to_owned()));
-        }
-        Ok(())
+        Self::send_scheduled(
+            state
+                .sender
+                .as_ref()
+                .expect("delay worker sender initialized"),
+            scheduled,
+        )
     }
 
     pub async fn stop(&self) {
@@ -202,7 +216,7 @@ impl DelayPool {
 
     pub async fn stop_with_context(&self, context: MessageContext) {
         let worker = {
-            let mut state = self.state.lock().await;
+            let mut state = self.state.write().expect("delay pool state lock poisoned");
             state.stopped = true;
             state.sender.take();
             state.worker.take()
@@ -219,7 +233,8 @@ impl DelayPool {
                 metrics.stop_timeout.inc();
             }
             tracing::warn!("delay pool stopped by timeout");
-            let _ = worker.await;
+            // Dropping a Tokio JoinHandle detaches the worker. Accepted delays
+            // keep running, while Stop remains bounded by its context.
         }
     }
 }
@@ -242,15 +257,15 @@ impl ScheduledDelay {
                 }
             }
         }
-        if let Some(metrics) = &metrics {
-            metrics.wait_queue_length.dec();
-            if cancelled {
+        if cancelled {
+            if let Some(metrics) = &metrics {
                 metrics.task_cancelled.inc();
             }
         }
         let started_at = Instant::now();
         super::run_task("delay", task).await;
         if let Some(metrics) = &metrics {
+            metrics.wait_queue_length.dec();
             metrics.tasks_total.inc();
             metrics
                 .execution_duration

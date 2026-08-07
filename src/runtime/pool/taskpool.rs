@@ -316,7 +316,9 @@ impl TaskPool {
                 tasks_count,
                 "task pool stopped by timeout"
             );
-            wait.await;
+            // Dropping the JoinHandles detaches the workers. They continue to
+            // drain accepted tasks without extending Stop past its context.
+            return;
         }
         if let Some(metrics) = self.metrics.get() {
             metrics.executors_allocated.set(0);
