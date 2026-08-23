@@ -203,8 +203,6 @@ pub enum DataConnectorImplementation {
     RustCroner,
     #[serde(rename = "node/croner")]
     NodeCroner,
-    #[serde(rename = "cpp/libcron")]
-    CppLibcron,
     #[serde(rename = "temporal/go")]
     TemporalGo,
     #[serde(rename = "temporal/python")]
