@@ -7,7 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use chrono_tz::Tz;
 use croner::Cron;
 use tokio::{sync::Mutex as AsyncMutex, task::JoinHandle};
@@ -38,10 +38,34 @@ struct CronJob {
 
 impl CronJob {
     fn next(&self, after: DateTime<Utc>) -> RuntimeResult<DateTime<Utc>> {
-        self.schedule
-            .find_next_occurrence(&after.with_timezone(&self.timezone), false)
-            .map(|next| next.with_timezone(&Utc))
-            .map_err(|error| RuntimeError::InvalidConfiguration(error.to_string()))
+        let mut cursor = after.with_timezone(&self.timezone);
+        loop {
+            let candidate = self
+                .schedule
+                .find_next_occurrence(&cursor, false)
+                .map_err(|error| RuntimeError::InvalidConfiguration(error.to_string()))?;
+            let matches = self
+                .schedule
+                .is_time_matching(&candidate)
+                .map_err(|error| RuntimeError::InvalidConfiguration(error.to_string()))?;
+            let first_fold = match self
+                .timezone
+                .from_local_datetime(&candidate.naive_local())
+            {
+                LocalResult::Ambiguous(first, _) => {
+                    first.with_timezone(&Utc) == candidate.with_timezone(&Utc)
+                }
+                LocalResult::Single(_) => true,
+                LocalResult::None => false,
+            };
+            if matches && first_fold {
+                return Ok(candidate.with_timezone(&Utc));
+            }
+            // Croner remains the sole parser and next-occurrence evaluator.
+            // The adapter only filters its shifted spring-gap candidate and
+            // the second instant of an ambiguous fall wall time.
+            cursor = candidate;
+        }
     }
 
     fn dispatch(&self, scheduled_at: DateTime<Utc>, tasks: &mut tokio::task::JoinSet<()>) {
@@ -362,6 +386,61 @@ mod tests {
         assert_eq!(
             job.next(after).expect("next occurrence"),
             Utc.with_ymd_and_hms(2026, 8, 24, 13, 0, 0)
+                .single()
+                .expect("valid fixture")
+        );
+    }
+
+    #[test]
+    fn croner_candidates_satisfy_the_portable_dst_contract() {
+        let spring = CronJob {
+            endpoint_id: 1,
+            endpoint_name: "spring".to_owned(),
+            schedule: Cron::from_str("30 2 * * *").expect("valid cron fixture"),
+            timezone: Tz::from_str("America/New_York").expect("valid timezone fixture"),
+            overlap_policy: ScheduleOverlapPolicy::Skip,
+            missed_run_policy: ScheduleMissedRunPolicy::Skip,
+            consumer: Arc::new(NoopConsumer),
+            running: Arc::new(AtomicBool::new(false)),
+        };
+        let after_spring = Utc
+            .with_ymd_and_hms(2026, 3, 7, 8, 0, 0)
+            .single()
+            .expect("valid fixture");
+        assert_eq!(
+            spring.next(after_spring).expect("next spring occurrence"),
+            Utc.with_ymd_and_hms(2026, 3, 9, 6, 30, 0)
+                .single()
+                .expect("valid fixture")
+        );
+
+        let fall = CronJob {
+            endpoint_id: 2,
+            endpoint_name: "fall".to_owned(),
+            schedule: Cron::from_str("30 1 * * *").expect("valid cron fixture"),
+            timezone: Tz::from_str("America/New_York").expect("valid timezone fixture"),
+            overlap_policy: ScheduleOverlapPolicy::Skip,
+            missed_run_policy: ScheduleMissedRunPolicy::Skip,
+            consumer: Arc::new(NoopConsumer),
+            running: Arc::new(AtomicBool::new(false)),
+        };
+        let first = fall
+            .next(
+                Utc.with_ymd_and_hms(2026, 10, 31, 6, 0, 0)
+                    .single()
+                    .expect("valid fixture"),
+            )
+            .expect("first fall occurrence");
+        let second = fall.next(first).expect("next fall occurrence");
+        assert_eq!(
+            first,
+            Utc.with_ymd_and_hms(2026, 11, 1, 5, 30, 0)
+                .single()
+                .expect("valid fixture")
+        );
+        assert_eq!(
+            second,
+            Utc.with_ymd_and_hms(2026, 11, 2, 6, 30, 0)
                 .single()
                 .expect("valid fixture")
         );
