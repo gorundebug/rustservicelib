@@ -115,7 +115,9 @@ def enum_schemas() -> list[tuple[str, str, list[object], list[str]]]:
                     names.append(item.group(1).strip().strip("'\""))
                     cursor += 1
             cursor += 1
-        if values and names:
+        if values and not names:
+            names = [str(value) for value in values]
+        if values:
             result.append((name, schema_type, values, names))
     return result
 

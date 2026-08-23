@@ -92,6 +92,7 @@ pub enum CallSemantics {
     TaskPool = 3,
     PriorityTaskPool = 4,
     ParallelCall = 5,
+    DurableCall = 6,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize_repr, Deserialize_repr)]
@@ -102,6 +103,8 @@ pub enum DataConnectorType {
     GRPC = 2,
     Kafka = 3,
     Custom = 4,
+    Cron = 5,
+    Temporal = 6,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize_repr, Deserialize_repr)]
@@ -192,6 +195,22 @@ pub enum DataConnectorImplementation {
     GrpcJS,
     #[serde(rename = "confluent/kafka-javascript")]
     ConfluentKafkaJavaScript,
+    #[serde(rename = "go/gocron")]
+    GoGocron,
+    #[serde(rename = "python/apscheduler")]
+    PythonAPScheduler,
+    #[serde(rename = "rust/croner")]
+    RustCroner,
+    #[serde(rename = "node/croner")]
+    NodeCroner,
+    #[serde(rename = "cpp/libcron")]
+    CppLibcron,
+    #[serde(rename = "temporal/go")]
+    TemporalGo,
+    #[serde(rename = "temporal/python")]
+    TemporalPython,
+    #[serde(rename = "temporal/typescript")]
+    TemporalTypeScript,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -212,6 +231,22 @@ pub enum KafkaSaslMechanism {
     SCRAMSHA256,
     #[serde(rename = "SCRAM-SHA-512")]
     SCRAMSHA512,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub enum ScheduleOverlapPolicy {
+    #[serde(rename = "Allow")]
+    Allow,
+    #[serde(rename = "Skip")]
+    Skip,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub enum ScheduleMissedRunPolicy {
+    #[serde(rename = "Skip")]
+    Skip,
+    #[serde(rename = "FireOnce")]
+    FireOnce,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize_repr, Deserialize_repr)]
@@ -269,6 +304,8 @@ pub enum DataType {
     Any,
     #[serde(rename = "error")]
     Error,
+    #[serde(rename = "schedule trigger")]
+    ScheduleTrigger,
     #[serde(rename = "array")]
     Array,
     #[serde(rename = "map")]
@@ -458,6 +495,8 @@ pub struct Link {
     pub pool_name: Option<String>,
     #[serde(rename = "priority", skip_serializing_if = "Option::is_none")]
     pub priority: Option<i64>,
+    #[serde(rename = "idDataConnector", skip_serializing_if = "Option::is_none")]
+    pub id_data_connector: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -528,6 +567,20 @@ pub struct DataConnector {
     pub use_dedicated_listener: Option<bool>,
     #[serde(rename = "module", skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
+    #[serde(rename = "namespace", skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(rename = "identity", skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+    #[serde(
+        rename = "maxConcurrentActivities",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_concurrent_activities: Option<i64>,
+    #[serde(
+        rename = "maxConcurrentWorkflows",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_concurrent_workflows: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -577,6 +630,35 @@ pub struct Endpoint {
     pub grpc_method_type: Option<GrpcMethodType>,
     #[serde(rename = "methodName", skip_serializing_if = "Option::is_none")]
     pub method_name: Option<String>,
+    #[serde(rename = "schedule", skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
+    #[serde(rename = "scheduleId", skip_serializing_if = "Option::is_none")]
+    pub schedule_id: Option<String>,
+    #[serde(rename = "timezone", skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    #[serde(rename = "overlapPolicy", skip_serializing_if = "Option::is_none")]
+    pub overlap_policy: Option<ScheduleOverlapPolicy>,
+    #[serde(rename = "missedRunPolicy", skip_serializing_if = "Option::is_none")]
+    pub missed_run_policy: Option<ScheduleMissedRunPolicy>,
+    #[serde(rename = "taskQueue", skip_serializing_if = "Option::is_none")]
+    pub task_queue: Option<String>,
+    #[serde(
+        rename = "workflowExecutionTimeout",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub workflow_execution_timeout: Option<i64>,
+    #[serde(
+        rename = "activityStartToCloseTimeout",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub activity_start_to_close_timeout: Option<i64>,
+    #[serde(
+        rename = "activityHeartbeatTimeout",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub activity_heartbeat_timeout: Option<i64>,
+    #[serde(rename = "maximumAttempts", skip_serializing_if = "Option::is_none")]
+    pub maximum_attempts: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

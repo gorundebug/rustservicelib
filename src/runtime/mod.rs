@@ -6,6 +6,7 @@ pub mod datasource;
 pub mod datastruct;
 pub mod environment;
 pub mod pool;
+pub mod schedule;
 pub mod serde;
 pub mod serviceapp;
 pub mod statusweb;

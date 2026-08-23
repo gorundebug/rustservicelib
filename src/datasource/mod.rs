@@ -1,3 +1,4 @@
+pub mod cron;
 pub mod grpc;
 pub mod http;
 pub mod kafka;

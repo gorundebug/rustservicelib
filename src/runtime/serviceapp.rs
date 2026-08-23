@@ -102,7 +102,9 @@ fn register_configured_pools(environment: &RuntimeEnvironment) -> RuntimeResult<
                     environment.register_priority_task_pool(pool)?;
                 }
             }
-            CallSemantics::FunctionCall | CallSemantics::ParallelCall => {}
+            CallSemantics::FunctionCall
+            | CallSemantics::ParallelCall
+            | CallSemantics::DurableCall { .. } => {}
         }
     }
     Ok(())

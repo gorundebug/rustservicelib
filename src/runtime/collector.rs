@@ -125,6 +125,13 @@ where
                 pool: environment.priority_task_pool(&pool_name)?,
                 priority,
             },
+            CallSemantics::DurableCall { id_data_connector } => {
+                return Err(
+                    crate::runtime::environment::RuntimeError::InvalidConfiguration(format!(
+                        "durable caller for Temporal connector {id_data_connector} is not registered"
+                    )),
+                );
+            }
         };
         let from = source_name;
         let to = environment.stream_name(target_id);

@@ -136,13 +136,19 @@ impl RuntimeConfig {
             if runtime.endpoints_by_name.contains_key(&name) {
                 return duplicate_name("endpoint", &name);
             }
-            if !runtime
+            let Some(connector) = runtime
                 .data_connectors_by_id
-                .contains_key(&endpoint.data_connector_id())
-            {
+                .get(&endpoint.data_connector_id())
+            else {
                 return Err(RuntimeError::InvalidConfiguration(format!(
                     "endpoint {name:?} references unknown data connector {}",
                     endpoint.data_connector_id()
+                )));
+            };
+            if connector.connector_type() != endpoint.connector_type() {
+                return Err(RuntimeError::InvalidConfiguration(format!(
+                    "endpoint {name:?} type does not match data connector {:?}",
+                    connector.name()
                 )));
             }
             let endpoint = Arc::new(endpoint);
@@ -156,6 +162,20 @@ impl RuntimeConfig {
                     "duplicate link from={} to={}",
                     link.from, link.to
                 )));
+            }
+            if let CallSemantics::DurableCall { id_data_connector } = &link.call_semantics {
+                let Some(connector) = runtime.data_connectors_by_id.get(id_data_connector) else {
+                    return Err(RuntimeError::InvalidConfiguration(format!(
+                        "durable link from={} to={} references unknown Temporal data connector {id_data_connector}",
+                        link.from, link.to
+                    )));
+                };
+                if connector.connector_type() != crate::api::DataConnectorType::Temporal {
+                    return Err(RuntimeError::InvalidConfiguration(format!(
+                        "durable link from={} to={} requires a Temporal data connector",
+                        link.from, link.to
+                    )));
+                }
             }
             runtime.links.insert(id, Arc::new(link));
         }

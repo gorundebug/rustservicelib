@@ -194,6 +194,84 @@ pub struct KafkaEndpointConfig {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CronDataConnectorConfig {
+    pub id: i32,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemporalDataConnectorConfig {
+    pub id: i32,
+    pub name: String,
+    pub address: String,
+    pub namespace: String,
+    #[serde(default)]
+    pub identity: String,
+    #[serde(default)]
+    pub max_concurrent_activities: usize,
+    #[serde(default)]
+    pub max_concurrent_workflows: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CronEndpointConfig {
+    pub id: i32,
+    pub name: String,
+    pub id_data_connector: i32,
+    #[serde(default)]
+    pub enabled: bool,
+    pub schedule: String,
+    #[serde(default = "default_schedule_timezone")]
+    pub timezone: String,
+    #[serde(default = "default_overlap_policy")]
+    pub overlap_policy: api::ScheduleOverlapPolicy,
+    #[serde(default = "default_missed_run_policy")]
+    pub missed_run_policy: api::ScheduleMissedRunPolicy,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemporalEndpointConfig {
+    pub id: i32,
+    pub name: String,
+    pub id_data_connector: i32,
+    #[serde(default)]
+    pub enabled: bool,
+    pub task_queue: String,
+    #[serde(default)]
+    pub schedule: String,
+    #[serde(default)]
+    pub schedule_id: String,
+    #[serde(default = "default_schedule_timezone")]
+    pub timezone: String,
+    #[serde(default = "default_overlap_policy")]
+    pub overlap_policy: api::ScheduleOverlapPolicy,
+    #[serde(default = "default_missed_run_policy")]
+    pub missed_run_policy: api::ScheduleMissedRunPolicy,
+    #[serde(default)]
+    pub workflow_execution_timeout: i64,
+    pub activity_start_to_close_timeout: i64,
+    #[serde(default)]
+    pub activity_heartbeat_timeout: i64,
+    pub maximum_attempts: i32,
+}
+
+fn default_schedule_timezone() -> String {
+    "UTC".to_owned()
+}
+
+fn default_overlap_policy() -> api::ScheduleOverlapPolicy {
+    api::ScheduleOverlapPolicy::Skip
+}
+
+fn default_missed_run_policy() -> api::ScheduleMissedRunPolicy {
+    api::ScheduleMissedRunPolicy::Skip
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CustomDataConnectorConfig {
     pub id: i32,
     pub name: String,
@@ -211,6 +289,8 @@ pub enum RuntimeDataConnectorConfig {
     Http(HttpDataConnectorConfig),
     Grpc(GrpcDataConnectorConfig),
     Kafka(KafkaDataConnectorConfig),
+    Cron(CronDataConnectorConfig),
+    Temporal(TemporalDataConnectorConfig),
     Custom(CustomDataConnectorConfig),
 }
 
@@ -220,6 +300,8 @@ impl RuntimeDataConnectorConfig {
             Self::Http(config) => config.id,
             Self::Grpc(config) => config.id,
             Self::Kafka(config) => config.id,
+            Self::Cron(config) => config.id,
+            Self::Temporal(config) => config.id,
             Self::Custom(config) => config.id,
         }
     }
@@ -229,6 +311,8 @@ impl RuntimeDataConnectorConfig {
             Self::Http(config) => &config.name,
             Self::Grpc(config) => &config.name,
             Self::Kafka(config) => &config.name,
+            Self::Cron(config) => &config.name,
+            Self::Temporal(config) => &config.name,
             Self::Custom(config) => &config.name,
         }
     }
@@ -238,6 +322,8 @@ impl RuntimeDataConnectorConfig {
             Self::Http(_) => api::DataConnectorType::HTTP,
             Self::Grpc(_) => api::DataConnectorType::GRPC,
             Self::Kafka(_) => api::DataConnectorType::Kafka,
+            Self::Cron(_) => api::DataConnectorType::Cron,
+            Self::Temporal(_) => api::DataConnectorType::Temporal,
             Self::Custom(_) => api::DataConnectorType::Custom,
         }
     }
@@ -248,6 +334,8 @@ pub enum RuntimeEndpointConfig {
     Http(HttpEndpointConfig),
     Grpc(GrpcEndpointConfig),
     Kafka(KafkaEndpointConfig),
+    Cron(CronEndpointConfig),
+    Temporal(TemporalEndpointConfig),
     Custom(CustomEndpointConfig),
 }
 
@@ -257,6 +345,8 @@ impl RuntimeEndpointConfig {
             Self::Http(config) => config.id,
             Self::Grpc(config) => config.id,
             Self::Kafka(config) => config.id,
+            Self::Cron(config) => config.id,
+            Self::Temporal(config) => config.id,
             Self::Custom(config) => config.id,
         }
     }
@@ -266,6 +356,8 @@ impl RuntimeEndpointConfig {
             Self::Http(config) => &config.name,
             Self::Grpc(config) => &config.name,
             Self::Kafka(config) => &config.name,
+            Self::Cron(config) => &config.name,
+            Self::Temporal(config) => &config.name,
             Self::Custom(config) => &config.name,
         }
     }
@@ -275,7 +367,20 @@ impl RuntimeEndpointConfig {
             Self::Http(config) => config.id_data_connector,
             Self::Grpc(config) => config.id_data_connector,
             Self::Kafka(config) => config.id_data_connector,
+            Self::Cron(config) => config.id_data_connector,
+            Self::Temporal(config) => config.id_data_connector,
             Self::Custom(config) => config.id_data_connector,
+        }
+    }
+
+    pub fn connector_type(&self) -> api::DataConnectorType {
+        match self {
+            Self::Http(_) => api::DataConnectorType::HTTP,
+            Self::Grpc(_) => api::DataConnectorType::GRPC,
+            Self::Kafka(_) => api::DataConnectorType::Kafka,
+            Self::Cron(_) => api::DataConnectorType::Cron,
+            Self::Temporal(_) => api::DataConnectorType::Temporal,
+            Self::Custom(_) => api::DataConnectorType::Custom,
         }
     }
 }
@@ -295,6 +400,18 @@ impl From<GrpcDataConnectorConfig> for RuntimeDataConnectorConfig {
 impl From<KafkaDataConnectorConfig> for RuntimeDataConnectorConfig {
     fn from(config: KafkaDataConnectorConfig) -> Self {
         Self::Kafka(config)
+    }
+}
+
+impl From<CronDataConnectorConfig> for RuntimeDataConnectorConfig {
+    fn from(config: CronDataConnectorConfig) -> Self {
+        Self::Cron(config)
+    }
+}
+
+impl From<TemporalDataConnectorConfig> for RuntimeDataConnectorConfig {
+    fn from(config: TemporalDataConnectorConfig) -> Self {
+        Self::Temporal(config)
     }
 }
 
@@ -322,6 +439,18 @@ impl From<KafkaEndpointConfig> for RuntimeEndpointConfig {
     }
 }
 
+impl From<CronEndpointConfig> for RuntimeEndpointConfig {
+    fn from(config: CronEndpointConfig) -> Self {
+        Self::Cron(config)
+    }
+}
+
+impl From<TemporalEndpointConfig> for RuntimeEndpointConfig {
+    fn from(config: TemporalEndpointConfig) -> Self {
+        Self::Temporal(config)
+    }
+}
+
 impl From<CustomEndpointConfig> for RuntimeEndpointConfig {
     fn from(config: CustomEndpointConfig) -> Self {
         Self::Custom(config)
@@ -339,6 +468,9 @@ pub enum CallSemantics {
     PriorityTaskPool {
         pool_name: String,
         priority: i32,
+    },
+    DurableCall {
+        id_data_connector: i32,
     },
 }
 
