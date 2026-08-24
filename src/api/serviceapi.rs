@@ -203,6 +203,8 @@ pub enum DataConnectorImplementation {
     RustCroner,
     #[serde(rename = "node/croner")]
     NodeCroner,
+    #[serde(rename = "cpp/libcron")]
+    CppLibcron,
     #[serde(rename = "temporal/go")]
     TemporalGo,
     #[serde(rename = "temporal/python")]
@@ -495,6 +497,25 @@ pub struct Link {
     pub priority: Option<i64>,
     #[serde(rename = "idDataConnector", skip_serializing_if = "Option::is_none")]
     pub id_data_connector: Option<i64>,
+    #[serde(rename = "taskQueue", skip_serializing_if = "Option::is_none")]
+    pub task_queue: Option<String>,
+    #[serde(
+        rename = "workflowExecutionTimeout",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub workflow_execution_timeout: Option<i64>,
+    #[serde(
+        rename = "activityStartToCloseTimeout",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub activity_start_to_close_timeout: Option<i64>,
+    #[serde(
+        rename = "activityHeartbeatTimeout",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub activity_heartbeat_timeout: Option<i64>,
+    #[serde(rename = "maximumAttempts", skip_serializing_if = "Option::is_none")]
+    pub maximum_attempts: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -569,6 +590,18 @@ pub struct DataConnector {
     pub namespace: Option<String>,
     #[serde(rename = "identity", skip_serializing_if = "Option::is_none")]
     pub identity: Option<String>,
+    #[serde(rename = "apiKey", skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(rename = "tlsEnabled", skip_serializing_if = "Option::is_none")]
+    pub tls_enabled: Option<bool>,
+    #[serde(rename = "tlsServerName", skip_serializing_if = "Option::is_none")]
+    pub tls_server_name: Option<String>,
+    #[serde(rename = "tlsCaFile", skip_serializing_if = "Option::is_none")]
+    pub tls_ca_file: Option<String>,
+    #[serde(rename = "tlsCertFile", skip_serializing_if = "Option::is_none")]
+    pub tls_cert_file: Option<String>,
+    #[serde(rename = "tlsKeyFile", skip_serializing_if = "Option::is_none")]
+    pub tls_key_file: Option<String>,
     #[serde(
         rename = "maxConcurrentActivities",
         skip_serializing_if = "Option::is_none"
