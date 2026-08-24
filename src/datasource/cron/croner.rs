@@ -368,12 +368,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn croner_calculates_the_next_timezone_aware_occurrence() {
+    fn croner_calculates_the_next_utc_occurrence() {
         let job = CronJob {
             endpoint_id: 1,
             endpoint_name: "hourly".to_owned(),
             schedule: Cron::from_str("0 * * * *").expect("valid cron fixture"),
-            timezone: Tz::from_str("Europe/Moscow").expect("valid timezone fixture"),
+            timezone: Tz::from_str("UTC").expect("valid timezone fixture"),
             overlap_policy: ScheduleOverlapPolicy::Skip,
             missed_run_policy: ScheduleMissedRunPolicy::Skip,
             consumer: Arc::new(NoopConsumer),
@@ -386,61 +386,6 @@ mod tests {
         assert_eq!(
             job.next(after).expect("next occurrence"),
             Utc.with_ymd_and_hms(2026, 8, 24, 13, 0, 0)
-                .single()
-                .expect("valid fixture")
-        );
-    }
-
-    #[test]
-    fn croner_candidates_satisfy_the_portable_dst_contract() {
-        let spring = CronJob {
-            endpoint_id: 1,
-            endpoint_name: "spring".to_owned(),
-            schedule: Cron::from_str("30 2 * * *").expect("valid cron fixture"),
-            timezone: Tz::from_str("America/New_York").expect("valid timezone fixture"),
-            overlap_policy: ScheduleOverlapPolicy::Skip,
-            missed_run_policy: ScheduleMissedRunPolicy::Skip,
-            consumer: Arc::new(NoopConsumer),
-            running: Arc::new(AtomicBool::new(false)),
-        };
-        let after_spring = Utc
-            .with_ymd_and_hms(2026, 3, 7, 8, 0, 0)
-            .single()
-            .expect("valid fixture");
-        assert_eq!(
-            spring.next(after_spring).expect("next spring occurrence"),
-            Utc.with_ymd_and_hms(2026, 3, 9, 6, 30, 0)
-                .single()
-                .expect("valid fixture")
-        );
-
-        let fall = CronJob {
-            endpoint_id: 2,
-            endpoint_name: "fall".to_owned(),
-            schedule: Cron::from_str("30 1 * * *").expect("valid cron fixture"),
-            timezone: Tz::from_str("America/New_York").expect("valid timezone fixture"),
-            overlap_policy: ScheduleOverlapPolicy::Skip,
-            missed_run_policy: ScheduleMissedRunPolicy::Skip,
-            consumer: Arc::new(NoopConsumer),
-            running: Arc::new(AtomicBool::new(false)),
-        };
-        let first = fall
-            .next(
-                Utc.with_ymd_and_hms(2026, 10, 31, 6, 0, 0)
-                    .single()
-                    .expect("valid fixture"),
-            )
-            .expect("first fall occurrence");
-        let second = fall.next(first).expect("next fall occurrence");
-        assert_eq!(
-            first,
-            Utc.with_ymd_and_hms(2026, 11, 1, 5, 30, 0)
-                .single()
-                .expect("valid fixture")
-        );
-        assert_eq!(
-            second,
-            Utc.with_ymd_and_hms(2026, 11, 2, 6, 30, 0)
                 .single()
                 .expect("valid fixture")
         );

@@ -151,6 +151,23 @@ impl RuntimeConfig {
                     connector.name()
                 )));
             }
+            match &endpoint {
+                RuntimeEndpointConfig::Cron(config) if config.timezone != "UTC" => {
+                    return Err(RuntimeError::InvalidConfiguration(format!(
+                        "Cron endpoint {:?} requires timezone UTC",
+                        config.name
+                    )));
+                }
+                RuntimeEndpointConfig::Temporal(config)
+                    if !config.schedule.is_empty() && config.timezone != "UTC" =>
+                {
+                    return Err(RuntimeError::InvalidConfiguration(format!(
+                        "scheduled Temporal endpoint {:?} requires timezone UTC",
+                        config.name
+                    )));
+                }
+                _ => {}
+            }
             let endpoint = Arc::new(endpoint);
             runtime.endpoints_by_id.insert(id, Arc::clone(&endpoint));
             runtime.endpoints_by_name.insert(name, endpoint);
@@ -300,4 +317,40 @@ fn duplicate_name<T>(kind: &str, name: &str) -> RuntimeResult<T> {
     Err(RuntimeError::InvalidConfiguration(format!(
         "duplicate {kind} name: {name}"
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        api::{ScheduleMissedRunPolicy, ScheduleOverlapPolicy},
+        runtime::config::{CronDataConnectorConfig, CronEndpointConfig},
+    };
+
+    #[test]
+    fn scheduled_endpoint_rejects_non_utc_timezone() {
+        let result = RuntimeConfig::from_parts(
+            CallSemantics::FunctionCall,
+            [],
+            [],
+            [],
+            [RuntimeDataConnectorConfig::Cron(CronDataConnectorConfig {
+                id: 1,
+                name: "cron".to_owned(),
+            })],
+            [RuntimeEndpointConfig::Cron(CronEndpointConfig {
+                id: 2,
+                name: "tick".to_owned(),
+                id_data_connector: 1,
+                enabled: true,
+                schedule: "* * * * *".to_owned(),
+                timezone: "Europe/Moscow".to_owned(),
+                overlap_policy: ScheduleOverlapPolicy::Skip,
+                missed_run_policy: ScheduleMissedRunPolicy::Skip,
+            })],
+            [],
+        );
+        let error = result.err().expect("non-UTC timezone must fail");
+        assert!(error.to_string().contains("requires timezone UTC"));
+    }
 }
