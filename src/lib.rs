@@ -18,5 +18,7 @@ pub use runtime::config::{
     CallSemantics, InputStreamConfig, JoinStreamConfig, LinkConfig, MultiJoinStreamConfig,
     StreamConfig,
 };
-pub use runtime::schedule::{ScheduleBackend, ScheduleTrigger, normalize_temporal_priority};
+pub use runtime::schedule::{
+    ScheduleBackend, ScheduleEndpointFunction, ScheduleTrigger, normalize_temporal_priority,
+};
 pub use runtime::stream::Stream;

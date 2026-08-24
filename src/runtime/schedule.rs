@@ -1,6 +1,9 @@
+use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::runtime::{collector::Collector, common::MessageContext};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -18,6 +21,24 @@ pub struct ScheduleTrigger {
     pub scheduled_at: DateTime<Utc>,
     pub fired_at: DateTime<Utc>,
     pub backend: ScheduleBackend,
+}
+
+/// User-defined boundary between a scheduler trigger and the graph input type.
+///
+/// Cron and Temporal schedule transports create only [`ScheduleTrigger`]. The
+/// generated endpoint function decides which values enter the declared input
+/// stream and emits them through the typed collector.
+#[async_trait]
+pub trait ScheduleEndpointFunction<T>: Send + Sync
+where
+    T: Send + Sync + 'static,
+{
+    async fn on_trigger(
+        &self,
+        context: MessageContext,
+        trigger: ScheduleTrigger,
+        out: &Collector<T>,
+    );
 }
 
 impl ScheduleTrigger {

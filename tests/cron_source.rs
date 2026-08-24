@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use servicelib::{
-    MessageContext, Payload, ScheduleBackend, ScheduleTrigger,
+    Collector, MessageContext, Payload, ScheduleEndpointFunction, ScheduleTrigger,
     api::{ScheduleMissedRunPolicy, ScheduleOverlapPolicy},
     datasource::cron::{CronDataSource, make_croner_endpoint_consumer},
     operators::InputStream,
@@ -17,10 +17,7 @@ use servicelib::{
 };
 use tokio::{sync::mpsc, time::Duration};
 
-fn runtime(
-    enabled: bool,
-    schedule: &str,
-) -> (RuntimeEnvironment, InputStream<ScheduleTrigger, (), String>) {
+fn runtime(enabled: bool, schedule: &str) -> (RuntimeEnvironment, InputStream<String, (), String>) {
     let environment = RuntimeEnvironment::default();
     let input_config = InputStreamConfig {
         stream: StreamConfig::new(1, "scheduled input"),
@@ -56,11 +53,11 @@ fn runtime(
     (environment, input)
 }
 
-struct Capture(mpsc::UnboundedSender<(String, ScheduleTrigger)>);
+struct Capture(mpsc::UnboundedSender<(String, String)>);
 
 #[async_trait]
-impl Consumer<ScheduleTrigger> for Capture {
-    async fn consume(&self, context: MessageContext, payload: Payload<ScheduleTrigger>) {
+impl Consumer<String> for Capture {
+    async fn consume(&self, context: MessageContext, payload: Payload<String>) {
         self.0
             .send((
                 context
@@ -73,11 +70,30 @@ impl Consumer<ScheduleTrigger> for Capture {
     }
 }
 
+struct BuildScheduledValue;
+
+#[async_trait]
+impl ScheduleEndpointFunction<String> for BuildScheduledValue {
+    async fn on_trigger(
+        &self,
+        context: MessageContext,
+        trigger: ScheduleTrigger,
+        out: &Collector<String>,
+    ) {
+        out.collect(
+            context,
+            format!("{}:{:?}", trigger.schedule_id, trigger.backend),
+        )
+        .await;
+    }
+}
+
 #[tokio::test]
 async fn cron_source_activates_the_existing_input_with_a_fresh_stream_id() {
     let (environment, input) = runtime(true, "* * * * * *");
     let data_source = CronDataSource::new(4, environment).expect("cron datasource");
-    make_croner_endpoint_consumer(&data_source, &input).expect("cron endpoint");
+    make_croner_endpoint_consumer(&data_source, &input, BuildScheduledValue)
+        .expect("cron endpoint");
     let (sender, mut receiver) = mpsc::unbounded_channel();
     input.stream().set_consumer(Arc::new(Capture(sender)), 3);
 
@@ -85,7 +101,7 @@ async fn cron_source_activates_the_existing_input_with_a_fresh_stream_id() {
         .start(MessageContext::new())
         .await
         .expect("start cron datasource");
-    let (stream_id, trigger) = tokio::time::timeout(Duration::from_secs(3), receiver.recv())
+    let (stream_id, value) = tokio::time::timeout(Duration::from_secs(3), receiver.recv())
         .await
         .expect("cron fired before timeout")
         .expect("capture channel remains open");
@@ -95,16 +111,15 @@ async fn cron_source_activates_the_existing_input_with_a_fresh_stream_id() {
         .expect("stop cron datasource");
 
     assert!(!stream_id.is_empty());
-    assert_eq!(trigger.schedule_id, "every second");
-    assert_eq!(trigger.backend, ScheduleBackend::Local);
-    assert!(trigger.scheduled_at <= trigger.fired_at);
+    assert_eq!(value, "every second:Local");
 }
 
 #[tokio::test]
 async fn disabled_cron_endpoint_exists_without_parsing_or_starting_its_schedule() {
     let (environment, input) = runtime(false, "not a cron expression");
     let data_source = CronDataSource::new(4, environment.clone()).expect("cron datasource");
-    make_croner_endpoint_consumer(&data_source, &input).expect("disabled endpoint still exists");
+    make_croner_endpoint_consumer(&data_source, &input, BuildScheduledValue)
+        .expect("disabled endpoint still exists");
 
     assert!(environment.endpoint_consumer(2).is_some());
     data_source

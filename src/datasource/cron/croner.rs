@@ -21,7 +21,7 @@ use crate::{
         config::{CronEndpointConfig, RuntimeEndpointConfig},
         datasource::{DataSource, DataSourceEndpointMetrics},
         environment::{Lifecycle, RuntimeEnvironment, RuntimeError, RuntimeResult},
-        schedule::{ScheduleBackend, ScheduleTrigger},
+        schedule::{ScheduleBackend, ScheduleEndpointFunction, ScheduleTrigger},
     },
 };
 
@@ -48,10 +48,7 @@ impl CronJob {
                 .schedule
                 .is_time_matching(&candidate)
                 .map_err(|error| RuntimeError::InvalidConfiguration(error.to_string()))?;
-            let first_fold = match self
-                .timezone
-                .from_local_datetime(&candidate.naive_local())
-            {
+            let first_fold = match self.timezone.from_local_datetime(&candidate.naive_local()) {
                 LocalResult::Ambiguous(first, _) => {
                     first.with_timezone(&Utc) == candidate.with_timezone(&Utc)
                 }
@@ -289,53 +286,70 @@ async fn run_scheduler(
     }
 }
 
-pub struct CronEndpointConsumer<R, E>
+pub struct CronEndpointConsumer<T, R, E, F>
 where
+    T: Send + Sync + 'static,
     R: Send + Sync + 'static,
     E: Send + Sync + 'static,
+    F: ScheduleEndpointFunction<T>,
 {
-    input: InputStream<ScheduleTrigger, R, E>,
+    input: InputStream<T, R, E>,
+    function: F,
     metrics: DataSourceEndpointMetrics,
 }
 
 #[async_trait]
-impl<R, E> Consumer<ScheduleTrigger> for CronEndpointConsumer<R, E>
+impl<T, R, E, F> Consumer<ScheduleTrigger> for CronEndpointConsumer<T, R, E, F>
 where
+    T: Send + Sync + 'static,
     R: Send + Sync + 'static,
     E: Send + Sync + 'static,
+    F: ScheduleEndpointFunction<T>,
 {
     async fn consume(&self, context: MessageContext, payload: Payload<ScheduleTrigger>) {
         let started = self.metrics.request_start();
-        self.input.consume_payload(context, payload).await;
+        self.function
+            .on_trigger(
+                context,
+                payload.into_value(),
+                &self.input.stream().collector(),
+            )
+            .await;
         self.metrics.request_end(started, true);
     }
 }
 
-impl<R, E> RuntimeEndpointConsumer for CronEndpointConsumer<R, E>
+impl<T, R, E, F> RuntimeEndpointConsumer for CronEndpointConsumer<T, R, E, F>
 where
+    T: Send + Sync + 'static,
     R: Send + Sync + 'static,
     E: Send + Sync + 'static,
+    F: ScheduleEndpointFunction<T> + 'static,
 {
     fn id(&self) -> i32 {
         self.input.endpoint_id()
     }
 
     fn function_implementation(&self) -> &'static str {
-        "servicelib::datasource::cron::Croner"
+        std::any::type_name::<F>()
     }
 }
 
-pub fn make_croner_endpoint_consumer<R, E>(
+pub fn make_croner_endpoint_consumer<T, R, E, F>(
     data_source: &Arc<CronDataSource>,
-    input: &InputStream<ScheduleTrigger, R, E>,
-) -> RuntimeResult<Arc<CronEndpointConsumer<R, E>>>
+    input: &InputStream<T, R, E>,
+    function: F,
+) -> RuntimeResult<Arc<CronEndpointConsumer<T, R, E, F>>>
 where
+    T: Send + Sync + 'static,
     R: Send + Sync + 'static,
     E: Send + Sync + 'static,
+    F: ScheduleEndpointFunction<T> + 'static,
 {
     let config = data_source.endpoint_config(input.endpoint_id())?;
     let consumer = Arc::new(CronEndpointConsumer {
         input: input.clone(),
+        function,
         metrics: DataSourceEndpointMetrics::from_input(input)?,
     });
     input
