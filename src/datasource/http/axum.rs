@@ -682,7 +682,11 @@ where
                     .map(|value| (name.as_str().to_owned(), value.to_owned()))
             })
             .collect();
-        let context = MessageContext::new().with_metadata(metadata);
+        let context = crate::runtime::datasource::apply_endpoint_tracing(
+            MessageContext::new().with_metadata(metadata),
+            self.input_stream.stream().environment(),
+            self.input_stream.endpoint_id(),
+        );
         let span = if context.sampling_enabled() {
             let span = tracing::info_span!(
                 "http.input",

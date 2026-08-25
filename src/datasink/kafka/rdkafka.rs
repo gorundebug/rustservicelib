@@ -15,6 +15,7 @@ use rdkafka::{
     ClientConfig,
     admin::{AdminClient, AdminOptions, NewTopic, TopicReplication},
     client::DefaultClientContext,
+    message::{Header, OwnedHeaders},
     producer::{FutureProducer, FutureRecord, Producer},
     types::RDKafkaErrorCode,
     util::Timeout,
@@ -46,7 +47,13 @@ pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 pub type StreamContext<T, R, E> = SinkStreamContext<T, R, E>;
 
 type SendFunction = Arc<
-    dyn Fn(String, Option<Vec<u8>>, Vec<u8>, Option<i32>) -> BoxFuture<HandlerResult<(i32, i64)>>
+    dyn Fn(
+            String,
+            Option<Vec<u8>>,
+            Vec<u8>,
+            Option<i32>,
+            HashMap<String, String>,
+        ) -> BoxFuture<HandlerResult<(i32, i64)>>
         + Send
         + Sync,
 >;
@@ -191,6 +198,7 @@ impl RdkafkaKafkaDataSink {
         key: Option<Vec<u8>>,
         value: Vec<u8>,
         partition: Option<i32>,
+        transport_metadata: HashMap<String, String>,
     ) -> HandlerResult<(i32, i64)> {
         if self.state.load(Ordering::Acquire) != 2 {
             return Err("Kafka producer is not running".into());
@@ -201,6 +209,16 @@ impl RdkafkaKafkaDataSink {
         }
         if let Some(partition) = partition {
             record = record.partition(partition);
+        }
+        if !transport_metadata.is_empty() {
+            let mut headers = OwnedHeaders::new();
+            for (key, value) in &transport_metadata {
+                headers = headers.insert(Header {
+                    key,
+                    value: Some(value.as_bytes()),
+                });
+            }
+            record = record.headers(headers);
         }
         let producer = self
             .producer
@@ -481,10 +499,12 @@ where
         let collect = Arc::clone(&self.collect);
         let send = Arc::clone(&self.send);
         (self.spawn)(Box::pin(async move {
-            let (partition, offset, error) = match send(topic, key, value, partition).await {
-                Ok((partition, offset)) => (partition, offset, None),
-                Err(error) => (0, 0, Some(error)),
-            };
+            let metadata = context.transport_metadata();
+            let (partition, offset, error) =
+                match send(topic, key, value, partition, metadata).await {
+                    Ok((partition, offset)) => (partition, offset, None),
+                    Err(error) => (0, 0, Some(error)),
+                };
             collect(context, on_delivery(partition, offset, error)).await;
         }));
     }
@@ -496,6 +516,7 @@ where
             self.key.clone(),
             self.value.clone(),
             partition,
+            self.context.transport_metadata(),
         )
         .await
     }
@@ -597,7 +618,7 @@ where
         endpoint_config,
         data_connector_config,
         runtime_state,
-        send,
+        move |topic, key, value, partition, _metadata| send(topic, key, value, partition),
         Arc::new(move |future| {
             tasks.spawn(future);
         }),
@@ -622,7 +643,10 @@ where
     R: Send + Sync + 'static,
     E: Send + Sync + 'static,
     H: EndpointHandler<HandlerState, T, R, E> + 'static,
-    F: Fn(String, Option<Vec<u8>>, Vec<u8>, Option<i32>) -> Fut + Send + Sync + 'static,
+    F: Fn(String, Option<Vec<u8>>, Vec<u8>, Option<i32>, HashMap<String, String>) -> Fut
+        + Send
+        + Sync
+        + 'static,
     Fut: Future<Output = HandlerResult<(i32, i64)>> + Send + 'static,
 {
     let labels = [
@@ -643,8 +667,8 @@ where
         topic: endpoint_config.topic,
         handler,
         partitioner,
-        send: Arc::new(move |topic, key, value, partition| {
-            Box::pin(send(topic, key, value, partition))
+        send: Arc::new(move |topic, key, value, partition, metadata| {
+            Box::pin(send(topic, key, value, partition, metadata))
         }),
         spawn,
         messages_total: scope.counter(
@@ -698,9 +722,9 @@ where
         endpoint_config,
         data_connector_config,
         runtime_state,
-        move |topic, key, value, partition| {
+        move |topic, key, value, partition, metadata| {
             let data_sink = Arc::clone(&data_sink);
-            async move { data_sink.send(topic, key, value, partition).await }
+            async move { data_sink.send(topic, key, value, partition, metadata).await }
         },
         Arc::new(move |future| {
             tasks.spawn(future);
@@ -734,9 +758,9 @@ where
         endpoint_config,
         data_connector_config,
         runtime_state,
-        move |topic, key, value, partition| {
+        move |topic, key, value, partition, metadata| {
             let data_sink = Arc::clone(&data_sink);
-            async move { data_sink.send(topic, key, value, partition).await }
+            async move { data_sink.send(topic, key, value, partition, metadata).await }
         },
         Arc::new(move |future| {
             tasks.spawn(future);

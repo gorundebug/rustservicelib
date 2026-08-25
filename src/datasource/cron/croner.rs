@@ -307,6 +307,11 @@ where
     F: ScheduleEndpointFunction<T>,
 {
     async fn consume(&self, context: MessageContext, payload: Payload<ScheduleTrigger>) {
+        let context = crate::runtime::datasource::apply_endpoint_tracing(
+            context,
+            self.input.stream().environment(),
+            self.input.endpoint_id(),
+        );
         let started = self.metrics.request_start();
         self.function
             .on_trigger(

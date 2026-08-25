@@ -241,6 +241,11 @@ where
         let _active_request = ActiveRequestGuard {
             concurrency: &self.concurrency,
         };
+        let context = crate::runtime::datasource::apply_endpoint_tracing(
+            context,
+            self.input_stream.stream().environment(),
+            self.input_stream.endpoint_id(),
+        );
         let span = if context.sampling_enabled() {
             let span = tracing::info_span!(
                 "local.input",

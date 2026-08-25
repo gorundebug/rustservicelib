@@ -65,9 +65,19 @@ fn tracing_requires_an_explicit_marker_or_sampled_remote_parent() {
         "traceparent".to_owned(),
         "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00".to_owned(),
     )]));
+    assert_eq!(
+        unsampled.transport_metadata()["traceparent"],
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00",
+        "an unsampled W3C parent remains a propagation carrier"
+    );
     assert!(
-        !unsampled.transport_metadata().contains_key("traceparent"),
-        "disabled tracing must not enter OpenTelemetry propagation"
+        !MessageContext::new()
+            .with_metadata(HashMap::from([(
+                "traceparent".to_owned(),
+                "00-00000000000000000000000000000000-00f067aa0ba902b7-01".to_owned(),
+            )]))
+            .sampling_enabled(),
+        "malformed or all-zero parents must not enable tracing"
     );
     assert!(
         MessageContext::new()

@@ -125,6 +125,8 @@ pub struct HttpEndpointConfig {
     pub id: i32,
     pub name: String,
     pub id_data_connector: i32,
+    #[serde(default)]
+    pub tracing_enabled: bool,
     pub http_method_type: api::HTTPMethodType,
     pub path: String,
 }
@@ -147,6 +149,8 @@ pub struct GrpcEndpointConfig {
     pub id: i32,
     pub name: String,
     pub id_data_connector: i32,
+    #[serde(default)]
+    pub tracing_enabled: bool,
     pub grpc_method_type: api::GrpcMethodType,
 }
 
@@ -185,6 +189,8 @@ pub struct KafkaEndpointConfig {
     pub name: String,
     pub id_data_connector: i32,
     #[serde(default)]
+    pub tracing_enabled: bool,
+    #[serde(default)]
     pub enabled: bool,
     pub create_topic: bool,
     pub topic: String,
@@ -222,6 +228,8 @@ pub struct CronEndpointConfig {
     pub name: String,
     pub id_data_connector: i32,
     #[serde(default)]
+    pub tracing_enabled: bool,
+    #[serde(default)]
     pub enabled: bool,
     pub schedule: String,
     #[serde(default = "default_schedule_timezone")]
@@ -238,6 +246,8 @@ pub struct TemporalEndpointConfig {
     pub id: i32,
     pub name: String,
     pub id_data_connector: i32,
+    #[serde(default)]
+    pub tracing_enabled: bool,
     #[serde(default)]
     pub enabled: bool,
     pub task_queue: String,
@@ -282,6 +292,8 @@ pub struct CustomEndpointConfig {
     pub id: i32,
     pub name: String,
     pub id_data_connector: i32,
+    #[serde(default)]
+    pub tracing_enabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -381,6 +393,17 @@ impl RuntimeEndpointConfig {
             Self::Cron(_) => api::DataConnectorType::Cron,
             Self::Temporal(_) => api::DataConnectorType::Temporal,
             Self::Custom(_) => api::DataConnectorType::Custom,
+        }
+    }
+
+    pub fn tracing_enabled(&self) -> bool {
+        match self {
+            Self::Http(config) => config.tracing_enabled,
+            Self::Grpc(config) => config.tracing_enabled,
+            Self::Kafka(config) => config.tracing_enabled,
+            Self::Cron(config) => config.tracing_enabled,
+            Self::Temporal(config) => config.tracing_enabled,
+            Self::Custom(config) => config.tracing_enabled,
         }
     }
 }

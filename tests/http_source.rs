@@ -150,6 +150,7 @@ async fn http_source_correlates_pipeline_result_and_waits_for_done() {
         id: 7,
         name: "process order".to_owned(),
         id_data_connector: 8,
+        tracing_enabled: false,
         http_method_type: HTTPMethodType::POST,
         path: "/orders".to_owned(),
     };

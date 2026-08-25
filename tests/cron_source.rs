@@ -38,6 +38,7 @@ fn runtime(enabled: bool, schedule: &str) -> (RuntimeEnvironment, InputStream<St
                 id: 2,
                 name: "every second".to_owned(),
                 id_data_connector: 4,
+                tracing_enabled: false,
                 enabled,
                 schedule: schedule.to_owned(),
                 timezone: "UTC".to_owned(),

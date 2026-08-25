@@ -373,6 +373,11 @@ where
         context: MessageContext,
         sender: Arc<dyn Sender<ResR>>,
     ) -> HandlerResult<(String, Arc<Pending<HandlerState, T, ResR, R, E>>)> {
+        let context = crate::runtime::datasource::apply_endpoint_tracing(
+            context,
+            self.input_stream.stream().environment(),
+            self.input_stream.endpoint_id(),
+        );
         let span = if context.sampling_enabled() {
             let span = tracing::info_span!(
                 "grpc.input",

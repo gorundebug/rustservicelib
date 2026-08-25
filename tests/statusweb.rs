@@ -106,6 +106,7 @@ impl Config for StatusConfig {
                 id: 10,
                 name: "Input".to_owned(),
                 id_data_connector: 5,
+                tracing_enabled: false,
                 http_method_type: servicelib::api::HTTPMethodType::POST,
                 path: "/input".to_owned(),
             }

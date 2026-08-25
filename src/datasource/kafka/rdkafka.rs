@@ -16,6 +16,7 @@ use rdkafka::{
     admin::{AdminClient, AdminOptions, NewTopic, TopicReplication},
     client::DefaultClientContext,
     consumer::{CommitMode, Consumer as KafkaConsumer, StreamConsumer},
+    message::Headers,
     types::RDKafkaErrorCode,
 };
 use tokio::{
@@ -64,6 +65,7 @@ pub struct ConsumerMessage {
     pub offset: i64,
     commit: CommitFunction,
     mark_message: MarkMessageFunction,
+    transport_metadata: HashMap<String, String>,
 }
 
 impl ConsumerMessage {
@@ -89,7 +91,13 @@ impl ConsumerMessage {
             offset,
             commit: Arc::new(move || Box::pin(commit())),
             mark_message: Arc::new(mark_message),
+            transport_metadata: HashMap::new(),
         }
+    }
+
+    fn with_transport_metadata(mut self, metadata: HashMap<String, String>) -> Self {
+        self.transport_metadata = metadata;
+        self
     }
 
     pub async fn commit(&self) -> HandlerResult {
@@ -726,6 +734,32 @@ where
                 let offset = message.offset();
                 let key = message.key().map(ToOwned::to_owned);
                 let value = message.payload().unwrap_or_default().to_vec();
+                let transport_metadata = message
+                    .headers()
+                    .map(|headers| {
+                        headers
+                            .iter()
+                            .filter_map(|header| {
+                                let key = header.key.to_ascii_lowercase();
+                                matches!(
+                                    key.as_str(),
+                                    "x-stream-id"
+                                        | "x-trace"
+                                        | "traceparent"
+                                        | "tracestate"
+                                        | "baggage"
+                                )
+                                .then(|| {
+                                    header
+                                        .value
+                                        .and_then(|value| std::str::from_utf8(value).ok())
+                                        .map(|value| (key, value.to_owned()))
+                                })
+                                .flatten()
+                            })
+                            .collect::<HashMap<_, _>>()
+                    })
+                    .unwrap_or_default();
 
                 let commit_consumer = Arc::clone(&consumer);
                 let commit_topic = topic.clone();
@@ -773,7 +807,8 @@ where
                     offset,
                     commit,
                     mark_message,
-                );
+                )
+                .with_transport_metadata(transport_metadata);
                 tokio::select! {
                     result = sender.send(message) => {
                         if result.is_err() {
@@ -868,6 +903,13 @@ where
         }
         let _active_request = ActiveRequestGuard(&self.concurrency);
 
+        let mut metadata = context.metadata().clone();
+        metadata.extend(message.transport_metadata.clone());
+        let context = crate::runtime::datasource::apply_endpoint_tracing(
+            context.with_metadata(metadata),
+            self.input_stream.stream().environment(),
+            self.input_stream.endpoint_id(),
+        );
         let span = if context.sampling_enabled() {
             let span = tracing::info_span!(
                 "kafka.input",

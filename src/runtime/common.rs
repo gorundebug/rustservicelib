@@ -16,6 +16,7 @@ use axum::http::HeaderMap;
 use opentelemetry::{
     Context as OpenTelemetryContext, global,
     propagation::{Extractor, Injector},
+    trace::TraceContextExt,
 };
 use tokio::{task::AbortHandle, time::Instant};
 use tokio_util::sync::CancellationToken;
@@ -25,13 +26,29 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 pub const STREAM_ID_HEADER: &str = "x-stream-id";
 pub const TRACE_SAMPLING_HEADER: &str = "x-trace";
 
+fn traceparent_flags(value: &str) -> Option<u8> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 55 || bytes[2] != b'-' || bytes[35] != b'-' || bytes[52] != b'-' {
+        return None;
+    }
+    if !bytes
+        .iter()
+        .enumerate()
+        .all(|(index, value)| matches!(index, 2 | 35 | 52) || value.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    if &value[..2] == "ff"
+        || value[3..35].bytes().all(|value| value == b'0')
+        || value[36..52].bytes().all(|value| value == b'0')
+    {
+        return None;
+    }
+    u8::from_str_radix(&value[53..55], 16).ok()
+}
+
 fn traceparent_is_sampled(value: &str) -> bool {
-    value
-        .split('-')
-        .nth(3)
-        .and_then(|flags| flags.get(..2))
-        .and_then(|flags| u8::from_str_radix(flags, 16).ok())
-        .is_some_and(|flags| flags & 1 != 0)
+    traceparent_flags(value).is_some_and(|flags| flags & 1 != 0)
 }
 
 /// Poll a future inside a tracing span only when that span is active. Wrapping
@@ -328,8 +345,11 @@ impl MessageContext {
         let sampled_parent = metadata
             .get("traceparent")
             .is_some_and(|value| traceparent_is_sampled(value));
+        let valid_parent = metadata
+            .get("traceparent")
+            .is_some_and(|value| traceparent_flags(value).is_some());
         self.sampling_enabled = explicit_sampling || sampled_parent;
-        if self.sampling_enabled {
+        if self.sampling_enabled || valid_parent {
             self.open_telemetry = global::get_text_map_propagator(|propagator| {
                 propagator.extract(&MetadataExtractor(&metadata))
             });
@@ -437,7 +457,7 @@ impl MessageContext {
                 metadata.insert(name.to_owned(), value.clone());
             }
         }
-        if self.sampling_enabled {
+        if self.open_telemetry.span().span_context().is_valid() {
             global::get_text_map_propagator(|propagator| {
                 propagator
                     .inject_context(&self.open_telemetry, &mut MetadataInjector(&mut metadata));

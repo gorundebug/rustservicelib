@@ -65,12 +65,29 @@ use crate::{
     runtime::{
         common::{Consumer, MessageContext, Payload},
         environment::{
-            Lifecycle, RuntimeResult,
+            Lifecycle, RuntimeEnvironment, RuntimeResult,
             metrics::{Float64Histogram, Int64Counter, Int64Gauge, Labels, Metrics, MetricsScope},
         },
         stream::Stream,
     },
 };
+
+/// Applies the current reloadable source-endpoint tracing policy to one event.
+pub fn apply_endpoint_tracing(
+    context: MessageContext,
+    environment: &RuntimeEnvironment,
+    endpoint_id: i32,
+) -> MessageContext {
+    if environment
+        .runtime_config()
+        .endpoint_by_id(endpoint_id)
+        .is_some_and(|config| config.tracing_enabled())
+    {
+        context.enable_sampling()
+    } else {
+        context
+    }
+}
 
 pub(crate) struct PendingRequests {
     enabled: bool,

@@ -118,6 +118,7 @@ fn make_sink(
                 id: id + 2,
                 name: "reserve".to_owned(),
                 id_data_connector: 1,
+                tracing_enabled: false,
                 grpc_method_type: method,
             }
             .into()],

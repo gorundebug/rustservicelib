@@ -342,6 +342,7 @@ mod tests {
                 id: 2,
                 name: "tick".to_owned(),
                 id_data_connector: 1,
+                tracing_enabled: false,
                 enabled: true,
                 schedule: "* * * * *".to_owned(),
                 timezone: "Europe/Moscow".to_owned(),

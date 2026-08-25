@@ -142,6 +142,7 @@ async fn http_sink_preserves_lifecycle_correlation_and_metrics() {
             id: 3,
             name: "reserve".to_owned(),
             id_data_connector: 5,
+            tracing_enabled: false,
             http_method_type: HTTPMethodType::POST,
             path: "/reserve".to_owned(),
         },

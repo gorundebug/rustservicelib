@@ -151,6 +151,7 @@ fn make_input(
                 id: id + 1,
                 name: "process".to_owned(),
                 id_data_connector: id + 10,
+                tracing_enabled: false,
                 grpc_method_type: servicelib::api::GrpcMethodType::NoStreaming,
             }
             .into()],
