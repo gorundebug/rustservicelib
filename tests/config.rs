@@ -5,47 +5,13 @@ use std::sync::{
 
 use serde::{Deserialize, Serialize};
 use servicelib::{
-    api::{DataType, TemporalExecutionType, TypeDefinitionFormat},
+    api::{DataType, TypeDefinitionFormat},
     runtime::{
         common::MessageContext,
-        config::{
-            Config, ConfigLoader, ModuleConfig, RuntimeConfig, TemporalEndpointConfig, TypeConfig,
-        },
+        config::{Config, ConfigLoader, ModuleConfig, RuntimeConfig, TypeConfig},
         environment::{Lifecycle, metrics::Metrics},
     },
 };
-
-#[test]
-fn temporal_endpoint_requires_explicit_execution_type() {
-    let endpoint: TemporalEndpointConfig = serde_yaml::from_str(
-        r#"
-id: 1
-name: submitted
-idDataConnector: 2
-taskQueue: automation
-temporalExecutionType: Activity
-activityStartToCloseTimeout: 30000
-maximumAttempts: 3
-"#,
-    )
-    .unwrap();
-    assert_eq!(
-        endpoint.temporal_execution_type,
-        TemporalExecutionType::Activity
-    );
-
-    let missing = serde_yaml::from_str::<TemporalEndpointConfig>(
-        r#"
-id: 1
-name: submitted
-idDataConnector: 2
-taskQueue: automation
-activityStartToCloseTimeout: 30000
-maximumAttempts: 3
-"#,
-    );
-    assert!(missing.is_err());
-}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct TestConfig {

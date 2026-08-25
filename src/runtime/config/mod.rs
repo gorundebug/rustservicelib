@@ -251,7 +251,6 @@ pub struct TemporalEndpointConfig {
     #[serde(default)]
     pub enabled: bool,
     pub task_queue: String,
-    pub temporal_execution_type: api::TemporalExecutionType,
     #[serde(default)]
     pub schedule: String,
     #[serde(default)]
