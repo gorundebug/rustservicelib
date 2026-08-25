@@ -23,35 +23,47 @@ fn runtime(enabled: bool, schedule: &str) -> (RuntimeEnvironment, InputStream<St
         stream: StreamConfig::new(1, "scheduled input"),
         endpoint_id: 2,
     };
-    environment.publish_runtime_config(Arc::new(
-        RuntimeConfig::from_parts(
-            CallSemantics::FunctionCall,
-            [],
-            [input_config.clone().into()],
-            [],
-            [CronDataConnectorConfig {
-                id: 4,
-                name: "local scheduler".to_owned(),
-            }
-            .into()],
-            [CronEndpointConfig {
-                id: 2,
-                name: "every second".to_owned(),
-                id_data_connector: 4,
-                tracing_enabled: false,
-                enabled,
-                schedule: schedule.to_owned(),
-                timezone: "UTC".to_owned(),
-                overlap_policy: ScheduleOverlapPolicy::Skip,
-                missed_run_policy: ScheduleMissedRunPolicy::Skip,
-            }
-            .into()],
-            [],
-        )
-        .expect("valid cron fixture"),
-    ));
+    environment.publish_runtime_config(Arc::new(runtime_config(
+        enabled,
+        schedule,
+        false,
+        input_config.clone(),
+    )));
     let input = InputStream::new(&input_config, environment.clone());
     (environment, input)
+}
+
+fn runtime_config(
+    enabled: bool,
+    schedule: &str,
+    tracing_enabled: bool,
+    input_config: InputStreamConfig,
+) -> RuntimeConfig {
+    RuntimeConfig::from_parts(
+        CallSemantics::FunctionCall,
+        [],
+        [input_config.into()],
+        [],
+        [CronDataConnectorConfig {
+            id: 4,
+            name: "local scheduler".to_owned(),
+        }
+        .into()],
+        [CronEndpointConfig {
+            id: 2,
+            name: "every second".to_owned(),
+            id_data_connector: 4,
+            tracing_enabled,
+            enabled,
+            schedule: schedule.to_owned(),
+            timezone: "UTC".to_owned(),
+            overlap_policy: ScheduleOverlapPolicy::Skip,
+            missed_run_policy: ScheduleMissedRunPolicy::Skip,
+        }
+        .into()],
+        [],
+    )
+    .expect("valid cron fixture")
 }
 
 struct Capture(mpsc::UnboundedSender<(String, String)>);
@@ -131,4 +143,30 @@ async fn disabled_cron_endpoint_exists_without_parsing_or_starting_its_schedule(
         .stop(MessageContext::new())
         .await
         .expect("stop empty scheduler");
+}
+
+#[test]
+fn endpoint_tracing_policy_is_read_from_each_published_runtime_config() {
+    let (environment, _) = runtime(false, "* * * * * *");
+    let input_config = InputStreamConfig {
+        stream: StreamConfig::new(1, "scheduled input"),
+        endpoint_id: 2,
+    };
+    let original = MessageContext::new();
+    let disabled =
+        servicelib::runtime::datasource::apply_endpoint_tracing(original.clone(), &environment, 2);
+    assert!(!disabled.sampling_enabled());
+
+    let enabled = runtime_config(true, "* * * * * *", true, input_config);
+    environment.publish_runtime_config(Arc::new(enabled));
+
+    let reloaded =
+        servicelib::runtime::datasource::apply_endpoint_tracing(original.clone(), &environment, 2);
+    assert!(reloaded.sampling_enabled());
+    let inherited = servicelib::runtime::datasource::apply_endpoint_tracing(
+        original.enable_sampling(),
+        &environment,
+        2,
+    );
+    assert!(inherited.sampling_enabled());
 }
