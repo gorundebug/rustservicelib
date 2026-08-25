@@ -492,9 +492,6 @@ pub enum CallSemantics {
         pool_name: String,
         priority: i32,
     },
-    DurableCall {
-        id_data_connector: i32,
-    },
 }
 
 impl CallSemantics {

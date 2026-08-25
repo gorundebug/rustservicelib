@@ -180,20 +180,6 @@ impl RuntimeConfig {
                     link.from, link.to
                 )));
             }
-            if let CallSemantics::DurableCall { id_data_connector } = &link.call_semantics {
-                let Some(connector) = runtime.data_connectors_by_id.get(id_data_connector) else {
-                    return Err(RuntimeError::InvalidConfiguration(format!(
-                        "durable link from={} to={} references unknown Temporal data connector {id_data_connector}",
-                        link.from, link.to
-                    )));
-                };
-                if connector.connector_type() != crate::api::DataConnectorType::Temporal {
-                    return Err(RuntimeError::InvalidConfiguration(format!(
-                        "durable link from={} to={} requires a Temporal data connector",
-                        link.from, link.to
-                    )));
-                }
-            }
             runtime.links.insert(id, Arc::new(link));
         }
         let mut referenced_pools = Vec::new();

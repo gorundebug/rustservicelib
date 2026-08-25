@@ -92,7 +92,6 @@ pub enum CallSemantics {
     TaskPool = 3,
     PriorityTaskPool = 4,
     ParallelCall = 5,
-    DurableCall = 6,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize_repr, Deserialize_repr)]
@@ -495,27 +494,6 @@ pub struct Link {
     pub pool_name: Option<String>,
     #[serde(rename = "priority", skip_serializing_if = "Option::is_none")]
     pub priority: Option<i64>,
-    #[serde(rename = "idDataConnector", skip_serializing_if = "Option::is_none")]
-    pub id_data_connector: Option<i64>,
-    #[serde(rename = "taskQueue", skip_serializing_if = "Option::is_none")]
-    pub task_queue: Option<String>,
-    #[serde(
-        rename = "workflowExecutionTimeout",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub workflow_execution_timeout: Option<i64>,
-    #[serde(
-        rename = "activityStartToCloseTimeout",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub activity_start_to_close_timeout: Option<i64>,
-    #[serde(
-        rename = "activityHeartbeatTimeout",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub activity_heartbeat_timeout: Option<i64>,
-    #[serde(rename = "maximumAttempts", skip_serializing_if = "Option::is_none")]
-    pub maximum_attempts: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -625,6 +603,8 @@ pub struct Endpoint {
     pub id_data_connector: i64,
     #[serde(rename = "enabled", skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    #[serde(rename = "tracingEnabled", skip_serializing_if = "Option::is_none")]
+    pub tracing_enabled: Option<bool>,
     #[serde(rename = "httpMethodType", skip_serializing_if = "Option::is_none")]
     pub http_method_type: Option<HTTPMethodType>,
     #[serde(rename = "path", skip_serializing_if = "Option::is_none")]
