@@ -32,6 +32,7 @@ const MDI_TIMER: &str = "M19.03 7.39L20.45 5.97C20 5.46 19.55 5 19.04 4.56L17.62
 const MDI_WHEN: &str = "M13,14C9.64,14 8.54,15.35 8.18,16.24C9.25,16.7 10,17.76 10,19A3,3 0 0,1 7,22A3,3 0 0,1 4,19C4,17.69 4.83,16.58 6,16.17V7.83C4.83,7.42 4,6.31 4,5A3,3 0 0,1 7,2A3,3 0 0,1 10,5C10,6.31 9.17,7.42 8,7.83V13.12C8.88,12.47 10.16,12 12,12C14.67,12 15.56,10.66 15.85,9.77C14.77,9.32 14,8.25 14,7A3,3 0 0,1 17,4A3,3 0 0,1 20,7C20,8.34 19.12,9.5 17.91,9.86C17.65,11.29 16.68,14 13,14M7,18A1,1 0 0,0 6,19A1,1 0 0,0 7,20A1,1 0 0,0 8,19A1,1 0 0,0 7,18M7,4A1,1 0 0,0 6,5A1,1 0 0,0 7,6A1,1 0 0,0 8,5A1,1 0 0,0 7,4M17,6A1,1 0 0,0 16,7A1,1 0 0,0 17,8A1,1 0 0,0 18,7A1,1 0 0,0 17,6Z";
 const MDI_API: &str = "M7 7H5A2 2 0 0 0 3 9V17H5V13H7V17H9V9A2 2 0 0 0 7 7M7 11H5V9H7M14 7H10V17H12V13H14A2 2 0 0 0 16 11V9A2 2 0 0 0 14 7M14 11H12V9H14M20 9V15H21V17H17V15H18V9H17V7H21V9Z";
 const MDI_CALL_MADE: &str = "M9,5V7H15.59L4,18.59L5.41,20L17,8.41V15H19V5";
+const MDI_CALENDAR_CLOCK: &str = "M15,13H16.5V15.82L18.94,17.23L18.19,18.53L15,16.69V13M19,8H5V19H9.67C9.24,18.09 9,17.07 9,16A7,7 0 0,1 16,9C17.07,9 18.09,9.24 19,9.67V8M5,21C3.89,21 3,20.1 3,19V5C3,3.89 3.89,3 5,3H6V1H8V3H16V1H18V3H19A2,2 0 0,1 21,5V11.1C22.24,12.36 23,14.09 23,16A7,7 0 0,1 16,23C14.09,23 12.36,22.24 11.1,21H5M16,11.15A4.85,4.85 0 0,0 11.15,16C11.15,18.68 13.32,20.85 16,20.85A4.85,4.85 0 0,0 20.85,16C20.85,13.32 18.68,11.15 16,11.15Z";
 
 const EDGE_COLOR: &str = "#0050FF";
 const ERROR_COLOR: &str = "#FF3030";
@@ -300,6 +301,9 @@ fn make_edge(
 }
 
 fn status_icon(runtime: &RuntimeConfig, config: &RuntimeStreamConfig) -> &'static str {
+    if status_icon_connector_type(runtime, config) == Some(DataConnectorType::Cron) {
+        return MDI_CALENDAR_CLOCK;
+    }
     if status_icon_is_api(runtime, config) {
         return if config.transformation_type() == TransformationType::Sink {
             MDI_CALL_MADE
@@ -327,17 +331,22 @@ fn status_icon(runtime: &RuntimeConfig, config: &RuntimeStreamConfig) -> &'stati
     }
 }
 
-fn status_icon_is_api(runtime: &RuntimeConfig, config: &RuntimeStreamConfig) -> bool {
+fn status_icon_connector_type(
+    runtime: &RuntimeConfig,
+    config: &RuntimeStreamConfig,
+) -> Option<DataConnectorType> {
     config
         .endpoint_id()
         .and_then(|endpoint_id| runtime.endpoint_by_id(endpoint_id))
         .and_then(|endpoint| runtime.data_connector_by_id(endpoint.data_connector_id()))
-        .is_some_and(|connector| {
-            matches!(
-                connector.connector_type(),
-                DataConnectorType::HTTP | DataConnectorType::GRPC
-            )
-        })
+        .map(|connector| connector.connector_type())
+}
+
+fn status_icon_is_api(runtime: &RuntimeConfig, config: &RuntimeStreamConfig) -> bool {
+    matches!(
+        status_icon_connector_type(runtime, config),
+        Some(DataConnectorType::HTTP | DataConnectorType::GRPC)
+    )
 }
 
 fn transformation_name(value: TransformationType) -> &'static str {
