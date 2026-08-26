@@ -248,6 +248,14 @@ pub enum ScheduleMissedRunPolicy {
     FireOnce,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub enum TemporalExecutionType {
+    #[serde(rename = "Activity")]
+    Activity,
+    #[serde(rename = "Workflow")]
+    Workflow,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize_repr, Deserialize_repr)]
 #[repr(i32)]
 pub enum TypeDefinitionFormat {
@@ -303,8 +311,6 @@ pub enum DataType {
     Any,
     #[serde(rename = "error")]
     Error,
-    #[serde(rename = "schedule trigger")]
-    ScheduleTrigger,
     #[serde(rename = "array")]
     Array,
     #[serde(rename = "map")]
@@ -653,6 +659,11 @@ pub struct Endpoint {
     pub missed_run_policy: Option<ScheduleMissedRunPolicy>,
     #[serde(rename = "taskQueue", skip_serializing_if = "Option::is_none")]
     pub task_queue: Option<String>,
+    #[serde(
+        rename = "temporalExecutionType",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub temporal_execution_type: Option<TemporalExecutionType>,
     #[serde(
         rename = "workflowExecutionTimeout",
         skip_serializing_if = "Option::is_none"
