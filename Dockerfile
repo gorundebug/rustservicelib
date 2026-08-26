@@ -13,10 +13,10 @@ RUN ./scripts/check_api.sh
 FROM source AS test
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/workspace/target \
-    cargo test --all-targets
+    cargo test --locked --all-targets
 
 FROM source AS lint
 RUN rustup component add clippy
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/workspace/target \
-    cargo clippy --all-targets -- -D warnings -A clippy::type-complexity
+    cargo clippy --locked --all-targets -- -D warnings -A clippy::type-complexity
