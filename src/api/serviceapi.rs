@@ -615,8 +615,8 @@ pub struct Endpoint {
     pub http_method_type: Option<HTTPMethodType>,
     #[serde(rename = "path", skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    #[serde(rename = "functionName", skip_serializing_if = "Option::is_none")]
-    pub function_name: Option<String>,
+    #[serde(rename = "functionName")]
+    pub function_name: String,
     #[serde(rename = "functionPackage", skip_serializing_if = "Option::is_none")]
     pub function_package: Option<String>,
     #[serde(rename = "publicFunction", skip_serializing_if = "Option::is_none")]
