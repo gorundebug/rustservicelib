@@ -404,6 +404,11 @@ where
     R: Send + Sync + 'static,
     E: Send + Sync + 'static,
 {
+    /// Apply reloadable endpoint and service defaults without rebuilding the
+    /// generated transport graph. Handlers that do not cache configuration
+    /// can keep the default no-op implementation.
+    fn reload(&self, _config: &HttpEndpointConfig, _default_timeout_ms: u64) {}
+
     async fn begin_request(
         &self,
         context: MessageContext,
