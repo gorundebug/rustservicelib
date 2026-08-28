@@ -10,7 +10,7 @@ test:
 	./scripts/test.sh
 
 fmt:
-	docker run --rm -v "$(CURDIR):/workspace" -w /workspace rust:1.97-bookworm cargo fmt --all
+	bash -c 'source scripts/dependency-proxy-env.sh; docker run --rm -v "$(CURDIR):/workspace" -w /workspace "$${DEPENDENCY_DOCKER_REGISTRY:-docker.io}/library/rust:1.97-bookworm" cargo fmt --all'
 
 lint:
-	docker build --target lint --tag rustservicelib-lint .
+	bash -c 'source scripts/dependency-proxy-env.sh; docker build --build-arg "DEPENDENCY_DOCKER_REGISTRY=$${DEPENDENCY_DOCKER_REGISTRY:-docker.io}" --target lint --tag rustservicelib-lint .'
