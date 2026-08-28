@@ -7,7 +7,7 @@ source "$root/scripts/dependency-proxy-env.sh"
 docker build \
     --add-host "host.docker.internal:host-gateway" \
     --build-arg "CARGO_REGISTRIES_CRATES_IO_INDEX=${CARGO_REGISTRIES_CRATES_IO_INDEX:-sparse+https://index.crates.io/}" \
-    --build-arg "SERVICEGEN_APT_DEBIAN_URL=${SERVICEGEN_APT_DEBIAN_URL:-}" \
-    --build-arg "SERVICEGEN_APT_DEBIAN_SECURITY_URL=${SERVICEGEN_APT_DEBIAN_SECURITY_URL:-}" \
-    --build-arg "SERVICEGEN_GIT_MIRROR_URL=${SERVICEGEN_GIT_MIRROR_URL:-}" \
+    --build-arg "DEPENDENCY_APT_DEBIAN_URL=${DEPENDENCY_APT_DEBIAN_URL:-}" \
+    --build-arg "DEPENDENCY_APT_DEBIAN_SECURITY_URL=${DEPENDENCY_APT_DEBIAN_SECURITY_URL:-}" \
+    --build-arg "DEPENDENCY_GIT_MIRROR_URL=${DEPENDENCY_GIT_MIRROR_URL:-}" \
     --target test --tag rustservicelib-test .

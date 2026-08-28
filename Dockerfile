@@ -1,11 +1,11 @@
 FROM rust:1.97-bookworm AS toolchain
 
-ARG SERVICEGEN_APT_DEBIAN_URL=
-ARG SERVICEGEN_APT_DEBIAN_SECURITY_URL=
-RUN if [ -n "$SERVICEGEN_APT_DEBIAN_URL$SERVICEGEN_APT_DEBIAN_SECURITY_URL" ]; then \
+ARG DEPENDENCY_APT_DEBIAN_URL=
+ARG DEPENDENCY_APT_DEBIAN_SECURITY_URL=
+RUN if [ -n "$DEPENDENCY_APT_DEBIAN_URL$DEPENDENCY_APT_DEBIAN_SECURITY_URL" ]; then \
       find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -exec sed -i \
-        -e "s|http://deb.debian.org/debian-security|$SERVICEGEN_APT_DEBIAN_SECURITY_URL|g" \
-        -e "s|http://deb.debian.org/debian|$SERVICEGEN_APT_DEBIAN_URL|g" {} +; \
+        -e "s|http://deb.debian.org/debian-security|$DEPENDENCY_APT_DEBIAN_SECURITY_URL|g" \
+        -e "s|http://deb.debian.org/debian|$DEPENDENCY_APT_DEBIAN_URL|g" {} +; \
     fi
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends cmake \
@@ -14,13 +14,13 @@ RUN apt-get update \
 WORKDIR /workspace
 
 ARG CARGO_REGISTRIES_CRATES_IO_INDEX=sparse+https://index.crates.io/
-ARG SERVICEGEN_GIT_MIRROR_URL=
-RUN if [ -n "$SERVICEGEN_GIT_MIRROR_URL" ]; then \
+ARG DEPENDENCY_GIT_MIRROR_URL=
+RUN if [ -n "$DEPENDENCY_GIT_MIRROR_URL" ]; then \
       git config --global \
-        "url.${SERVICEGEN_GIT_MIRROR_URL}/github.com/.insteadOf" \
+        "url.${DEPENDENCY_GIT_MIRROR_URL}/github.com/.insteadOf" \
         "https://github.com/"; \
       git config --global \
-        "url.${SERVICEGEN_GIT_MIRROR_URL}/gitlab.com/.insteadOf" \
+        "url.${DEPENDENCY_GIT_MIRROR_URL}/gitlab.com/.insteadOf" \
         "https://gitlab.com/"; \
     fi
 ENV CARGO_REGISTRIES_CRATES_IO_INDEX=${CARGO_REGISTRIES_CRATES_IO_INDEX}
