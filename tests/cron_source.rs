@@ -13,9 +13,13 @@ use servicelib::{
             RuntimeConfig, StreamConfig,
         },
         environment::{Lifecycle, RuntimeEnvironment},
+        stream::Stream,
     },
 };
-use tokio::{sync::mpsc, time::Duration};
+use tokio::{
+    sync::{Notify, mpsc},
+    time::Duration,
+};
 
 fn runtime(enabled: bool, schedule: &str) -> (RuntimeEnvironment, InputStream<String, (), String>) {
     let environment = RuntimeEnvironment::default();
@@ -101,6 +105,21 @@ impl ScheduleEndpointFunction<String> for BuildScheduledValue {
     }
 }
 
+struct HoldingPipeline {
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+    results: Stream<()>,
+}
+
+#[async_trait]
+impl Consumer<String> for HoldingPipeline {
+    async fn consume(&self, context: MessageContext, _payload: Payload<String>) {
+        self.started.notify_one();
+        self.release.notified().await;
+        self.results.emit(context, Payload::new(())).await;
+    }
+}
+
 #[tokio::test]
 async fn cron_source_activates_the_existing_input_with_a_fresh_stream_id() {
     let (environment, input) = runtime(true, "* * * * * *");
@@ -143,6 +162,50 @@ async fn disabled_cron_endpoint_exists_without_parsing_or_starting_its_schedule(
         .stop(MessageContext::new())
         .await
         .expect("stop empty scheduler");
+}
+
+#[tokio::test]
+async fn cron_stop_waits_for_the_correlated_pipeline_result() {
+    let (environment, input) = runtime(true, "* * * * * *");
+    let results = Stream::new(
+        &StreamConfig::new(3, "scheduled result"),
+        environment.clone(),
+    );
+    input.set_source(&results).expect("set result stream");
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    input
+        .stream()
+        .try_set_consumer(
+            Arc::new(HoldingPipeline {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+                results,
+            }),
+            3,
+        )
+        .expect("set pipeline");
+    let data_source = CronDataSource::new(4, environment).expect("cron datasource");
+    make_croner_endpoint_consumer(&data_source, &input, BuildScheduledValue)
+        .expect("cron endpoint");
+
+    data_source
+        .start(MessageContext::new())
+        .await
+        .expect("start cron datasource");
+    tokio::time::timeout(Duration::from_secs(3), started.notified())
+        .await
+        .expect("cron pipeline started");
+    let stopping_source = Arc::clone(&data_source);
+    let stopping = tokio::spawn(async move { stopping_source.stop(MessageContext::new()).await });
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(!stopping.is_finished());
+
+    release.notify_one();
+    stopping
+        .await
+        .expect("stop task joined")
+        .expect("cron datasource drained");
 }
 
 #[test]

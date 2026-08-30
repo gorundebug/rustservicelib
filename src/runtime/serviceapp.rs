@@ -1,7 +1,9 @@
 use std::{
     collections::{HashMap, HashSet},
     convert::Infallible,
+    future::Future,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use axum::{
@@ -68,9 +70,21 @@ async fn stop_with_connector_telemetry<T: ?Sized + Lifecycle>(
             counter.inc();
         }
         tracing::warn!(connector = name, kind, "data connector stopped by timeout");
-        stop.await?;
     }
     Ok(())
+}
+
+async fn wait_until_shutdown_deadline<F>(
+    context: &MessageContext,
+    operation: F,
+) -> Option<F::Output>
+where
+    F: Future,
+{
+    match context.remaining() {
+        Some(remaining) => tokio::time::timeout(remaining, operation).await.ok(),
+        None => Some(operation.await),
+    }
 }
 
 fn register_configured_pools(environment: &RuntimeEnvironment) -> RuntimeResult<()> {
@@ -608,6 +622,9 @@ impl ServiceApp {
 
     pub async fn stop(&self, context: MessageContext) -> RuntimeResult<()> {
         let config = self.config();
+        let context = context.with_timeout_limit(Duration::from_millis(
+            u64::try_from(config.shutdown_timeout).unwrap_or_default(),
+        ));
         tracing::info!(service = %config.name, "stopping service");
         {
             let mut state = self.state.lock().await;
@@ -633,9 +650,44 @@ impl ServiceApp {
             .expect("service HTTP shutdown lock poisoned")
             .cancel();
 
+        // Drain the native HTTP and gRPC servers before stopping graph-owned
+        // data sources, pools, storages or sinks. Their shutdown tokens close
+        // admission immediately; awaiting the server tasks keeps every
+        // dependency available to requests that were already accepted.
+        let mut first_error = None;
+        if let Some(task) = self.grpc_task.lock().await.take() {
+            if let Some(result) = wait_until_shutdown_deadline(&context, task).await {
+                let result = result
+                    .map_err(|error| RuntimeError::Transport(error.to_string()))
+                    .and_then(|result| result.map_err(RuntimeError::Transport));
+                if let Err(error) = result {
+                    tracing::warn!(error = %error, "gRPC server shutdown failed");
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            } else {
+                tracing::warn!("gRPC server shutdown timed out");
+            }
+        }
+        if let Some(task) = self.http_task.lock().await.take() {
+            if let Some(result) = wait_until_shutdown_deadline(&context, task).await {
+                let result = result
+                    .map_err(|error| RuntimeError::Transport(error.to_string()))
+                    .and_then(|result| result.map_err(RuntimeError::Transport));
+                if let Err(error) = result {
+                    tracing::warn!(error = %error, "HTTP server shutdown failed");
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            } else {
+                tracing::warn!("HTTP server shutdown timed out");
+            }
+        }
+
         let data_sources = self.data_sources.values().cloned().collect::<Vec<_>>();
         let components = self.components.clone();
-        let mut first_error = None;
         let mut first_phase = Vec::new();
         for resource in data_sources {
             let context = context.clone();
@@ -656,27 +708,12 @@ impl ServiceApp {
             let context = context.clone();
             first_phase.push(tokio::spawn(async move { component.stop(context).await }));
         }
-        for pool in self.environment.task_pools() {
-            let context = context.clone();
-            first_phase.push(tokio::spawn(async move {
-                pool.stop_with_context(context).await;
-                Ok(())
-            }));
+        let first_phase_results =
+            wait_until_shutdown_deadline(&context, join_all(first_phase)).await;
+        if first_phase_results.is_none() {
+            tracing::warn!("service admission shutdown timed out");
         }
-        for pool in self.environment.priority_task_pools() {
-            let context = context.clone();
-            first_phase.push(tokio::spawn(async move {
-                pool.stop_with_context(context).await;
-                Ok(())
-            }));
-        }
-        let delay_pool = Arc::clone(self.environment.delay_pool());
-        let delay_context = context.clone();
-        first_phase.push(tokio::spawn(async move {
-            delay_pool.stop_with_context(delay_context).await;
-            Ok(())
-        }));
-        for result in join_all(first_phase).await {
+        for result in first_phase_results.unwrap_or_default() {
             let result = match result {
                 Ok(result) => result,
                 Err(error) => Err(RuntimeError::Transport(error.to_string())),
@@ -688,57 +725,88 @@ impl ServiceApp {
                 }
             }
         }
-        for storage in self.environment.storages() {
-            storage.stop(context.clone()).await;
-        }
-        if let Some(task) = self.grpc_task.lock().await.take() {
-            let result = task
-                .await
-                .map_err(|error| RuntimeError::Transport(error.to_string()))
-                .and_then(|result| result.map_err(RuntimeError::Transport));
-            if let Err(error) = result {
-                tracing::warn!(error = %error, "gRPC server shutdown failed");
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
-            }
-        }
-        if let Some(task) = self.http_task.lock().await.take() {
-            let result = task
-                .await
-                .map_err(|error| RuntimeError::Transport(error.to_string()))
-                .and_then(|result| result.map_err(RuntimeError::Transport));
-            if let Err(error) = result {
-                tracing::warn!(error = %error, "HTTP server shutdown failed");
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
-            }
+        // All external admission and source-owned work are stopped. Drain every
+        // nested ParallelCall before stopping pools, storages or sinks.
+        if wait_until_shutdown_deadline(&context, self.environment.drain_parallel())
+            .await
+            .is_none()
+        {
+            tracing::warn!("service graph drain timed out");
         }
 
-        // All external admission and managed pools are stopped. Drain every
-        // nested ParallelCall before stopping sinks and releasing graph-owned
-        // endpoint consumers.
-        self.environment.drain_parallel().await;
+        // Source-owned work, including Cron jobs, can schedule through the
+        // ordinary graph pools while it drains. Stop those pools and graph
+        // storage only after all admitted graph work has quiesced.
+        let mut runtime_resources = Vec::new();
+        for pool in self.environment.task_pools() {
+            let context = context.clone();
+            runtime_resources.push(tokio::spawn(async move {
+                pool.stop_with_context(context).await;
+                RuntimeResult::Ok(())
+            }));
+        }
+        for pool in self.environment.priority_task_pools() {
+            let context = context.clone();
+            runtime_resources.push(tokio::spawn(async move {
+                pool.stop_with_context(context).await;
+                RuntimeResult::Ok(())
+            }));
+        }
+        let delay_pool = Arc::clone(self.environment.delay_pool());
+        let delay_context = context.clone();
+        runtime_resources.push(tokio::spawn(async move {
+            delay_pool.stop_with_context(delay_context).await;
+            RuntimeResult::Ok(())
+        }));
+        for storage in self.environment.storages() {
+            let context = context.clone();
+            runtime_resources.push(tokio::spawn(async move {
+                storage.stop(context).await;
+                RuntimeResult::Ok(())
+            }));
+        }
+        let resource_results =
+            wait_until_shutdown_deadline(&context, join_all(runtime_resources)).await;
+        if resource_results.is_none() {
+            tracing::warn!("runtime pool and storage shutdown timed out");
+        }
+        for result in resource_results.unwrap_or_default() {
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => Err(RuntimeError::Transport(error.to_string())),
+            };
+            if let Err(error) = result {
+                tracing::warn!(error = %error, "runtime pool or storage shutdown failed");
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
 
         let data_sinks = self.data_sinks.values().cloned().collect::<Vec<_>>();
-        for result in join_all(data_sinks.into_iter().map(|resource| {
-            let context = context.clone();
-            let name = resource.name().to_owned();
-            let metrics = self.environment.metrics().clone();
-            tokio::spawn(async move {
-                stop_with_connector_telemetry(
-                    resource,
-                    name,
-                    "datasink_connector",
-                    context,
-                    metrics,
-                )
-                .await
-            })
-        }))
-        .await
-        {
+        let sink_results = wait_until_shutdown_deadline(
+            &context,
+            join_all(data_sinks.into_iter().map(|resource| {
+                let context = context.clone();
+                let name = resource.name().to_owned();
+                let metrics = self.environment.metrics().clone();
+                tokio::spawn(async move {
+                    stop_with_connector_telemetry(
+                        resource,
+                        name,
+                        "datasink_connector",
+                        context,
+                        metrics,
+                    )
+                    .await
+                })
+            })),
+        )
+        .await;
+        if sink_results.is_none() {
+            tracing::warn!("data sink shutdown timed out");
+        }
+        for result in sink_results.unwrap_or_default() {
             let result = match result {
                 Ok(result) => result,
                 Err(error) => Err(RuntimeError::Transport(error.to_string())),
@@ -753,14 +821,25 @@ impl ServiceApp {
         // Match the Go lifecycle: stop runtime resources first, then flush
         // metrics, traces and finally logs so shutdown diagnostics remain
         // observable for as long as possible.
-        if let Err(error) = self.environment.stop_runtime_metrics().await {
-            tracing::warn!(error = %error, "Tokio runtime metrics shutdown");
+        match wait_until_shutdown_deadline(&context, self.environment.stop_runtime_metrics()).await
+        {
+            Some(Err(error)) => tracing::warn!(error = %error, "Tokio runtime metrics shutdown"),
+            None => tracing::warn!("Tokio runtime metrics shutdown timed out"),
+            Some(Ok(())) => {}
         }
-        if let Err(error) = self.environment.metrics_engine().shutdown().await {
-            tracing::warn!(error = %error, "metrics engine shutdown");
+        match wait_until_shutdown_deadline(&context, self.environment.metrics_engine().shutdown())
+            .await
+        {
+            Some(Err(error)) => tracing::warn!(error = %error, "metrics engine shutdown"),
+            None => tracing::warn!("metrics engine shutdown timed out"),
+            Some(Ok(())) => {}
         }
-        if let Err(error) = self.environment.tracing_engine().shutdown().await {
-            tracing::warn!(error = %error, "tracing engine shutdown");
+        match wait_until_shutdown_deadline(&context, self.environment.tracing_engine().shutdown())
+            .await
+        {
+            Some(Err(error)) => tracing::warn!(error = %error, "tracing engine shutdown"),
+            None => tracing::warn!("tracing engine shutdown timed out"),
+            Some(Ok(())) => {}
         }
         // Endpoint consumers keep their typed InputStream and therefore a
         // clone of this environment. Release the runtime ownership explicitly
@@ -770,8 +849,12 @@ impl ServiceApp {
         // Emit the terminal lifecycle record before the logging provider is
         // flushed. Logging after shutdown would only reach incidental layers.
         tracing::info!(service = %config.name, "service stopped");
-        if let Err(error) = self.environment.logs_engine().shutdown().await {
-            tracing::warn!(error = %error, "logs engine shutdown");
+        match wait_until_shutdown_deadline(&context, self.environment.logs_engine().shutdown())
+            .await
+        {
+            Some(Err(error)) => tracing::warn!(error = %error, "logs engine shutdown"),
+            None => tracing::warn!("logs engine shutdown timed out"),
+            Some(Ok(())) => {}
         }
         match first_error {
             Some(error) => Err(error),

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     str::FromStr,
     sync::{
         Arc, Mutex,
@@ -10,7 +11,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use chrono_tz::Tz;
 use croner::Cron;
-use tokio::{sync::Mutex as AsyncMutex, task::JoinHandle};
+use tokio::{
+    sync::{Mutex as AsyncMutex, oneshot},
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -223,15 +227,28 @@ impl Lifecycle for CronDataSource {
         Ok(())
     }
 
-    async fn stop(&self, _context: MessageContext) -> RuntimeResult<()> {
+    async fn stop(&self, context: MessageContext) -> RuntimeResult<()> {
         self.cancellation
             .lock()
             .expect("cron cancellation lock poisoned")
             .cancel();
-        if let Some(scheduler) = self.scheduler.lock().await.take() {
-            scheduler
-                .await
-                .map_err(|error| RuntimeError::Transport(error.to_string()))??;
+        if let Some(mut scheduler) = self.scheduler.lock().await.take() {
+            if let Some(remaining) = context.remaining() {
+                tokio::select! {
+                    result = &mut scheduler => {
+                        result.map_err(|error| RuntimeError::Transport(error.to_string()))??;
+                    }
+                    () = tokio::time::sleep(remaining) => {
+                        scheduler.abort();
+                        let _ = scheduler.await;
+                        tracing::warn!("cron datasource stopped by shutdown timeout");
+                    }
+                }
+            } else {
+                scheduler
+                    .await
+                    .map_err(|error| RuntimeError::Transport(error.to_string()))??;
+            }
         }
         Ok(())
     }
@@ -250,8 +267,11 @@ async fn run_scheduler(
         let delay = (next - Utc::now()).to_std().unwrap_or_default();
         tokio::select! {
             () = cancellation.cancelled() => {
-                tasks.abort_all();
-                while tasks.join_next().await.is_some() {}
+                while let Some(result) = tasks.join_next().await {
+                    if let Err(error) = result {
+                        tracing::error!(error = %error, "cron endpoint task failed while draining");
+                    }
+                }
                 return Ok(());
             }
             () = tokio::time::sleep(delay) => {}
@@ -296,6 +316,7 @@ where
     input: InputStream<T, R, E>,
     function: F,
     metrics: DataSourceEndpointMetrics,
+    pending: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
 }
 
 #[async_trait]
@@ -313,6 +334,38 @@ where
             self.input.endpoint_id(),
         );
         let started = self.metrics.request_start();
+        let stream_id = context.stream_id().map(ToOwned::to_owned);
+        let result = if self.input.result_stream().is_some() {
+            let Some(stream_id) = stream_id else {
+                tracing::error!(endpoint = %self.input.endpoint_name().unwrap_or_default(),
+                    "cron endpoint activation has no stream id");
+                self.metrics.request_end(started, false);
+                return;
+            };
+            let (sender, receiver) = oneshot::channel();
+            let inserted = {
+                let mut pending = self
+                    .pending
+                    .lock()
+                    .expect("cron pending-result lock poisoned");
+                match pending.entry(stream_id.clone()) {
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(sender);
+                        true
+                    }
+                    std::collections::hash_map::Entry::Occupied(_) => false,
+                }
+            };
+            if !inserted {
+                tracing::error!(%stream_id, "duplicate active cron endpoint execution");
+                self.metrics.request_end(started, false);
+                return;
+            }
+            self.metrics.pending_add(&stream_id);
+            Some((stream_id, receiver))
+        } else {
+            None
+        };
         self.function
             .on_trigger(
                 context,
@@ -320,7 +373,18 @@ where
                 &self.input.stream().collector(),
             )
             .await;
-        self.metrics.request_end(started, true);
+        let success = if let Some((stream_id, receiver)) = result {
+            let received = receiver.await.is_ok();
+            self.pending
+                .lock()
+                .expect("cron pending-result lock poisoned")
+                .remove(&stream_id);
+            self.metrics.pending_remove(&stream_id);
+            received
+        } else {
+            true
+        };
+        self.metrics.request_end(started, success);
     }
 }
 
@@ -352,11 +416,16 @@ where
     F: ScheduleEndpointFunction<T> + 'static,
 {
     let config = data_source.endpoint_config(input.endpoint_id())?;
+    let pending = Arc::new(Mutex::new(HashMap::new()));
     let consumer = Arc::new(CronEndpointConsumer {
         input: input.clone(),
         function,
         metrics: DataSourceEndpointMetrics::from_input(input)?,
+        pending: Arc::clone(&pending),
     });
+    if input.result_stream().is_some() {
+        input.set_result_consumer(Arc::new(CronResultConsumer { pending }));
+    }
     input
         .stream()
         .environment()
@@ -378,6 +447,35 @@ where
         }))?;
     }
     Ok(consumer)
+}
+
+struct CronResultConsumer {
+    pending: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
+}
+
+#[async_trait]
+impl<R> Consumer<R> for CronResultConsumer
+where
+    R: Send + Sync + 'static,
+{
+    async fn consume(&self, context: MessageContext, _payload: Payload<R>) {
+        let Some(stream_id) = context.stream_id() else {
+            tracing::warn!("cron result arrived without stream id");
+            return;
+        };
+        let sender = self
+            .pending
+            .lock()
+            .expect("cron pending-result lock poisoned")
+            .remove(stream_id);
+        let Some(sender) = sender else {
+            tracing::warn!(%stream_id, "late cron endpoint result");
+            return;
+        };
+        if sender.send(()).is_err() {
+            tracing::warn!(%stream_id, "duplicate cron endpoint result");
+        }
+    }
 }
 
 #[cfg(test)]
