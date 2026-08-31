@@ -24,7 +24,15 @@ RUN if [ -n "$DEPENDENCY_GIT_MIRROR_URL" ]; then \
         "url.${DEPENDENCY_GIT_MIRROR_URL}/gitlab.com/.insteadOf" \
         "https://gitlab.com/"; \
     fi
-ENV CARGO_REGISTRIES_CRATES_IO_INDEX=${CARGO_REGISTRIES_CRATES_IO_INDEX}
+RUN if [ "$CARGO_REGISTRIES_CRATES_IO_INDEX" != "sparse+https://index.crates.io/" ]; then \
+      mkdir -p "$CARGO_HOME"; \
+      printf '%s\n' \
+        '[source.crates-io]' \
+        'replace-with = "dependency-proxy"' \
+        '[source.dependency-proxy]' \
+        "registry = \"$CARGO_REGISTRIES_CRATES_IO_INDEX\"" \
+        > "$CARGO_HOME/config.toml"; \
+    fi
 
 FROM toolchain AS source
 COPY . .
