@@ -580,12 +580,6 @@ impl ServiceApp {
         let result = async {
             self.environment.build_runtime_streams()?;
             self.environment.start_runtime_metrics().await?;
-            for resource in &data_sources {
-                resource.start(context.clone()).await?;
-            }
-            for resource in &data_sinks {
-                resource.start(context.clone()).await?;
-            }
             for storage in self.environment.storages() {
                 storage.start(context.clone()).await?;
             }
@@ -597,6 +591,14 @@ impl ServiceApp {
             }
             for component in &components {
                 component.start(context.clone()).await?;
+            }
+            for resource in &data_sinks {
+                resource.start(context.clone()).await?;
+            }
+            // Sources may emit from start(), so open graph admission only
+            // after every downstream resource is ready.
+            for resource in &data_sources {
+                resource.start(context.clone()).await?;
             }
             self.start_grpc_server().await?;
             self.start_http_server().await?;
