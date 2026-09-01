@@ -596,6 +596,8 @@ pub struct DataConnector {
         skip_serializing_if = "Option::is_none"
     )]
     pub max_concurrent_workflows: Option<i64>,
+    #[serde(rename = "workerStopTimeout", skip_serializing_if = "Option::is_none")]
+    pub worker_stop_timeout: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

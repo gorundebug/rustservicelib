@@ -319,6 +319,24 @@ impl MessageContext {
         }
     }
 
+    /// Creates a cancellable child for a concurrent operation group. Parent
+    /// cancellation reaches the child, while cancelling the child never
+    /// cancels its parent (the same direction as Go context.WithCancel).
+    pub fn child(&self) -> Self {
+        Self {
+            cancellation: self.cancellation.child_token(),
+            cancellation_callbacks: Arc::new(CancellationCallbacks {
+                next_id: AtomicU64::new(0),
+                callbacks: StdMutex::new(HashMap::new()),
+            }),
+            deadline: self.deadline,
+            metadata: Arc::clone(&self.metadata),
+            open_telemetry: self.open_telemetry.clone(),
+            sampling_enabled: self.sampling_enabled,
+            priority: self.priority,
+        }
+    }
+
     pub fn with_deadline(deadline: Instant) -> Self {
         Self {
             deadline: Some(deadline),
@@ -626,6 +644,22 @@ mod tests {
         tokio::task::yield_now().await;
 
         assert!(callbacks.upgrade().is_none());
+    }
+
+    #[test]
+    fn child_cancellation_is_one_way() {
+        let parent = MessageContext::new();
+        let child = parent.child();
+        let sibling = child.clone();
+
+        child.cancel();
+
+        assert!(sibling.is_cancelled());
+        assert!(!parent.is_cancelled());
+
+        let inherited = parent.child();
+        parent.cancel();
+        assert!(inherited.is_cancelled());
     }
 }
 
