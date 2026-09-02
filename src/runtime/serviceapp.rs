@@ -727,18 +727,10 @@ impl ServiceApp {
                 }
             }
         }
-        // All external admission and source-owned work are stopped. Drain every
-        // nested ParallelCall before stopping pools, storages or sinks.
-        if wait_until_shutdown_deadline(&context, self.environment.drain_parallel())
-            .await
-            .is_none()
-        {
-            tracing::warn!("service graph drain timed out");
-        }
-
-        // Source-owned work, including Cron jobs, can schedule through the
-        // ordinary graph pools while it drains. Stop those pools and graph
-        // storage only after all admitted graph work has quiesced.
+        // Sources no longer admit root work. Pools and timers are themselves
+        // graph-work producers, so drain them before observing the ParallelCall
+        // registry; an accepted pool task may create a parallel child while it
+        // is completing.
         let mut runtime_resources = Vec::new();
         for pool in self.environment.task_pools() {
             let context = context.clone();
@@ -783,6 +775,13 @@ impl ServiceApp {
                     first_error = Some(error);
                 }
             }
+        }
+
+        if wait_until_shutdown_deadline(&context, self.environment.drain_parallel())
+            .await
+            .is_none()
+        {
+            tracing::warn!("service graph drain timed out");
         }
 
         let data_sinks = self.data_sinks.values().cloned().collect::<Vec<_>>();
@@ -862,5 +861,83 @@ impl ServiceApp {
             Some(error) => Err(error),
             None => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    use tokio::sync::Notify;
+
+    use super::*;
+    use crate::runtime::config::RuntimeConfig;
+
+    #[tokio::test]
+    async fn pools_stop_before_parallel_registry_is_drained() {
+        let service = ServiceConfig {
+            id: 1,
+            name: "shutdown-order".to_owned(),
+            http_host: "127.0.0.1".to_owned(),
+            http_port: 0,
+            grpc_host: "127.0.0.1".to_owned(),
+            grpc_port: 0,
+            shutdown_timeout: 1_000,
+            default_call_semantics: CallSemantics::TaskPool {
+                pool_name: "workers".to_owned(),
+            },
+            ..ServiceConfig::default()
+        };
+        let environment = RuntimeEnvironment::default();
+        environment.publish_runtime_config(Arc::new(
+            RuntimeConfig::from_parts(
+                CallSemantics::FunctionCall,
+                [service.clone()],
+                [],
+                [],
+                [],
+                [],
+                [],
+            )
+            .expect("test runtime config"),
+        ));
+        let app = Arc::new(ServiceApp::new(environment, service).expect("test service"));
+        app.start(MessageContext::new())
+            .await
+            .expect("start test service");
+
+        let spawned = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let completed = Arc::new(AtomicBool::new(false));
+        let graph_environment = app.environment().clone();
+        let task_spawned = Arc::clone(&spawned);
+        let task_release = Arc::clone(&release);
+        let task_completed = Arc::clone(&completed);
+        app.environment()
+            .task_pool("workers")
+            .expect("configured pool")
+            .add_task(
+                MessageContext::new(),
+                Box::pin(async move {
+                    graph_environment.spawn_parallel(async move {
+                        task_spawned.notify_one();
+                        task_release.notified().await;
+                        task_completed.store(true, Ordering::Release);
+                    });
+                }),
+            )
+            .await
+            .expect("enqueue pool task");
+
+        let stopping_app = Arc::clone(&app);
+        let stopping = tokio::spawn(async move { stopping_app.stop(MessageContext::new()).await });
+        spawned.notified().await;
+        assert!(!stopping.is_finished());
+        release.notify_one();
+        stopping.await.expect("shutdown task").expect("stop service");
+        assert!(completed.load(Ordering::Acquire));
     }
 }
