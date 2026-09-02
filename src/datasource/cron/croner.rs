@@ -22,7 +22,7 @@ use crate::{
     operators::InputStream,
     runtime::{
         common::{Consumer, MessageContext, Payload, RuntimeEndpointConsumer, new_stream_id},
-        config::{CronEndpointConfig, RuntimeEndpointConfig},
+        config::{CronDataConnectorConfig, CronEndpointConfig, RuntimeEndpointConfig},
         datasource::{DataSource, DataSourceEndpointMetrics},
         environment::{Lifecycle, RuntimeEnvironment, RuntimeError, RuntimeResult},
         schedule::{ScheduleBackend, ScheduleEndpointFunction, ScheduleTrigger},
@@ -128,6 +128,20 @@ pub struct CronDataSource {
 }
 
 impl CronDataSource {
+    pub fn from_config(
+        config: &CronDataConnectorConfig,
+        environment: RuntimeEnvironment,
+    ) -> RuntimeResult<Arc<Self>> {
+        Ok(Arc::new(Self {
+            id: config.id,
+            name: config.name.clone(),
+            environment,
+            jobs: Mutex::new(Vec::new()),
+            cancellation: Mutex::new(CancellationToken::new()),
+            scheduler: AsyncMutex::new(None),
+        }))
+    }
+
     pub fn new(connector_id: i32, environment: RuntimeEnvironment) -> RuntimeResult<Arc<Self>> {
         let config = environment
             .runtime_config()
@@ -143,14 +157,13 @@ impl CronDataSource {
                 config.name()
             )));
         }
-        Ok(Arc::new(Self {
-            id: connector_id,
-            name: config.name().to_owned(),
+        Self::from_config(
+            &CronDataConnectorConfig {
+                id: connector_id,
+                name: config.name().to_owned(),
+            },
             environment,
-            jobs: Mutex::new(Vec::new()),
-            cancellation: Mutex::new(CancellationToken::new()),
-            scheduler: AsyncMutex::new(None),
-        }))
+        )
     }
 
     fn add_job(&self, job: Arc<CronJob>) -> RuntimeResult<()> {

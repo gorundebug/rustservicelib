@@ -48,6 +48,14 @@ impl TonicDataSink {
         })
     }
 
+    pub fn from_config(
+        environment: RuntimeEnvironment,
+        config: &GrpcDataConnectorConfig,
+    ) -> RuntimeResult<Arc<Self>> {
+        Self::validate_config(config)?;
+        Ok(Self::new(environment, config.id, config.name.clone()))
+    }
+
     pub fn from_stream<T, R, E>(
         stream: &Arc<SinkStreamWithResult<T, R, E>>,
     ) -> RuntimeResult<Arc<Self>>
@@ -77,12 +85,7 @@ impl TonicDataSink {
             })?;
         match connector.as_ref() {
             RuntimeDataConnectorConfig::Grpc(config) => {
-                Self::validate_config(config)?;
-                Ok(Self::new(
-                    stream.environment().clone(),
-                    config.id,
-                    config.name.clone(),
-                ))
+                Self::from_config(stream.environment().clone(), config)
             }
             _ => Err(RuntimeError::InvalidConfiguration(format!(
                 "endpoint {:?} does not reference a gRPC data connector",

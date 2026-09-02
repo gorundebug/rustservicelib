@@ -4,8 +4,9 @@ use async_trait::async_trait;
 
 use crate::runtime::{
     common::MessageContext,
+    config::GrpcDataConnectorConfig,
     datasource::DataSource,
-    environment::{Lifecycle, RuntimeError, RuntimeResult},
+    environment::{Lifecycle, RuntimeEnvironment, RuntimeError, RuntimeResult},
 };
 use crate::{operators::InputStream, runtime::config::RuntimeDataConnectorConfig};
 
@@ -22,6 +23,13 @@ impl TonicDataSource {
             name,
             state: Mutex::new(0),
         })
+    }
+
+    pub fn from_config(
+        _environment: RuntimeEnvironment,
+        config: &GrpcDataConnectorConfig,
+    ) -> RuntimeResult<Arc<Self>> {
+        Ok(Self::new(config.id, config.name.clone()))
     }
 
     pub fn from_input<T, R, E>(input: &InputStream<T, R, E>) -> RuntimeResult<Arc<Self>>
@@ -49,7 +57,7 @@ impl TonicDataSource {
             })?;
         match connector.as_ref() {
             RuntimeDataConnectorConfig::Grpc(config) => {
-                Ok(Self::new(config.id, config.name.clone()))
+                Self::from_config(input.stream().environment().clone(), config)
             }
             _ => Err(RuntimeError::InvalidConfiguration(format!(
                 "endpoint {:?} does not reference a gRPC data connector",

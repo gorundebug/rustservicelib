@@ -289,6 +289,13 @@ impl RdkafkaKafkaDataSource {
         })
     }
 
+    pub fn from_config(
+        environment: RuntimeEnvironment,
+        config: &KafkaDataConnectorConfig,
+    ) -> RuntimeResult<Arc<Self>> {
+        Ok(Self::new(environment, config.id, config.name.clone()))
+    }
+
     pub fn from_input<T, R, E>(input_stream: &InputStream<T, R, E>) -> RuntimeResult<Arc<Self>>
     where
         T: Send + Sync + 'static,
@@ -296,11 +303,7 @@ impl RdkafkaKafkaDataSource {
         E: Send + Sync + 'static,
     {
         let (_, connector) = kafka_input_configs(input_stream)?;
-        Ok(Self::new(
-            input_stream.stream().environment().clone(),
-            connector.id,
-            connector.name,
-        ))
+        Self::from_config(input_stream.stream().environment().clone(), &connector)
     }
 
     pub fn add_endpoint<HandlerState, T, R, E, H>(

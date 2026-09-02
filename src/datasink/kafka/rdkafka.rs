@@ -97,6 +97,13 @@ impl RdkafkaKafkaDataSink {
         })
     }
 
+    pub fn from_config(
+        environment: RuntimeEnvironment,
+        config: &KafkaDataConnectorConfig,
+    ) -> RuntimeResult<Arc<Self>> {
+        Ok(Self::new(environment, config.id, config.name.clone()))
+    }
+
     pub fn from_stream<T, R, E>(
         stream: &Arc<SinkStreamWithResult<T, R, E>>,
     ) -> RuntimeResult<Arc<Self>>
@@ -112,11 +119,7 @@ impl RdkafkaKafkaDataSink {
                 endpoint.name, endpoint.id_data_connector, connector.id
             )));
         }
-        Ok(Self::new(
-            stream.environment().clone(),
-            connector.id,
-            connector.name,
-        ))
+        Self::from_config(stream.environment().clone(), &connector)
     }
 
     fn add_endpoint(
