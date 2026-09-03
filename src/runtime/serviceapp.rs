@@ -868,13 +868,147 @@ impl ServiceApp {
 mod tests {
     use std::sync::{
         Arc,
+        Mutex as StdMutex,
         atomic::{AtomicBool, Ordering},
     };
 
+    use async_trait::async_trait;
     use tokio::sync::Notify;
 
     use super::*;
-    use crate::runtime::config::RuntimeConfig;
+    use crate::runtime::{config::RuntimeConfig, store::Storage};
+
+    struct RecordingResource {
+        id: i32,
+        name: &'static str,
+        events: Arc<StdMutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait]
+    impl Lifecycle for RecordingResource {
+        async fn start(&self, _context: MessageContext) -> RuntimeResult<()> {
+            self.events
+                .lock()
+                .expect("lifecycle event log poisoned")
+                .push(self.name);
+            Ok(())
+        }
+
+        async fn stop(&self, _context: MessageContext) -> RuntimeResult<()> {
+            Ok(())
+        }
+    }
+
+    impl DataSource for RecordingResource {
+        fn id(&self) -> i32 {
+            self.id
+        }
+
+        fn name(&self) -> &str {
+            self.name
+        }
+    }
+
+    struct RecordingSink(RecordingResource);
+
+    #[async_trait]
+    impl Lifecycle for RecordingSink {
+        async fn start(&self, context: MessageContext) -> RuntimeResult<()> {
+            self.0.start(context).await
+        }
+
+        async fn stop(&self, context: MessageContext) -> RuntimeResult<()> {
+            self.0.stop(context).await
+        }
+    }
+
+    impl DataSink for RecordingSink {
+        fn id(&self) -> i32 {
+            self.0.id
+        }
+
+        fn name(&self) -> &str {
+            self.0.name
+        }
+    }
+
+    struct RecordingStorage {
+        events: Arc<StdMutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait]
+    impl Storage for RecordingStorage {
+        async fn start(&self, _context: MessageContext) -> RuntimeResult<()> {
+            self.events
+                .lock()
+                .expect("lifecycle event log poisoned")
+                .push("storage");
+            Ok(())
+        }
+
+        async fn stop(&self, _context: MessageContext) {}
+    }
+
+    #[tokio::test]
+    async fn sources_start_after_all_downstream_resources() {
+        let service = ServiceConfig {
+            id: 1,
+            name: "startup-order".to_owned(),
+            http_host: "127.0.0.1".to_owned(),
+            http_port: 0,
+            grpc_host: "127.0.0.1".to_owned(),
+            grpc_port: 0,
+            shutdown_timeout: 1_000,
+            ..ServiceConfig::default()
+        };
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let environment = RuntimeEnvironment::default();
+        environment.publish_runtime_config(Arc::new(
+            RuntimeConfig::from_parts(
+                CallSemantics::FunctionCall,
+                [service.clone()],
+                [],
+                [],
+                [],
+                [],
+                [],
+            )
+            .expect("test runtime config"),
+        ));
+        environment.register_storage(Arc::new(RecordingStorage {
+            events: Arc::clone(&events),
+        }));
+        let mut app = ServiceApp::new(environment, service).expect("test service");
+        app.add_component(Arc::new(RecordingResource {
+            id: 2,
+            name: "component",
+            events: Arc::clone(&events),
+        }))
+        .expect("register component");
+        app.register_data_sink(Arc::new(RecordingSink(RecordingResource {
+            id: 3,
+            name: "sink",
+            events: Arc::clone(&events),
+        })))
+        .expect("register sink");
+        app.register_data_source(Arc::new(RecordingResource {
+            id: 4,
+            name: "source",
+            events: Arc::clone(&events),
+        }))
+        .expect("register source");
+
+        app.start(MessageContext::new())
+            .await
+            .expect("start test service");
+        assert_eq!(
+            *events.lock().expect("lifecycle event log poisoned"),
+            vec!["storage", "component", "sink", "source"]
+        );
+        app.stop(MessageContext::new())
+            .await
+            .expect("stop test service");
+    }
 
     #[tokio::test]
     async fn pools_stop_before_parallel_registry_is_drained() {
