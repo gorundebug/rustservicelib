@@ -586,16 +586,6 @@ pub struct DataConnector {
     pub tls_cert_file: Option<String>,
     #[serde(rename = "tlsKeyFile", skip_serializing_if = "Option::is_none")]
     pub tls_key_file: Option<String>,
-    #[serde(
-        rename = "maxConcurrentActivities",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub max_concurrent_activities: Option<i64>,
-    #[serde(
-        rename = "maxConcurrentWorkflows",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub max_concurrent_workflows: Option<i64>,
     #[serde(rename = "workerStopTimeout", skip_serializing_if = "Option::is_none")]
     pub worker_stop_timeout: Option<i64>,
 }
@@ -666,6 +656,16 @@ pub struct Endpoint {
         skip_serializing_if = "Option::is_none"
     )]
     pub temporal_execution_type: Option<TemporalExecutionType>,
+    #[serde(
+        rename = "maxConcurrentActivities",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_concurrent_activities: Option<i64>,
+    #[serde(
+        rename = "maxConcurrentWorkflowTasks",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_concurrent_workflow_tasks: Option<i64>,
     #[serde(
         rename = "workflowExecutionTimeout",
         skip_serializing_if = "Option::is_none"

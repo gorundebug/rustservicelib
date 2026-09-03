@@ -215,10 +215,6 @@ pub struct TemporalDataConnectorConfig {
     pub namespace: String,
     #[serde(default)]
     pub identity: String,
-    #[serde(default)]
-    pub max_concurrent_activities: usize,
-    #[serde(default)]
-    pub max_concurrent_workflows: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -267,6 +263,10 @@ pub struct TemporalEndpointConfig {
     #[serde(default)]
     pub activity_heartbeat_timeout: i64,
     pub maximum_attempts: i32,
+    #[serde(default)]
+    pub max_concurrent_activities: usize,
+    #[serde(default)]
+    pub max_concurrent_workflow_tasks: usize,
 }
 
 fn default_schedule_timezone() -> String {
