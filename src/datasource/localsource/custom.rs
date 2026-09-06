@@ -22,7 +22,7 @@ use crate::{
     operators::InputStream,
     runtime::{
         common::{Consumer, MessageContext, Payload, RuntimeEndpointConsumer, new_stream_id},
-        datasource::{PendingRequests, StreamContext},
+        datasource::{DataSource, PendingRequests, StreamContext},
         environment::{
             Lifecycle, RuntimeResult,
             metrics::{Float64Histogram, Int64Counter, Int64Gauge, Labels},
@@ -32,6 +32,14 @@ use crate::{
 };
 
 const PENDING_ROTATION_INTERVAL: Duration = Duration::from_secs(30);
+
+// Connector ids and stream ids are separate DSL namespaces. A custom source
+// is one lifecycle object per input stream, so keep its lifecycle key in a
+// disjoint (negative) namespace instead of colliding with connector-owned
+// sources registered in the same ServiceApp map.
+fn custom_data_source_id(stream_id: i32) -> i32 {
+    stream_id | i32::MIN
+}
 
 pub type HandlerError = Box<dyn Error + Send + Sync>;
 pub type HandlerResult = Result<(), HandlerError>;
@@ -563,6 +571,8 @@ where
     H: EndpointHandler<HandlerState, T, R, E> + 'static,
     P: DataProducer<T> + 'static,
 {
+    id: i32,
+    name: String,
     endpoint_consumer: Arc<CustomEndpointConsumer<HandlerState, T, R, E, H>>,
     producer: Arc<P>,
     cancellation: CancellationToken,
@@ -582,6 +592,8 @@ where
     H: EndpointHandler<HandlerState, T, R, E> + 'static,
     P: DataProducer<T> + 'static,
 {
+    let id = custom_data_source_id(input_stream.stream().id());
+    let name = input_stream.stream().name();
     let scope = input_stream.stream().environment().metrics().scope(
         "datasource_endpoint",
         [
@@ -684,11 +696,32 @@ where
         endpoint_consumer: Arc::clone(&endpoint_consumer),
     }));
     Ok(Arc::new(CustomDataSource {
+        id,
+        name,
         endpoint_consumer,
         producer: Arc::new(producer),
         cancellation: CancellationToken::new(),
         producer_task: AsyncMutex::new(None),
     }))
+}
+
+impl<HandlerState, T, R, E, H, P> DataSource
+    for CustomDataSource<HandlerState, T, R, E, H, P>
+where
+    HandlerState: Send + Sync + 'static,
+    T: Send + Sync + 'static,
+    R: Send + Sync + 'static,
+    E: Send + Sync + 'static,
+    H: EndpointHandler<HandlerState, T, R, E> + 'static,
+    P: DataProducer<T> + 'static,
+{
+    fn id(&self) -> i32 {
+        self.id
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 impl<HandlerState, T, R, E, H> RuntimeEndpointConsumer

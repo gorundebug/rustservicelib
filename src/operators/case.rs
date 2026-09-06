@@ -37,32 +37,24 @@ where
     async fn consume_case(&self, context: MessageContext, value: Payload<T>);
 }
 
-pub struct WhenStream<T, R, F>
+pub struct WhenStream<T>
 where
     T: Send + Sync + 'static,
-    R: Send + Sync + 'static,
-    F: Fn(&T) -> R + Send + Sync + 'static,
 {
-    output: Stream<R>,
-    map: F,
-    _input: std::marker::PhantomData<fn(T)>,
+    output: Stream<T>,
 }
 
 #[async_trait]
-impl<T, R, F> When<T> for WhenStream<T, R, F>
+impl<T> When<T> for WhenStream<T>
 where
     T: Send + Sync + 'static,
-    R: Send + Sync + 'static,
-    F: Fn(&T) -> R + Send + Sync + 'static,
 {
     fn stream(&self) -> &dyn RuntimeStream {
         &self.output
     }
 
     async fn consume_case(&self, context: MessageContext, value: Payload<T>) {
-        self.output
-            .emit(context, Payload::new((self.map)(&value)))
-            .await;
+        self.output.emit(context, value).await;
     }
 }
 
@@ -86,6 +78,7 @@ where
         selector: F,
     ) -> RuntimeResult<Arc<Self>> {
         let id = config.stream.id;
+        source.environment().register_runtime_stream(id);
         let case_stream = Arc::new(Self {
             selector,
             when_streams: ConstructionValue::new(Vec::new()),
@@ -112,19 +105,14 @@ where
     T: Send + Sync + 'static,
     F: BuildSwitchFunction<T> + 'static,
 {
-    pub fn when<R, M>(&self, config: &WhenStreamConfig, map: M) -> Stream<R>
+    pub fn when(&self, config: &WhenStreamConfig) -> Stream<T>
     where
-        // Go: runtime.MakeSerde[R](env) — fresh; each branch's map(&T) -> R
-        // introduces a new type distinct from T (and from other branches).
-        R: Serialize + DeserializeOwned + Send + Sync + 'static,
-        M: Fn(&T) -> R + Send + Sync + 'static,
+        T: Serialize + DeserializeOwned,
     {
         let output = Stream::new(&config.stream, self.environment.clone());
         self.inner.when_streams.with_mut(|branches| {
             branches.push(Arc::new(WhenStream {
                 output: output.clone(),
-                map,
-                _input: std::marker::PhantomData,
             }));
         });
         output

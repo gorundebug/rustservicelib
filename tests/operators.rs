@@ -420,7 +420,7 @@ async fn zero_delay_emits_even_if_context_is_already_cancelled() {
     assert_eq!(capture.0.lock().unwrap().len(), 1);
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 enum Event {
     Number(i32),
     Text(String),
@@ -439,20 +439,8 @@ async fn case_routes_to_the_selected_typed_branch() {
             },
         )
         .unwrap();
-    let numbers = cases.when(
-        &(StreamConfig::new(3, "Number").into()),
-        |event| match event {
-            Event::Number(value) => *value,
-            Event::Text(_) => unreachable!(),
-        },
-    );
-    let texts = cases.when(
-        &(StreamConfig::new(4, "Text").into()),
-        |event| match event {
-            Event::Text(value) => value.clone(),
-            Event::Number(_) => unreachable!(),
-        },
-    );
+    let numbers = cases.when(&(StreamConfig::new(3, "Number").into()));
+    let texts = cases.when(&(StreamConfig::new(4, "Text").into()));
     let number_capture = Arc::new(Capture::default());
     let text_capture = Arc::new(Capture::default());
     numbers.set_consumer(Arc::clone(&number_capture), 5);
@@ -469,8 +457,11 @@ async fn case_routes_to_the_selected_typed_branch() {
         )
         .await;
 
-    assert_eq!(*number_capture.0.lock().unwrap()[0].1, 42);
-    assert_eq!(&*text_capture.0.lock().unwrap()[0].1, "hello");
+    assert_eq!(*number_capture.0.lock().unwrap()[0].1, Event::Number(42));
+    assert_eq!(
+        *text_capture.0.lock().unwrap()[0].1,
+        Event::Text("hello".to_owned())
+    );
 }
 
 struct SumJoin;

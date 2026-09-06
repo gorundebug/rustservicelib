@@ -31,6 +31,9 @@ where
     E: Serialize + DeserializeOwned + Send + Sync + 'static,
 {
     pub fn make(config: &SinkStreamConfig, source: &Stream<T>) -> RuntimeResult<Arc<Self>> {
+        source
+            .environment()
+            .register_runtime_stream(config.stream.id);
         let error_stream = ErrorStream::new(&config.stream, source.environment().clone())
             .stream()
             .clone();

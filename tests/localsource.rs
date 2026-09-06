@@ -3,9 +3,12 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use servicelib::{
     MessageContext, Payload,
-    datasource::localsource::{
-        DataProducer, EndpointHandler, HandlerError, HandlerResult, ResultCallback, ResultContext,
-        StreamContext, make_custom_endpoint_consumer,
+    datasource::{
+        DataSource,
+        localsource::{
+            DataProducer, EndpointHandler, HandlerError, HandlerResult, ResultCallback,
+            ResultContext, StreamContext, make_custom_endpoint_consumer,
+        },
     },
     operators::{InputStream, MapFunction},
     runtime::{
@@ -137,6 +140,8 @@ async fn custom_source_correlates_result_and_waits_for_done() {
         },
     )
     .unwrap();
+
+    assert_eq!(data_source.id(), i32::MIN | 1);
 
     data_source.start(MessageContext::new()).await.unwrap();
     assert_eq!(wait_finished.await.unwrap(), 42);
