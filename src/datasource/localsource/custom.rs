@@ -246,7 +246,9 @@ where
             self.input_stream.stream().environment(),
             self.input_stream.endpoint_id(),
         );
-        let span = if context.sampling_enabled() {
+        let span = if self.input_stream.stream().environment().tracing_enabled()
+            && context.sampling_enabled()
+        {
             let span = tracing::info_span!(
                 "local.input",
                 stream = self.input_stream.stream().name(),
@@ -262,12 +264,11 @@ where
         };
         let context = context.with_span_context(&span);
 
-        let begin = crate::runtime::common::instrument_if_enabled(
+        let begin = crate::runtime::common::instrument_if_enabled!(
             self.handler
                 .begin_request(context, self.stream_context.clone()),
             span.clone(),
-        )
-        .await;
+        );
         let (handler_context, handler_state) = match begin {
             Ok(value) => value,
             Err(error) => {
@@ -318,7 +319,7 @@ where
                     &span,
                     result.as_ref().expect_err("duplicate pending request"),
                 );
-                crate::runtime::common::instrument_if_enabled(
+                crate::runtime::common::instrument_if_enabled!(
                     self.handler.end_request(
                         handler_context,
                         self.stream_context.clone(),
@@ -326,8 +327,7 @@ where
                         handler_state,
                     ),
                     span,
-                )
-                .await;
+                );
                 self.metrics.active_requests.dec();
                 if let Some(started_at) = started_at {
                     self.metrics
@@ -340,7 +340,7 @@ where
             self.metrics.pending_requests.add(&stream_id);
         }
 
-        let mut result = crate::runtime::common::instrument_if_enabled(
+        let mut result = crate::runtime::common::instrument_if_enabled!(
             self.handler.consume_message(
                 handler_context.clone(),
                 self.stream_context.clone(),
@@ -349,8 +349,7 @@ where
                 Arc::clone(&result_context),
             ),
             span.clone(),
-        )
-        .await;
+        );
         if let Err(error) = &result {
             crate::runtime::telemetry::record_span_error(&span, error);
         }
@@ -403,7 +402,7 @@ where
                 );
             });
         }
-        crate::runtime::common::instrument_if_enabled(
+        crate::runtime::common::instrument_if_enabled!(
             self.handler.end_request(
                 handler_context,
                 self.stream_context.clone(),
@@ -411,8 +410,7 @@ where
                 handler_state,
             ),
             span.clone(),
-        )
-        .await;
+        );
         self.metrics.active_requests.dec();
         if let Some(started_at) = started_at {
             self.metrics
@@ -479,7 +477,7 @@ where
             });
             return;
         };
-        if crate::runtime::common::instrument_if_enabled(
+        if crate::runtime::common::instrument_if_enabled!(
             callback(
                 context,
                 self.stream_context.clone(),
@@ -487,9 +485,7 @@ where
                 value,
             ),
             pending.span.clone(),
-        )
-        .await
-        {
+        ) {
             let removed = pending
                 .result_context
                 .callbacks

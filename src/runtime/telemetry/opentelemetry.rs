@@ -14,9 +14,7 @@ use opentelemetry_sdk::{
     propagation::{BaggagePropagator, TraceContextPropagator},
     trace::SdkTracerProvider,
 };
-use tracing_subscriber::{
-    filter::filter_fn, layer::SubscriberExt, util::SubscriberInitExt, Layer,
-};
+use tracing_subscriber::{Layer, filter::filter_fn, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::runtime::environment::{
     RuntimeError, RuntimeResult,
@@ -53,6 +51,10 @@ impl MetricsEngine for OpenTelemetry {
 
 #[async_trait]
 impl TracingEngine for OpenTelemetry {
+    fn enabled(&self) -> bool {
+        self.tracer_provider.is_some()
+    }
+
     async fn shutdown(&self) -> RuntimeResult<()> {
         if let Some(provider) = &self.tracer_provider {
             provider

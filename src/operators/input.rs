@@ -159,11 +159,10 @@ where
 
     pub async fn consume_payload(&self, context: MessageContext, payload: Payload<T>) {
         let (context, span) = self.inner.stream.start_span(context, "stream.input");
-        crate::runtime::common::instrument_if_enabled(
+        crate::runtime::common::instrument_if_enabled!(
             self.inner.stream.emit(context, payload),
             span,
-        )
-        .await;
+        );
     }
 
     async fn consume_result(&self, context: MessageContext, payload: Payload<R>) {

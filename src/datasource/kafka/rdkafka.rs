@@ -913,7 +913,9 @@ where
             self.input_stream.stream().environment(),
             self.input_stream.endpoint_id(),
         );
-        let span = if context.sampling_enabled() {
+        let span = if self.input_stream.stream().environment().tracing_enabled()
+            && context.sampling_enabled()
+        {
             let span = tracing::info_span!(
                 "kafka.input",
                 stream = self.input_stream.stream().name(),
@@ -930,13 +932,11 @@ where
             tracing::Span::none()
         };
         let context = context.with_span_context(&span);
-        let (context, handler_state) = match crate::runtime::common::instrument_if_enabled(
+        let (context, handler_state) = match crate::runtime::common::instrument_if_enabled!(
             self.handler
                 .begin_request(context, self.stream_context.clone()),
             span.clone(),
-        )
-        .await
-        {
+        ) {
             Ok(result) => {
                 tracing::event!(name: "begin_request", parent: &span, tracing::Level::INFO, {});
                 result
@@ -985,7 +985,7 @@ where
                     &span,
                     result.as_ref().expect_err("duplicate pending request"),
                 );
-                crate::runtime::common::instrument_if_enabled(
+                crate::runtime::common::instrument_if_enabled!(
                     self.handler.end_request(
                         context,
                         self.stream_context.clone(),
@@ -993,8 +993,7 @@ where
                         handler_state,
                     ),
                     span,
-                )
-                .await;
+                );
                 self.metrics.active_requests.dec();
                 if let Some(started_at) = kafka_result.started_at {
                     self.metrics
@@ -1007,7 +1006,7 @@ where
             self.metrics.pending_requests.add(&stream_id);
         }
 
-        let mut result = crate::runtime::common::instrument_if_enabled(
+        let mut result = crate::runtime::common::instrument_if_enabled!(
             self.handler.consume_message(
                 context.clone(),
                 self.stream_context.clone(),
@@ -1016,8 +1015,7 @@ where
                 Arc::clone(&result_context),
             ),
             span.clone(),
-        )
-        .await;
+        );
         match &result {
             Ok(()) => {
                 tracing::event!(name: "consume_message", parent: &span, tracing::Level::INFO, {})
@@ -1063,12 +1061,11 @@ where
                 error = "Kafka message context cancelled"
             );
         }
-        crate::runtime::common::instrument_if_enabled(
+        crate::runtime::common::instrument_if_enabled!(
             self.handler
                 .end_request(context, self.stream_context.clone(), &result, handler_state),
             span.clone(),
-        )
-        .await;
+        );
         self.metrics.active_requests.dec();
         if let Some(started_at) = kafka_result.started_at {
             self.metrics
@@ -1101,7 +1098,7 @@ where
             tracing::event!(name: "late_result", parent: &result.span, tracing::Level::WARN, {});
             return;
         }
-        let message_id = crate::runtime::common::instrument_if_enabled(
+        let message_id = crate::runtime::common::instrument_if_enabled!(
             self.handler.get_message_id(
                 &context,
                 &self.stream_context,
@@ -1109,8 +1106,7 @@ where
                 &value,
             ),
             result.span.clone(),
-        )
-        .await;
+        );
         let callback = result
             .result_context
             .callbacks
@@ -1125,7 +1121,7 @@ where
             );
             return;
         };
-        if crate::runtime::common::instrument_if_enabled(
+        if crate::runtime::common::instrument_if_enabled!(
             callback(
                 context,
                 self.stream_context.clone(),
@@ -1133,9 +1129,7 @@ where
                 value,
             ),
             result.span.clone(),
-        )
-        .await
-        {
+        ) {
             let removed = result
                 .result_context
                 .callbacks

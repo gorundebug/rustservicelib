@@ -174,7 +174,7 @@ where
         call_type: Option<&'static str>,
         pool: Option<&str>,
     ) -> (MessageContext, tracing::Span) {
-        if !context.sampling_enabled() {
+        if !self.environment.tracing_enabled() || !context.sampling_enabled() {
             return (context, tracing::Span::none());
         }
         let span = match (call_type, pool) {
@@ -246,21 +246,19 @@ where
         match &self.caller {
             Caller::FunctionCall(_) => {
                 let (context, span) = self.start_span(context, None, None);
-                crate::runtime::common::instrument_if_enabled(
+                crate::runtime::common::instrument_if_enabled!(
                     self.consumer.consume(context, payload),
                     span,
-                )
-                .await;
+                );
             }
             Caller::ParallelCall => {
                 let (context, span) = self.start_span(context, Some("parallel"), None);
                 let consumer = Arc::clone(&self.consumer);
                 self.environment.spawn_parallel(async move {
-                    crate::runtime::common::instrument_if_enabled(
+                    crate::runtime::common::instrument_if_enabled!(
                         consumer.consume(context, payload),
                         span,
-                    )
-                    .await;
+                    );
                 });
             }
             Caller::TaskPool(pool) => {
@@ -272,11 +270,10 @@ where
                     .add_task(
                         context,
                         Box::pin(async move {
-                            crate::runtime::common::instrument_if_enabled(
+                            crate::runtime::common::instrument_if_enabled!(
                                 consumer.consume(task_context, payload),
                                 span,
-                            )
-                            .await;
+                            );
                         }),
                     )
                     .await
@@ -303,11 +300,10 @@ where
                         context,
                         priority,
                         Box::pin(async move {
-                            crate::runtime::common::instrument_if_enabled(
+                            crate::runtime::common::instrument_if_enabled!(
                                 consumer.consume(task_context, payload),
                                 span,
-                            )
-                            .await;
+                            );
                         }),
                     )
                     .await

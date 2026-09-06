@@ -867,8 +867,7 @@ impl ServiceApp {
 #[cfg(test)]
 mod tests {
     use std::sync::{
-        Arc,
-        Mutex as StdMutex,
+        Arc, Mutex as StdMutex,
         atomic::{AtomicBool, Ordering},
     };
 
@@ -1071,7 +1070,10 @@ mod tests {
         spawned.notified().await;
         assert!(!stopping.is_finished());
         release.notify_one();
-        stopping.await.expect("shutdown task").expect("stop service");
+        stopping
+            .await
+            .expect("shutdown task")
+            .expect("stop service");
         assert!(completed.load(Ordering::Acquire));
     }
 }

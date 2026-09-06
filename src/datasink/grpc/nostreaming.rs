@@ -79,13 +79,11 @@ where
         };
         let (context, span) =
             start_output_span(context, stream.as_ref(), self.metrics.rpc_method());
-        let (context, state) = match crate::runtime::common::instrument_if_enabled(
+        let (context, state) = match crate::runtime::common::instrument_if_enabled!(
             self.handler
                 .begin_request(context, self.stream_context.clone()),
             span.clone(),
-        )
-        .await
-        {
+        ) {
             Ok(begin) => begin,
             Err(error) => {
                 self.metrics.begin_request_failed.inc();
@@ -106,7 +104,7 @@ where
         let state = Arc::new(tokio::sync::Mutex::new(state));
         let started_at = self.metrics.request_start();
         let sender = RequestSender::default();
-        let mut result = crate::runtime::common::instrument_if_enabled(
+        let mut result = crate::runtime::common::instrument_if_enabled!(
             self.handler.consume_message(
                 context.clone(),
                 self.stream_context.clone(),
@@ -116,8 +114,7 @@ where
                 ResultContext::with_span(span.clone()),
             ),
             span.clone(),
-        )
-        .await;
+        );
         if let Err(error) = &result {
             crate::runtime::telemetry::record_span_error(&span, error);
         }
@@ -134,18 +131,16 @@ where
             result = match sender.take() {
                 Ok(request) => {
                     let observation = self.metrics.grpc_client_start();
-                    match crate::runtime::common::instrument_if_enabled(
+                    match crate::runtime::common::instrument_if_enabled!(
                         (self.client_function)(request_context, request),
                         span.clone(),
-                    )
-                    .await
-                    {
+                    ) {
                         Ok(response) => {
                             observation.finish("OK");
                             span.in_scope(
                                 || tracing::event!(name: "grpc_call", tracing::Level::INFO, {}),
                             );
-                            let handled = crate::runtime::common::instrument_if_enabled(
+                            let handled = crate::runtime::common::instrument_if_enabled!(
                                 self.handler.handle_response(
                                     context.clone(),
                                     self.stream_context.clone(),
@@ -153,8 +148,7 @@ where
                                     response,
                                 ),
                                 span.clone(),
-                            )
-                            .await;
+                            );
                             if let Err(error) = &handled {
                                 crate::runtime::telemetry::record_span_error(&span, error);
                             }
@@ -189,12 +183,11 @@ where
                 Err(error) => Err(error),
             };
         }
-        crate::runtime::common::instrument_if_enabled(
+        crate::runtime::common::instrument_if_enabled!(
             self.handler
                 .end_request(context, self.stream_context.clone(), &result, state),
             span.clone(),
-        )
-        .await;
+        );
         self.metrics.request_end(started_at, &result);
     }
 }

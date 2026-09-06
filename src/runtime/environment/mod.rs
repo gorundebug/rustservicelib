@@ -499,6 +499,10 @@ impl RuntimeEnvironment {
         &self.tracing_engine
     }
 
+    pub fn tracing_enabled(&self) -> bool {
+        self.tracing_engine.enabled()
+    }
+
     pub fn logs_engine(&self) -> &Arc<dyn LogsEngine> {
         &self.logs_engine
     }

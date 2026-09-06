@@ -6,6 +6,13 @@ use crate::runtime::environment::RuntimeResult;
 /// installed backend; spans then behave as no-ops.
 #[async_trait]
 pub trait TracingEngine: Send + Sync {
+    /// Whether this runtime has an active tracing backend. Runtime graph nodes
+    /// cache/use this signal to bypass span creation in the same way Go skips
+    /// tracing when its environment has no tracer.
+    fn enabled(&self) -> bool {
+        true
+    }
+
     async fn shutdown(&self) -> RuntimeResult<()>;
 }
 

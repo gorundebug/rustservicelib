@@ -56,11 +56,10 @@ where
     ResR: Send + 'static,
 {
     async fn send(&self, _context: MessageContext, request: ReqT) -> HandlerResult {
-        let result = crate::runtime::common::instrument_if_enabled(
+        let result = crate::runtime::common::instrument_if_enabled!(
             self.call.send(request),
             self.span.clone(),
-        )
-        .await;
+        );
         if let Err(error) = &result {
             crate::runtime::telemetry::record_span_error(&self.span, error);
         }
@@ -196,17 +195,15 @@ where
                 });
                 Err("gRPC client stream context cancelled".into())
             } else {
-                match crate::runtime::common::instrument_if_enabled(
+                match crate::runtime::common::instrument_if_enabled!(
                     pending.sender.call.close_and_recv(),
                     pending.span.clone(),
-                )
-                .await
-                {
+                ) {
                     Ok(response) => {
                         pending.span.in_scope(
                             || tracing::event!(name: "close_and_recv", tracing::Level::INFO, {}),
                         );
-                        let handled = crate::runtime::common::instrument_if_enabled(
+                        let handled = crate::runtime::common::instrument_if_enabled!(
                             handler.handle_response(
                                 pending.context.clone(),
                                 stream_context.clone(),
@@ -214,8 +211,7 @@ where
                                 response,
                             ),
                             pending.span.clone(),
-                        )
-                        .await;
+                        );
                         if let Err(error) = &handled {
                             crate::runtime::telemetry::record_span_error(&pending.span, error);
                         }
@@ -244,7 +240,7 @@ where
                     }
                 }
             };
-            crate::runtime::common::instrument_if_enabled(
+            crate::runtime::common::instrument_if_enabled!(
                 handler.end_request(
                     pending.context.clone(),
                     stream_context,
@@ -252,8 +248,7 @@ where
                     Arc::clone(&pending.state),
                 ),
                 pending.span.clone(),
-            )
-            .await;
+            );
             metrics.request_end(pending.started_at, &result);
             metrics.grpc_client_end(pending.grpc_started_at, &result);
         });
@@ -294,13 +289,11 @@ where
             .get_or_try_init(move || async move {
                 let (context, span) =
                     start_output_span(context, stream.as_ref(), self.metrics.rpc_method());
-                let (handler_context, state) = match crate::runtime::common::instrument_if_enabled(
+                let (handler_context, state) = match crate::runtime::common::instrument_if_enabled!(
                     self.handler
                         .begin_request(context, self.stream_context.clone()),
                     span.clone(),
-                )
-                .await
-                {
+                ) {
                     Ok(begin) => begin,
                     Err(error) => {
                         self.metrics.begin_request_failed.inc();
@@ -321,12 +314,10 @@ where
                 let state = Arc::new(Mutex::new(state));
                 let started_at = self.metrics.request_start();
                 let grpc_started_at = self.metrics.grpc_client_measurement_start();
-                let call = match crate::runtime::common::instrument_if_enabled(
+                let call = match crate::runtime::common::instrument_if_enabled!(
                     (self.client_function)(request_context),
                     span.clone(),
-                )
-                .await
-                {
+                ) {
                     Ok(call) => call,
                     Err(error) => {
                         crate::runtime::telemetry::record_span_error(&span, &error);
@@ -339,7 +330,7 @@ where
                             )
                         });
                         let result = Err(error);
-                        crate::runtime::common::instrument_if_enabled(
+                        crate::runtime::common::instrument_if_enabled!(
                             self.handler.end_request(
                                 handler_context,
                                 self.stream_context.clone(),
@@ -347,8 +338,7 @@ where
                                 state,
                             ),
                             span.clone(),
-                        )
-                        .await;
+                        );
                         self.metrics.request_end(started_at, &result);
                         self.metrics.grpc_client_end(grpc_started_at, &result);
                         return result.map(|()| unreachable!("gRPC creation error became success"));
@@ -392,7 +382,7 @@ where
         if pending.finished.load(Ordering::Acquire) {
             return;
         }
-        let result = crate::runtime::common::instrument_if_enabled(
+        let result = crate::runtime::common::instrument_if_enabled!(
             self.handler.consume_message(
                 pending.context.clone(),
                 self.stream_context.clone(),
@@ -402,8 +392,7 @@ where
                 pending.result_context.clone(),
             ),
             pending.span.clone(),
-        )
-        .await;
+        );
         if let Err(error) = &result {
             crate::runtime::telemetry::record_span_error(&pending.span, error);
         }

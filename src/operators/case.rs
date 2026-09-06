@@ -175,7 +175,6 @@ where
             )
         });
         let (context, span) = branch.stream().start_span(context, "stream.case");
-        crate::runtime::common::instrument_if_enabled(branch.consume_case(context, payload), span)
-            .await;
+        crate::runtime::common::instrument_if_enabled!(branch.consume_case(context, payload), span);
     }
 }

@@ -68,7 +68,6 @@ where
 {
     async fn consume(&self, context: MessageContext, payload: Payload<T>) {
         let (context, span) = self.stream.start_span(context, "stream.link");
-        crate::runtime::common::instrument_if_enabled(self.stream.emit(context, payload), span)
-            .await;
+        crate::runtime::common::instrument_if_enabled!(self.stream.emit(context, payload), span);
     }
 }

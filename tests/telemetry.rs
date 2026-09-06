@@ -8,7 +8,7 @@ use servicelib::{
         collector::Collector,
         common::RuntimeStream,
         config::{CallSemantics, StreamConfig},
-        environment::RuntimeEnvironment,
+        environment::{RuntimeEnvironment, RuntimeResult, tracing::TracingEngine},
         testlog::TestLog,
         testmetrics::TestMetrics,
         testtracing::TestTracing,
@@ -93,6 +93,19 @@ fn structured_log_level_and_typed_field_contract() {
 
 struct LoggingMap;
 
+struct DisabledTracing;
+
+#[async_trait]
+impl TracingEngine for DisabledTracing {
+    fn enabled(&self) -> bool {
+        false
+    }
+
+    async fn shutdown(&self) -> RuntimeResult<()> {
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl MapFunction<u32, u32> for LoggingMap {
     async fn map(
@@ -169,4 +182,33 @@ async fn operator_does_not_create_a_span_without_explicit_sampling() {
     drop(guard);
 
     assert!(traces.spans().is_empty());
+}
+
+#[tokio::test]
+async fn operator_bypasses_tracing_when_the_backend_is_disabled() {
+    let metrics = Arc::new(TestMetrics::new());
+    let traces = TestTracing::default();
+    let logs = TestLog::default();
+    let environment = RuntimeEnvironment::with_telemetry(
+        CallSemantics::FunctionCall,
+        metrics,
+        Arc::new(DisabledTracing),
+        Arc::new(logs.clone()),
+    );
+    let input = Stream::new(&StreamConfig::new(1, "input"), environment);
+    let _mapped = input
+        .map::<u32, _>(&(StreamConfig::new(2, "mapped").into()), LoggingMap)
+        .unwrap();
+    let subscriber = tracing_subscriber::registry()
+        .with(logs.clone())
+        .with(traces.clone());
+
+    let guard = tracing::subscriber::set_default(subscriber);
+    input
+        .emit(MessageContext::new().enable_sampling(), Payload::new(42))
+        .await;
+    drop(guard);
+
+    assert!(traces.spans().is_empty());
+    assert_eq!(logs.records().len(), 1);
 }

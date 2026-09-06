@@ -48,7 +48,7 @@ pub(crate) fn start_output_span(
     stream: &dyn RuntimeStream,
     endpoint: &str,
 ) -> (MessageContext, tracing::Span) {
-    if !context.sampling_enabled() {
+    if !stream.environment().tracing_enabled() || !context.sampling_enabled() {
         return (context, tracing::Span::none());
     }
     let span = tracing::info_span!(

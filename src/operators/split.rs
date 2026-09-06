@@ -93,7 +93,7 @@ where
 {
     async fn consume(&self, context: MessageContext, payload: Payload<T>) {
         let (context, span) = self.stream.start_span(context, "stream.split");
-        crate::runtime::common::instrument_if_enabled(
+        crate::runtime::common::instrument_if_enabled!(
             async {
                 let order = self.dispatch_order.get();
                 let mut context = Some(context);
@@ -121,7 +121,6 @@ where
                 }
             },
             span,
-        )
-        .await;
+        );
     }
 }

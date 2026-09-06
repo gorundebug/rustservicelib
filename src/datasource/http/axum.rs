@@ -692,7 +692,9 @@ where
             self.input_stream.stream().environment(),
             self.input_stream.endpoint_id(),
         );
-        let span = if context.sampling_enabled() {
+        let span = if self.input_stream.stream().environment().tracing_enabled()
+            && context.sampling_enabled()
+        {
             let span = tracing::info_span!(
                 "http.input",
                 stream = self.input_stream.stream().name(),
@@ -709,12 +711,11 @@ where
             tracing::Span::none()
         };
         let context = context.with_span_context(&span);
-        let begin = crate::runtime::common::instrument_if_enabled(
+        let begin = crate::runtime::common::instrument_if_enabled!(
             self.handler
                 .begin_request(context, self.stream_context.clone(), data.clone()),
             span.clone(),
-        )
-        .await;
+        );
         let (context, state) = match begin {
             Ok(begin) => begin,
             Err(error) => {
@@ -763,7 +764,7 @@ where
                     &span,
                     result.as_ref().expect_err("duplicate pending request"),
                 );
-                crate::runtime::common::instrument_if_enabled(
+                crate::runtime::common::instrument_if_enabled!(
                     self.handler.end_request(
                         context,
                         self.stream_context.clone(),
@@ -772,8 +773,7 @@ where
                         data.clone(),
                     ),
                     span,
-                )
-                .await;
+                );
                 self.active_requests.dec();
                 if let Some(started_at) = started_at {
                     self.request_duration
@@ -785,7 +785,7 @@ where
             self.pending_requests.add(&stream_id);
         }
 
-        let mut result = crate::runtime::common::instrument_if_enabled(
+        let mut result = crate::runtime::common::instrument_if_enabled!(
             self.handler.consume_message(
                 context.clone(),
                 self.stream_context.clone(),
@@ -794,8 +794,7 @@ where
                 Arc::clone(&result_context),
             ),
             span.clone(),
-        )
-        .await;
+        );
         if let Err(error) = &result {
             crate::runtime::telemetry::record_span_error(&span, error);
         }
@@ -845,7 +844,7 @@ where
                 );
             });
         }
-        crate::runtime::common::instrument_if_enabled(
+        crate::runtime::common::instrument_if_enabled!(
             self.handler.end_request(
                 context,
                 self.stream_context.clone(),
@@ -854,8 +853,7 @@ where
                 data.clone(),
             ),
             span.clone(),
-        )
-        .await;
+        );
         self.active_requests.dec();
         if let Some(started_at) = started_at {
             self.request_duration
@@ -898,7 +896,7 @@ where
                 .in_scope(|| tracing::event!(name: "late_result", tracing::Level::WARN, {}));
             return;
         }
-        let message_id = crate::runtime::common::instrument_if_enabled(
+        let message_id = crate::runtime::common::instrument_if_enabled!(
             self.handler.get_message_id(
                 &context,
                 &self.stream_context,
@@ -906,8 +904,7 @@ where
                 &value,
             ),
             pending.span.clone(),
-        )
-        .await;
+        );
         let callback = pending
             .result_context
             .callbacks
@@ -927,7 +924,7 @@ where
             });
             return;
         };
-        if crate::runtime::common::instrument_if_enabled(
+        if crate::runtime::common::instrument_if_enabled!(
             callback.call(
                 context,
                 self.stream_context.clone(),
@@ -936,9 +933,7 @@ where
                 pending.data.clone(),
             ),
             pending.span.clone(),
-        )
-        .await
-        {
+        ) {
             let removed = pending
                 .result_context
                 .callbacks

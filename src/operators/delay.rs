@@ -88,7 +88,7 @@ where
     async fn consume(&self, context: MessageContext, payload: Payload<T>) {
         let (context, span) = self.output.start_span(context, "stream.delay");
         let event_span = span.clone();
-        crate::runtime::common::instrument_if_enabled(
+        crate::runtime::common::instrument_if_enabled!(
             async {
                 let duration = self
                     .function
@@ -110,7 +110,7 @@ where
                     .environment()
                     .delay_pool()
                     .delay(context, duration, async move {
-                        crate::runtime::common::instrument_if_enabled(
+                        crate::runtime::common::instrument_if_enabled!(
                             async {
                                 if delayed_context.is_cancelled() {
                                     tracing::event!(
@@ -123,8 +123,7 @@ where
                                 output.emit(delayed_context, payload).await;
                             },
                             delayed_span,
-                        )
-                        .await;
+                        );
                     })
                     .await;
                 if let Err(error) = scheduled {
@@ -143,7 +142,6 @@ where
                 }
             },
             span,
-        )
-        .await;
+        );
     }
 }

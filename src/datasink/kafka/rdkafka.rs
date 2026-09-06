@@ -833,7 +833,7 @@ where
         let Some(stream) = self.stream.upgrade() else {
             return;
         };
-        let span = if context.sampling_enabled() {
+        let span = if stream.environment().tracing_enabled() && context.sampling_enabled() {
             let span = tracing::info_span!(
                 "kafka.output",
                 stream = stream.name(),
@@ -851,12 +851,11 @@ where
         let stream_id = span.in_scope(|| self.handler.get_stream_id(&context, &value));
         span.record("stream_id", stream_id.as_str());
         let context = context.with_stream_id(stream_id).with_span_context(&span);
-        let (context, mut handler_state) = crate::runtime::common::instrument_if_enabled(
+        let (context, mut handler_state) = crate::runtime::common::instrument_if_enabled!(
             self.handler
                 .begin_request(context, self.stream_context.clone()),
             span.clone(),
-        )
-        .await;
+        );
         tracing::event!(name: "begin_request", parent: &span, tracing::Level::INFO, {});
 
         self.active_requests.inc();
@@ -890,7 +889,7 @@ where
             spawn: Arc::clone(&self.spawn),
             _error: std::marker::PhantomData,
         };
-        let result = crate::runtime::common::instrument_if_enabled(
+        let result = crate::runtime::common::instrument_if_enabled!(
             self.handler.consume_message(
                 context.clone(),
                 self.stream_context.clone(),
@@ -899,8 +898,7 @@ where
                 &mut message,
             ),
             span.clone(),
-        )
-        .await;
+        );
         match &result {
             Ok(()) => {
                 tracing::event!(name: "consume_message", parent: &span, tracing::Level::INFO, {})
@@ -913,12 +911,11 @@ where
                 );
             }
         }
-        crate::runtime::common::instrument_if_enabled(
+        crate::runtime::common::instrument_if_enabled!(
             self.handler
                 .end_request(context, self.stream_context.clone(), &result, handler_state),
             span.clone(),
-        )
-        .await;
+        );
         self.active_requests.dec();
         if let Some(started_at) = started_at {
             self.request_duration

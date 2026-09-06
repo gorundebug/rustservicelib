@@ -2,7 +2,6 @@ use std::{
     cell::UnsafeCell,
     collections::HashMap,
     fmt,
-    future::Future,
     ops::Deref,
     sync::{
         Arc, Mutex as StdMutex, Weak,
@@ -20,7 +19,6 @@ use opentelemetry::{
 };
 use tokio::{task::AbortHandle, time::Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 pub const STREAM_ID_HEADER: &str = "x-stream-id";
@@ -51,20 +49,22 @@ fn traceparent_is_sampled(value: &str) -> bool {
     traceparent_flags(value).is_some_and(|flags| flags & 1 != 0)
 }
 
-/// Poll a future inside a tracing span only when that span is active. Wrapping
-/// every normal future in `tracing::Instrumented<...>` costs a poll/enter/exit
-/// layer even when the span is disabled.
-#[inline]
-pub(crate) async fn instrument_if_enabled<F>(future: F, span: tracing::Span) -> F::Output
-where
-    F: Future,
-{
-    if span.is_disabled() {
-        future.await
-    } else {
-        future.instrument(span).await
-    }
+/// Await directly when tracing is disabled. This deliberately is a macro, not
+/// an `async fn`: the no-tracing branch must not add another Future/poll layer
+/// to every operator and transport call on the hot path.
+macro_rules! instrument_if_enabled {
+    ($future:expr, $span:expr $(,)?) => {{
+        let future = $future;
+        let span = $span;
+        if span.is_disabled() {
+            future.await
+        } else {
+            ::tracing::Instrument::instrument(future, span).await
+        }
+    }};
 }
+
+pub(crate) use instrument_if_enabled;
 
 /// A value wired while a service graph is constructed and read-only after
 /// `ServiceApp::start`. Unlike `Mutex`, `RwLock`, or `OnceLock`, reads are a
@@ -704,7 +704,7 @@ pub trait RuntimeStream: Send + Sync {
         context: MessageContext,
         operation: &'static str,
     ) -> (MessageContext, tracing::Span) {
-        if !context.sampling_enabled() {
+        if !self.environment().tracing_enabled() || !context.sampling_enabled() {
             return (context, tracing::Span::none());
         }
         let span = tracing::info_span!(

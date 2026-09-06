@@ -160,7 +160,7 @@ where
         let Some(stream) = self.stream.upgrade() else {
             return;
         };
-        let span = if context.sampling_enabled() {
+        let span = if stream.environment().tracing_enabled() && context.sampling_enabled() {
             let span = tracing::info_span!(
                 "local.output",
                 stream = stream.name(),
@@ -177,16 +177,15 @@ where
         let context = context.with_span_context(&span);
         let stream_id = span.in_scope(|| self.handler.get_stream_id(&context, &value));
         let context = context.with_stream_id(stream_id);
-        let (handler_context, mut handler_state) = crate::runtime::common::instrument_if_enabled(
+        let (handler_context, mut handler_state) = crate::runtime::common::instrument_if_enabled!(
             self.handler.begin_request(context, stream.as_ref()),
             span.clone(),
-        )
-        .await;
+        );
         span.in_scope(|| tracing::event!(name: "begin_request", tracing::Level::INFO, {}));
         self.active_requests.inc();
         let started_at = self.request_duration.is_enabled().then(Instant::now);
         let (consume_value, value) = value.share();
-        let result = crate::runtime::common::instrument_if_enabled(
+        let result = crate::runtime::common::instrument_if_enabled!(
             self.handler.consume_message(
                 handler_context.clone(),
                 stream.as_ref(),
@@ -195,8 +194,7 @@ where
                 &self.result_stream,
             ),
             span.clone(),
-        )
-        .await;
+        );
         if let Err(error) = &result {
             crate::runtime::telemetry::record_span_error(&span, error);
         }
@@ -209,7 +207,7 @@ where
                 "custom sink handler failed"
             ),
         });
-        crate::runtime::common::instrument_if_enabled(
+        crate::runtime::common::instrument_if_enabled!(
             self.handler.end_request(
                 handler_context.clone(),
                 stream.as_ref(),
@@ -217,19 +215,17 @@ where
                 handler_state,
             ),
             span.clone(),
-        )
-        .await;
+        );
         let callback = self
             .sink_callback
             .read()
             .expect("sink callback lock poisoned")
             .clone();
         if let Some(callback) = callback {
-            crate::runtime::common::instrument_if_enabled(
+            crate::runtime::common::instrument_if_enabled!(
                 callback.done(handler_context, value, &result),
                 span.clone(),
-            )
-            .await;
+            );
         }
         self.active_requests.dec();
         if let Some(started_at) = started_at {

@@ -105,11 +105,10 @@ where
         let (context, span) = self.output.start_span(context, "stream.process");
         let out = self.output.collector();
         let error = self.error.collector();
-        crate::runtime::common::instrument_if_enabled(
+        crate::runtime::common::instrument_if_enabled!(
             self.function
                 .process(context, &self.output, &payload, &out, &error),
             span,
-        )
-        .await;
+        );
     }
 }
