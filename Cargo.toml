@@ -1,6 +1,6 @@
 [package]
 name = "servicelib-gorundebug"
-version = "0.2.99"
+version = "0.2.100"
 edition = "2024"
 rust-version = "1.97"
 license = "MIT"
