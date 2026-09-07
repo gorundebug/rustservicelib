@@ -14,7 +14,10 @@ use servicelib::{
     runtime::{
         collector::Collector,
         common::{Consumer, RuntimeStream},
-        config::{InputStreamConfig, StreamConfig},
+        config::{
+            CallSemantics, CustomDataConnectorConfig, CustomEndpointConfig, InputStreamConfig,
+            RuntimeConfig, StreamConfig,
+        },
         environment::{Lifecycle, RuntimeEnvironment},
     },
 };
@@ -119,12 +122,34 @@ impl EndpointHandler<(), i32, i32, String> for Handler {
 #[tokio::test]
 async fn custom_source_correlates_result_and_waits_for_done() {
     let environment = RuntimeEnvironment::default();
+    let endpoint = CustomEndpointConfig {
+        id: 10,
+        name: "Input endpoint".to_owned(),
+        id_data_connector: 20,
+        tracing_enabled: false,
+    };
+    environment.publish_runtime_config(Arc::new(
+        RuntimeConfig::from_parts(
+            CallSemantics::FunctionCall,
+            [],
+            [],
+            [],
+            [CustomDataConnectorConfig {
+                id: 20,
+                name: "Custom connector".to_owned(),
+            }
+            .into()],
+            [endpoint.clone().into()],
+            [],
+        )
+        .unwrap(),
+    ));
     let input = InputStream::<i32, i32, String>::new(
         &InputStreamConfig {
             stream: StreamConfig::new(1, "Input"),
             endpoint_id: 10,
         },
-        environment,
+        environment.clone(),
     );
     let result = input
         .stream()
@@ -134,6 +159,7 @@ async fn custom_source_correlates_result_and_waits_for_done() {
     let (finished, wait_finished) = oneshot::channel();
     let data_source = make_custom_endpoint_consumer(
         input,
+        &endpoint,
         OneValueProducer,
         Handler {
             finished: Mutex::new(Some(finished)),
@@ -146,4 +172,9 @@ async fn custom_source_correlates_result_and_waits_for_done() {
     data_source.start(MessageContext::new()).await.unwrap();
     assert_eq!(wait_finished.await.unwrap(), 42);
     data_source.stop(MessageContext::new()).await.unwrap();
+    let metrics = environment.metrics().render_prometheus();
+    assert!(metrics.contains(
+        r#"datasource_endpoint_messages_total{connector="Custom connector",endpoint="Input endpoint"} 1"#
+    ));
+    assert!(!metrics.contains(r#"protocol="local""#));
 }

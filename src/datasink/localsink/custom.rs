@@ -10,6 +10,8 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use crate::operators::SinkStream;
 use crate::runtime::{
     common::{Consumer, MessageContext, Payload, RuntimeStream},
+    config::CustomEndpointConfig,
+    datasource::custom_endpoint_metric_labels,
     environment::{
         RuntimeResult,
         metrics::{Float64Histogram, Int64Counter, Int64Gauge, Labels},
@@ -96,6 +98,7 @@ where
 
 pub fn make_custom_endpoint_consumer<HandlerState, T, R, H>(
     stream: &Arc<SinkStream<T, R>>,
+    endpoint: &CustomEndpointConfig,
     handler: H,
 ) -> RuntimeResult<Arc<CustomEndpointConsumer<HandlerState, T, R, H>>>
 where
@@ -106,13 +109,7 @@ where
 {
     let scope = stream.environment().metrics().scope(
         "datasink_endpoint",
-        [
-            ("connector".to_owned(), "custom".to_owned()),
-            ("endpoint".to_owned(), stream.name().to_owned()),
-            ("protocol".to_owned(), "local".to_owned()),
-        ]
-        .into_iter()
-        .collect(),
+        custom_endpoint_metric_labels(stream.environment(), endpoint)?,
     );
     let consumer = Arc::new(CustomEndpointConsumer {
         stream: Arc::downgrade(stream),

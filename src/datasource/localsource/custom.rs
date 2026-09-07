@@ -22,7 +22,8 @@ use crate::{
     operators::InputStream,
     runtime::{
         common::{Consumer, MessageContext, Payload, RuntimeEndpointConsumer, new_stream_id},
-        datasource::{DataSource, PendingRequests, StreamContext},
+        config::CustomEndpointConfig,
+        datasource::{DataSource, PendingRequests, StreamContext, custom_endpoint_metric_labels},
         environment::{
             Lifecycle, RuntimeResult,
             metrics::{Float64Histogram, Int64Counter, Int64Gauge, Labels},
@@ -581,6 +582,7 @@ where
 
 pub fn make_custom_endpoint_consumer<HandlerState, T, R, E, H, P>(
     input_stream: InputStream<T, R, E>,
+    endpoint: &CustomEndpointConfig,
     producer: P,
     handler: H,
 ) -> RuntimeResult<Arc<CustomDataSource<HandlerState, T, R, E, H, P>>>
@@ -596,16 +598,7 @@ where
     let name = input_stream.stream().name();
     let scope = input_stream.stream().environment().metrics().scope(
         "datasource_endpoint",
-        [
-            ("connector".to_owned(), "custom".to_owned()),
-            (
-                "endpoint".to_owned(),
-                input_stream.stream().name().to_owned(),
-            ),
-            ("protocol".to_owned(), "local".to_owned()),
-        ]
-        .into_iter()
-        .collect(),
+        custom_endpoint_metric_labels(input_stream.stream().environment(), endpoint)?,
     );
     let pending = RotatingMap::new(PENDING_ROTATION_INTERVAL);
     let endpoint_consumer = Arc::new(CustomEndpointConsumer {
@@ -705,8 +698,7 @@ where
     }))
 }
 
-impl<HandlerState, T, R, E, H, P> DataSource
-    for CustomDataSource<HandlerState, T, R, E, H, P>
+impl<HandlerState, T, R, E, H, P> DataSource for CustomDataSource<HandlerState, T, R, E, H, P>
 where
     HandlerState: Send + Sync + 'static,
     T: Send + Sync + 'static,

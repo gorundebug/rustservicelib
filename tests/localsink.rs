@@ -8,7 +8,10 @@ use servicelib::{
     },
     runtime::{
         common::{Consumer, RuntimeStream},
-        config::{SinkStreamConfig, StreamConfig},
+        config::{
+            CallSemantics, CustomDataConnectorConfig, CustomEndpointConfig, RuntimeConfig,
+            SinkStreamConfig, StreamConfig,
+        },
         environment::RuntimeEnvironment,
         stream::Stream,
     },
@@ -92,6 +95,28 @@ impl Consumer<String> for Capture {
 #[tokio::test]
 async fn custom_sink_preserves_the_go_handler_lifecycle() {
     let environment = RuntimeEnvironment::default();
+    let endpoint_config = CustomEndpointConfig {
+        id: 10,
+        name: "Custom endpoint".to_owned(),
+        id_data_connector: 20,
+        tracing_enabled: false,
+    };
+    environment.publish_runtime_config(Arc::new(
+        RuntimeConfig::from_parts(
+            CallSemantics::FunctionCall,
+            [],
+            [],
+            [],
+            [CustomDataConnectorConfig {
+                id: 20,
+                name: "Custom connector".to_owned(),
+            }
+            .into()],
+            [endpoint_config.clone().into()],
+            [],
+        )
+        .unwrap(),
+    ));
     let source = Stream::new(&StreamConfig::new(1, "Output"), environment.clone());
     let sink = source
         .sink::<String>(&SinkStreamConfig {
@@ -105,6 +130,7 @@ async fn custom_sink_preserves_the_go_handler_lifecycle() {
     let events = Arc::new(Events::default());
     let endpoint = make_custom_endpoint_consumer(
         &sink,
+        &endpoint_config,
         Handler {
             events: Arc::clone(&events),
         },
@@ -121,4 +147,9 @@ async fn custom_sink_preserves_the_go_handler_lifecycle() {
         ["begin", "consume", "end", "done"]
     );
     assert_eq!(*result_capture.0.lock().unwrap(), ["result-42"]);
+    let metrics = environment.metrics().render_prometheus();
+    assert!(metrics.contains(
+        r#"datasink_endpoint_messages_total{connector="Custom connector",endpoint="Custom endpoint"} 1"#
+    ));
+    assert!(!metrics.contains(r#"protocol="local""#));
 }

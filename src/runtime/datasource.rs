@@ -64,13 +64,42 @@ use crate::{
     operators::InputStream,
     runtime::{
         common::{Consumer, MessageContext, Payload},
+        config::{CustomEndpointConfig, RuntimeDataConnectorConfig},
         environment::{
-            Lifecycle, RuntimeEnvironment, RuntimeResult,
+            Lifecycle, RuntimeEnvironment, RuntimeError, RuntimeResult,
             metrics::{Float64Histogram, Int64Counter, Int64Gauge, Labels, Metrics, MetricsScope},
         },
         stream::Stream,
     },
 };
+
+pub(crate) fn custom_endpoint_metric_labels(
+    environment: &RuntimeEnvironment,
+    endpoint: &CustomEndpointConfig,
+) -> RuntimeResult<Labels> {
+    let connector = environment
+        .runtime_config()
+        .data_connector_by_id(endpoint.id_data_connector)
+        .ok_or_else(|| {
+            RuntimeError::InvalidConfiguration(format!(
+                "custom endpoint {:?} references missing data connector {}",
+                endpoint.name, endpoint.id_data_connector
+            ))
+        })?;
+    if !matches!(connector.as_ref(), RuntimeDataConnectorConfig::Custom(_)) {
+        return Err(RuntimeError::InvalidConfiguration(format!(
+            "custom endpoint {:?} references non-custom data connector {:?}",
+            endpoint.name,
+            connector.name()
+        )));
+    }
+    Ok([
+        ("connector".to_owned(), connector.name().to_owned()),
+        ("endpoint".to_owned(), endpoint.name.clone()),
+    ]
+    .into_iter()
+    .collect())
+}
 
 /// Applies the current reloadable source-endpoint tracing policy to one event.
 pub fn apply_endpoint_tracing(
