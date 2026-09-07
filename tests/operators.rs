@@ -447,6 +447,15 @@ async fn case_routes_to_the_selected_typed_branch() {
     texts.set_consumer(Arc::clone(&text_capture), 6);
     source.environment().build_runtime_streams().unwrap();
 
+    let case_links = source
+        .environment()
+        .graph_links()
+        .into_iter()
+        .filter(|link| link.from == 2)
+        .map(|link| link.to)
+        .collect::<Vec<_>>();
+    assert_eq!(case_links, vec![3, 4]);
+
     source
         .emit(MessageContext::new(), Payload::new(Event::Number(42)))
         .await;

@@ -224,7 +224,7 @@ mod tests {
     }
 }
 
-fn short_type_name<T>() -> String {
+pub(crate) fn short_type_name<T>() -> String {
     std::any::type_name::<T>()
         .rsplit("::")
         .next()

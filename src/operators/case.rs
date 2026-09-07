@@ -4,9 +4,10 @@ use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::runtime::{
+    collector::short_type_name,
     common::{ConstructionValue, Consumer, MessageContext, Payload, RuntimeStream},
     config::{CaseStreamConfig, WhenStreamConfig},
-    environment::RuntimeResult,
+    environment::{CallStatistics, RuntimeResult},
     stream::Stream,
 };
 
@@ -98,6 +99,7 @@ where
 {
     inner: Arc<CaseStream<T, F>>,
     environment: crate::runtime::environment::RuntimeEnvironment,
+    id: i32,
 }
 
 impl<T, F> TypedCaseStream<T, F>
@@ -110,6 +112,13 @@ where
         T: Serialize + DeserializeOwned,
     {
         let output = Stream::new(&config.stream, self.environment.clone());
+        self.environment.register_graph_link(
+            self.id,
+            config.stream.id,
+            self.environment.call_semantics(self.id, config.stream.id),
+            short_type_name::<T>(),
+            CallStatistics::default(),
+        );
         self.inner.when_streams.with_mut(|branches| {
             branches.push(Arc::new(WhenStream {
                 output: output.clone(),
@@ -143,6 +152,7 @@ where
         Ok(TypedCaseStream {
             inner: CaseStream::make(config, self, selector)?,
             environment,
+            id: config.stream.id,
         })
     }
 }
