@@ -216,7 +216,7 @@ impl Lifecycle for AxumDataSource {
 pub struct HandlerData {
     pub method: Method,
     pub uri: axum::http::Uri,
-    pub headers: HeaderMap,
+    pub headers: Arc<HeaderMap>,
     pub body: Arc<Vec<u8>>,
     response: Arc<Mutex<ResponseData>>,
 }
@@ -673,7 +673,7 @@ where
         let data = HandlerData {
             method: parts.method,
             uri: parts.uri,
-            headers: parts.headers,
+            headers: Arc::new(parts.headers),
             body: Arc::new(body),
             response,
         };
@@ -990,5 +990,43 @@ where
         if let Some(endpoint_consumer) = self.endpoint_consumer.upgrade() {
             endpoint_consumer.consume_result(context, value).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod handler_data_tests {
+    use super::*;
+
+    #[test]
+    fn clones_share_request_headers_and_response_headers_are_independent() {
+        let data = HandlerData {
+            method: Method::GET,
+            uri: "/".parse().unwrap(),
+            headers: Arc::new(HeaderMap::from_iter([(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/json"),
+            )])),
+            body: Arc::new(Vec::new()),
+            response: Arc::new(Mutex::new(ResponseData {
+                status: StatusCode::OK,
+                headers: HeaderMap::new(),
+                body: Vec::new(),
+            })),
+        };
+        let copy = data.clone();
+        assert!(Arc::ptr_eq(&data.headers, &copy.headers));
+        copy.set_header(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("text/plain"),
+        );
+        let response = copy.into_response();
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "text/plain"
+        );
+        assert_eq!(
+            data.headers[axum::http::header::CONTENT_TYPE],
+            "application/json"
+        );
     }
 }
