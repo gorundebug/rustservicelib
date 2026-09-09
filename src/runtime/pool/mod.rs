@@ -1,5 +1,6 @@
 mod delaypool;
 mod prioritytaskpool;
+mod queuedpool;
 mod taskpool;
 
 use std::{any::Any, panic::AssertUnwindSafe};

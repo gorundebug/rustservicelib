@@ -1,10 +1,9 @@
 use std::{
     cell::UnsafeCell,
     collections::HashMap,
-    fmt,
     ops::Deref,
     sync::{
-        Arc, Mutex as StdMutex, Weak,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -17,7 +16,7 @@ use opentelemetry::{
     propagation::{Extractor, Injector},
     trace::TraceContextExt,
 };
-use tokio::{task::AbortHandle, time::Instant};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -140,69 +139,6 @@ impl<T> ConstructionValue<T> {
     }
 }
 
-type CancellationCallback = Arc<dyn Fn() + Send + Sync + 'static>;
-
-struct CancellationCallbacks {
-    next_id: AtomicU64,
-    callbacks: StdMutex<HashMap<u64, CancellationCallback>>,
-}
-
-impl fmt::Debug for CancellationCallbacks {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("CancellationCallbacks")
-            .finish_non_exhaustive()
-    }
-}
-
-impl CancellationCallbacks {
-    fn invoke(&self, id: u64) {
-        let callback = self
-            .callbacks
-            .lock()
-            .expect("message cancellation callback lock poisoned")
-            .remove(&id);
-        if let Some(callback) = callback {
-            callback();
-        }
-    }
-
-    fn invoke_all(&self) {
-        let callbacks = {
-            let mut callbacks = self
-                .callbacks
-                .lock()
-                .expect("message cancellation callback lock poisoned");
-            std::mem::take(&mut *callbacks)
-        };
-        for callback in callbacks.into_values() {
-            callback();
-        }
-    }
-}
-
-pub(crate) struct CancellationCallbackRegistration {
-    callbacks: Weak<CancellationCallbacks>,
-    id: Option<u64>,
-    deadline_task: Option<AbortHandle>,
-}
-
-impl Drop for CancellationCallbackRegistration {
-    fn drop(&mut self) {
-        if let Some(deadline_task) = self.deadline_task.take() {
-            deadline_task.abort();
-        }
-        let (Some(callbacks), Some(id)) = (self.callbacks.upgrade(), self.id) else {
-            return;
-        };
-        callbacks
-            .callbacks
-            .lock()
-            .expect("message cancellation callback lock poisoned")
-            .remove(&id);
-    }
-}
-
 struct MetadataExtractor<'a>(&'a HashMap<String, String>);
 
 impl Extractor for MetadataExtractor<'_> {
@@ -289,7 +225,6 @@ impl<T> Deref for Payload<T> {
 #[derive(Clone, Debug)]
 pub struct MessageContext {
     cancellation: CancellationToken,
-    cancellation_callbacks: Arc<CancellationCallbacks>,
     deadline: Option<Instant>,
     metadata: Arc<HashMap<String, String>>,
     open_telemetry: OpenTelemetryContext,
@@ -307,10 +242,6 @@ impl MessageContext {
     pub fn new() -> Self {
         Self {
             cancellation: CancellationToken::new(),
-            cancellation_callbacks: Arc::new(CancellationCallbacks {
-                next_id: AtomicU64::new(0),
-                callbacks: StdMutex::new(HashMap::new()),
-            }),
             deadline: None,
             metadata: Arc::new(HashMap::new()),
             open_telemetry: OpenTelemetryContext::new(),
@@ -325,10 +256,6 @@ impl MessageContext {
     pub fn child(&self) -> Self {
         Self {
             cancellation: self.cancellation.child_token(),
-            cancellation_callbacks: Arc::new(CancellationCallbacks {
-                next_id: AtomicU64::new(0),
-                callbacks: StdMutex::new(HashMap::new()),
-            }),
             deadline: self.deadline,
             metadata: Arc::clone(&self.metadata),
             open_telemetry: self.open_telemetry.clone(),
@@ -539,56 +466,6 @@ impl MessageContext {
 
     pub fn cancel(&self) {
         self.cancellation.cancel();
-        self.cancellation_callbacks.invoke_all();
-    }
-
-    pub(crate) fn register_cancellation_callback(
-        &self,
-        callback: impl Fn() + Send + Sync + 'static,
-    ) -> CancellationCallbackRegistration {
-        let callback: CancellationCallback = Arc::new(callback);
-        if self.is_cancelled() {
-            callback();
-            return CancellationCallbackRegistration {
-                callbacks: Weak::new(),
-                id: None,
-                deadline_task: None,
-            };
-        }
-        let id = self
-            .cancellation_callbacks
-            .next_id
-            .fetch_add(1, Ordering::Relaxed);
-        {
-            let mut callbacks = self
-                .cancellation_callbacks
-                .callbacks
-                .lock()
-                .expect("message cancellation callback lock poisoned");
-            if self.is_cancelled() {
-                drop(callbacks);
-                callback();
-                return CancellationCallbackRegistration {
-                    callbacks: Weak::new(),
-                    id: None,
-                    deadline_task: None,
-                };
-            }
-            callbacks.insert(id, callback);
-        }
-        let deadline_task = self.deadline.map(|deadline| {
-            let callbacks = Arc::clone(&self.cancellation_callbacks);
-            tokio::spawn(async move {
-                tokio::time::sleep_until(deadline).await;
-                callbacks.invoke(id);
-            })
-            .abort_handle()
-        });
-        CancellationCallbackRegistration {
-            callbacks: Arc::downgrade(&self.cancellation_callbacks),
-            id: Some(id),
-            deadline_task,
-        }
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -613,37 +490,28 @@ impl MessageContext {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
     use super::*;
 
     #[tokio::test(start_paused = true)]
-    async fn deadline_callback_still_fires() {
+    async fn cancellation_wait_observes_deadline() {
         let context = MessageContext::with_timeout(Duration::from_secs(60));
-        let invoked = Arc::new(AtomicBool::new(false));
-        let callback_invoked = Arc::clone(&invoked);
-        let _registration = context.register_cancellation_callback(move || {
-            callback_invoked.store(true, Ordering::Release);
-        });
-
+        let wait = context.cancelled();
+        tokio::pin!(wait);
+        assert!(futures::poll!(&mut wait).is_pending());
         tokio::time::advance(Duration::from_secs(60)).await;
-        tokio::task::yield_now().await;
-
-        assert!(invoked.load(Ordering::Acquire));
+        wait.await;
+        assert!(context.is_cancelled());
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn dropping_registration_aborts_deadline_task() {
-        let context = MessageContext::with_timeout(Duration::from_secs(60));
-        let callbacks = Arc::downgrade(&context.cancellation_callbacks);
-        let registration = context.register_cancellation_callback(|| {});
-        drop(context);
-
-        assert!(callbacks.upgrade().is_some());
-        drop(registration);
-        tokio::task::yield_now().await;
-
-        assert!(callbacks.upgrade().is_none());
+    #[tokio::test]
+    async fn cancellation_wait_observes_parent_cancellation() {
+        let parent = MessageContext::new();
+        let child = parent.child();
+        let wait = child.cancelled();
+        tokio::pin!(wait);
+        assert!(futures::poll!(&mut wait).is_pending());
+        parent.cancel();
+        assert!(futures::poll!(&mut wait).is_ready());
     }
 
     #[test]

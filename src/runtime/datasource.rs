@@ -305,7 +305,12 @@ where
     }
 
     pub async fn collect(&self, context: MessageContext, value: T) {
-        self.input_stream.consume(context, value).await;
+        self.collect_payload(context, Payload::new(value)).await;
+    }
+
+    /// Pass existing shared storage into the graph without cloning the value.
+    pub async fn collect_payload(&self, context: MessageContext, payload: Payload<T>) {
+        self.input_stream.consume_payload(context, payload).await;
     }
 
     pub async fn error_collect(&self, context: MessageContext, value: E) {

@@ -99,12 +99,6 @@ impl RuntimeConfig {
             runtime.streams_by_name.insert(name, stream);
         }
         for pool in pools {
-            if pool.executors_count == 0 {
-                return Err(RuntimeError::InvalidConfiguration(format!(
-                    "pool {:?} must have at least one executor",
-                    pool.name
-                )));
-            }
             if runtime.pools_by_name.contains_key(&pool.name) {
                 return duplicate_name("pool", &pool.name);
             }

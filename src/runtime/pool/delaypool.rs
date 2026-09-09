@@ -2,14 +2,21 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        Arc, OnceLock, RwLock as StdRwLock,
+        Arc, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
 
-use futures::{StreamExt, stream::FuturesUnordered};
-use tokio::{sync::mpsc, task::JoinHandle};
+use futures::{
+    FutureExt, StreamExt,
+    future::{BoxFuture, Shared},
+    stream::FuturesUnordered,
+};
+use tokio::{
+    sync::{Mutex, mpsc},
+    task::JoinSet,
+};
 
 use crate::runtime::{
     common::MessageContext,
@@ -22,14 +29,15 @@ use crate::runtime::{
 struct DelayPoolState {
     stopped: bool,
     sender: Option<mpsc::UnboundedSender<ScheduledDelay>>,
-    worker: Option<JoinHandle<()>>,
+    worker: Option<Shared<BoxFuture<'static, ()>>>,
 }
 
 type BoxDelayTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
 struct ScheduledDelay {
     context: MessageContext,
-    duration: Duration,
+    run_at: tokio::time::Instant,
+    expedited_by_deadline: bool,
     task: BoxDelayTask,
     metrics: Option<DelayPoolMetrics>,
     active_tasks: Arc<AtomicUsize>,
@@ -41,7 +49,7 @@ struct ScheduledDelay {
 /// decides whether cancellation means "run now" or "skip". `DelayStream`
 /// uses the latter, exactly like the Go operator.
 pub struct DelayPool {
-    state: StdRwLock<DelayPoolState>,
+    state: Mutex<DelayPoolState>,
     metrics: OnceLock<DelayPoolMetrics>,
     active_tasks: Arc<AtomicUsize>,
 }
@@ -49,7 +57,7 @@ pub struct DelayPool {
 impl Default for DelayPool {
     fn default() -> Self {
         Self {
-            state: StdRwLock::new(DelayPoolState {
+            state: Mutex::new(DelayPoolState {
                 stopped: false,
                 sender: None,
                 worker: None,
@@ -121,19 +129,21 @@ impl DelayPool {
     }
 
     async fn run(mut receiver: mpsc::UnboundedReceiver<ScheduledDelay>) {
-        let mut delays: FuturesUnordered<BoxDelayTask> = FuturesUnordered::new();
+        // Only readiness futures are polled by this worker. User callbacks run
+        // in independent Tokio tasks, never inline in the timer scheduler.
+        let mut delays = FuturesUnordered::new();
+        let mut callbacks = JoinSet::new();
         let mut accepting = true;
-        loop {
-            if !accepting {
-                while delays.next().await.is_some() {}
-                return;
-            }
+        while accepting || !delays.is_empty() || !callbacks.is_empty() {
             tokio::select! {
-                scheduled = receiver.recv() => match scheduled {
-                    Some(scheduled) => delays.push(Box::pin(scheduled.run())),
+                scheduled = receiver.recv(), if accepting => match scheduled {
+                    Some(scheduled) => delays.push(scheduled.wait_ready()),
                     None => accepting = false,
                 },
-                _ = delays.next(), if !delays.is_empty() => {}
+                Some((scheduled, cancelled)) = delays.next(), if !delays.is_empty() => {
+                    callbacks.spawn(scheduled.execute(cancelled));
+                },
+                _ = callbacks.join_next(), if !callbacks.is_empty() => {}
             }
         }
     }
@@ -170,36 +180,44 @@ impl DelayPool {
             return Err(RuntimeError::ContextCancelled);
         }
 
-        let duration = context
-            .deadline()
-            .map(|deadline| deadline.saturating_duration_since(tokio::time::Instant::now()))
-            .map_or(duration, |remaining| remaining.min(duration));
+        let now = tokio::time::Instant::now();
+        let requested_at = now.checked_add(duration);
+        let run_at = match (requested_at, context.deadline()) {
+            (Some(requested), Some(deadline)) => requested.min(deadline),
+            (Some(requested), None) => requested,
+            (None, Some(deadline)) => deadline,
+            (None, None) => {
+                return Err(RuntimeError::InvalidConfiguration(
+                    "delay duration exceeds the clock range".to_owned(),
+                ));
+            }
+        };
+        let expedited_by_deadline = requested_at.is_none_or(|requested| run_at < requested);
         let metrics = self.metrics.get().cloned();
         let scheduled = ScheduledDelay {
             context,
-            duration,
+            run_at,
+            expedited_by_deadline,
             task: Box::pin(task),
             metrics,
             active_tasks: Arc::clone(&self.active_tasks),
         };
 
-        let state = self.state.read().expect("delay pool state lock poisoned");
-        if state.stopped {
-            return Err(RuntimeError::ResourceStopped("delay".to_owned()));
-        }
-        if let Some(sender) = &state.sender {
-            return Self::send_scheduled(sender, scheduled);
-        }
-        drop(state);
-
-        let mut state = self.state.write().expect("delay pool state lock poisoned");
+        let mut state = self.state.lock().await;
         if state.stopped {
             return Err(RuntimeError::ResourceStopped("delay".to_owned()));
         }
         if state.sender.is_none() {
             let (sender, receiver) = mpsc::unbounded_channel();
             state.sender = Some(sender);
-            state.worker = Some(tokio::spawn(Self::run(receiver)));
+            let worker = tokio::spawn(Self::run(receiver));
+            state.worker = Some(
+                async move {
+                    let _ = worker.await;
+                }
+                .boxed()
+                .shared(),
+            );
         }
         Self::send_scheduled(
             state
@@ -216,10 +234,10 @@ impl DelayPool {
 
     pub async fn stop_with_context(&self, context: MessageContext) {
         let worker = {
-            let mut state = self.state.write().expect("delay pool state lock poisoned");
+            let mut state = self.state.lock().await;
             state.stopped = true;
             state.sender.take();
-            state.worker.take()
+            state.worker.clone()
         };
         let Some(mut worker) = worker else {
             return;
@@ -241,23 +259,27 @@ impl DelayPool {
 }
 
 impl ScheduledDelay {
-    async fn run(self) {
+    async fn wait_ready(self) -> (Self, bool) {
+        // Absolute admission-time deadline: backlog in the scheduler must not
+        // restart a relative delay when it eventually receives the entry.
+        let cancelled = if self.run_at <= tokio::time::Instant::now() {
+            self.expedited_by_deadline || self.context.is_cancelled()
+        } else {
+            tokio::select! {
+                _ = tokio::time::sleep_until(self.run_at) => self.expedited_by_deadline,
+                _ = self.context.cancelled() => true,
+            }
+        };
+        (self, cancelled)
+    }
+
+    async fn execute(self, cancelled: bool) {
         let Self {
-            context,
-            duration,
             task,
             metrics,
             active_tasks,
+            ..
         } = self;
-        let mut cancelled = false;
-        if !duration.is_zero() {
-            tokio::select! {
-                _ = tokio::time::sleep(duration) => {}
-                _ = context.cancelled() => {
-                    cancelled = true;
-                }
-            }
-        }
         if cancelled && let Some(metrics) = &metrics {
             metrics.task_cancelled.inc();
         }

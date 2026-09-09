@@ -675,3 +675,26 @@ async fn multi_join_accepts_heterogeneous_typed_inputs() {
 
     assert_eq!(&*capture.0.lock().unwrap()[0].1, "key:10:name:true");
 }
+
+#[tokio::test]
+async fn source_context_preserves_shared_payload_identity() {
+    let config = InputStreamConfig {
+        stream: StreamConfig::new(1, "Input"),
+        endpoint_id: 10,
+    };
+    let environment = test_environment(vec![config.clone().into()], Vec::new());
+    let input =
+        servicelib::operators::InputStream::<String, String, String>::new(&config, environment);
+    let capture = Arc::new(Capture::default());
+    input.stream().set_consumer(Arc::clone(&capture), 2);
+    let context = servicelib::runtime::datasource::StreamContext::new(input);
+    let original = Arc::new(String::from("shared order"));
+    context
+        .collect_payload(
+            MessageContext::new(),
+            Payload::Shared(Arc::clone(&original)),
+        )
+        .await;
+    let captured = capture.0.lock().unwrap();
+    assert!(Arc::ptr_eq(&original, &captured[0].1));
+}
