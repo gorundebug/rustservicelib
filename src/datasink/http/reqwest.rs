@@ -133,7 +133,7 @@ impl Client for ReqwestClient {
                     .map(|value| (name.as_str().to_owned(), value.to_owned()))
             })
             .collect();
-        let body = response.bytes().await?.to_vec();
+        let body = response.bytes().await?.into();
         Ok(Response {
             status,
             body,

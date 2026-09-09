@@ -657,7 +657,7 @@ where
         }
         let (parts, body) = request.into_parts();
         let body = match to_bytes(body, usize::MAX).await {
-            Ok(body) => body.to_vec(),
+            Ok(body) => Vec::from(body),
             Err(error) => {
                 return Response::builder()
                     .status(StatusCode::BAD_REQUEST)
