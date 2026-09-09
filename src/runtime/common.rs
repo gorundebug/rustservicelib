@@ -326,9 +326,7 @@ impl MessageContext {
     }
 
     pub fn with_stream_id(mut self, stream_id: impl Into<String>) -> Self {
-        let mut metadata = self.metadata().clone();
-        metadata.insert(STREAM_ID_HEADER.to_owned(), stream_id.into());
-        self.metadata = Arc::new(metadata);
+        Arc::make_mut(&mut self.metadata).insert(STREAM_ID_HEADER.to_owned(), stream_id.into());
         self
     }
 
@@ -370,9 +368,7 @@ impl MessageContext {
 
     pub fn enable_sampling(mut self) -> Self {
         self.sampling_enabled = true;
-        let mut metadata = self.metadata().clone();
-        metadata.insert(TRACE_SAMPLING_HEADER.to_owned(), "1".to_owned());
-        self.metadata = Arc::new(metadata);
+        Arc::make_mut(&mut self.metadata).insert(TRACE_SAMPLING_HEADER.to_owned(), "1".to_owned());
         self
     }
 
@@ -397,6 +393,11 @@ impl MessageContext {
     /// transferred; arbitrary process-local context values are not serialized.
     pub fn transport_metadata(&self) -> HashMap<String, String> {
         let mut metadata = HashMap::new();
+        self.extend_transport_metadata(&mut metadata);
+        metadata
+    }
+
+    pub(crate) fn extend_transport_metadata(&self, metadata: &mut HashMap<String, String>) {
         for name in [STREAM_ID_HEADER, TRACE_SAMPLING_HEADER] {
             if let Some(value) = self.metadata.get(name) {
                 metadata.insert(name.to_owned(), value.clone());
@@ -404,11 +405,9 @@ impl MessageContext {
         }
         if self.open_telemetry.span().span_context().is_valid() {
             global::get_text_map_propagator(|propagator| {
-                propagator
-                    .inject_context(&self.open_telemetry, &mut MetadataInjector(&mut metadata));
+                propagator.inject_context(&self.open_telemetry, &mut MetadataInjector(metadata));
             });
         }
-        metadata
     }
 
     pub fn from_tonic_request<T>(request: &tonic::Request<T>) -> Self {
@@ -448,16 +447,28 @@ impl MessageContext {
     }
 
     pub fn apply_to_tonic_request<T>(&self, request: &mut tonic::Request<T>) {
-        for (name, value) in self.transport_metadata() {
+        fn insert(metadata: &mut tonic::metadata::MetadataMap, name: &str, value: &str) {
             let Ok(key) =
                 tonic::metadata::MetadataKey::<tonic::metadata::Ascii>::from_bytes(name.as_bytes())
             else {
-                continue;
+                return;
             };
-            let Ok(value) = tonic::metadata::MetadataValue::try_from(value.as_str()) else {
-                continue;
+            let Ok(value) = tonic::metadata::MetadataValue::try_from(value) else {
+                return;
             };
-            request.metadata_mut().insert(key, value);
+            metadata.insert(key, value);
+        }
+        if self.open_telemetry.span().span_context().is_valid() {
+            // Keep propagator overwrite/filtering semantics, including custom propagators.
+            for (name, value) in self.transport_metadata() {
+                insert(request.metadata_mut(), &name, &value);
+            }
+        } else {
+            for name in [STREAM_ID_HEADER, TRACE_SAMPLING_HEADER] {
+                if let Some(value) = self.metadata.get(name) {
+                    insert(request.metadata_mut(), name, value);
+                }
+            }
         }
         if let Some(remaining) = self.remaining() {
             request.set_timeout(remaining);

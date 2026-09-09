@@ -1,5 +1,9 @@
+mod callback_store;
+
+use callback_store::CallbackStore;
+
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     error::Error,
     future::Future,
     pin::Pin,
@@ -85,7 +89,7 @@ where
     R: Send + Sync + 'static,
     E: Send + Sync + 'static,
 {
-    callbacks: Mutex<HashMap<String, ResultCallback<HandlerState, T, ResR, R, E>>>,
+    callbacks: Mutex<CallbackStore<ResultCallback<HandlerState, T, ResR, R, E>>>,
     done: CancellationToken,
     span: tracing::Span,
 }
@@ -100,7 +104,7 @@ where
 {
     fn new(span: tracing::Span) -> Self {
         Self {
-            callbacks: Mutex::new(HashMap::new()),
+            callbacks: Mutex::new(CallbackStore::new()),
             done: CancellationToken::new(),
             span,
         }

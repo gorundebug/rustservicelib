@@ -157,3 +157,62 @@ fn assigning_stream_id_preserves_the_current_span_context() {
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     );
 }
+
+#[test]
+fn metadata_mutation_preserves_shared_context_and_cancellation() {
+    let parent = MessageContext::new().with_stream_id("parent");
+    let sibling = parent.clone();
+    let child = parent.child().with_stream_id("child").enable_sampling();
+    assert_eq!(parent.stream_id(), Some("parent"));
+    assert_eq!(sibling.stream_id(), Some("parent"));
+    assert!(!parent.sampling_enabled());
+    assert!(!parent.metadata().contains_key("x-trace"));
+    assert_eq!(child.stream_id(), Some("child"));
+    assert_eq!(child.metadata()["x-trace"], "1");
+    parent.cancel();
+    assert!(child.is_cancelled());
+}
+
+#[test]
+fn tonic_metadata_matches_transport_metadata_for_traced_and_untraced_contexts() {
+    let _guard = PROPAGATOR_LOCK.lock().unwrap();
+    global::set_text_map_propagator(TextMapCompositePropagator::new(vec![
+        Box::new(TraceContextPropagator::new()),
+        Box::new(BaggagePropagator::new()),
+    ]));
+    for traceparent in [
+        "",
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00",
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+    ] {
+        for id in ["", "order-42", "invalid\nvalue"] {
+            let context = MessageContext::new().with_metadata(HashMap::from([
+                ("x-stream-id".into(), id.into()),
+                ("x-trace".into(), "1".into()),
+                ("traceparent".into(), traceparent.into()),
+                ("baggage".into(), "tenant=acme".into()),
+                ("authorization".into(), "private".into()),
+            ]));
+            let mut request = tonic::Request::new(());
+            request
+                .metadata_mut()
+                .insert("x-stream-id", "existing".parse().unwrap());
+            let mut expected = request.metadata().clone();
+            for (key, value) in context.transport_metadata() {
+                if let (Ok(key), Ok(value)) = (
+                    tonic::metadata::MetadataKey::<tonic::metadata::Ascii>::from_bytes(
+                        key.as_bytes(),
+                    ),
+                    tonic::metadata::MetadataValue::try_from(value.as_str()),
+                ) {
+                    expected.insert(key, value);
+                }
+            }
+            context.apply_to_tonic_request(&mut request);
+            assert_eq!(
+                request.metadata().clone().into_headers(),
+                expected.into_headers()
+            );
+        }
+    }
+}

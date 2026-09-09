@@ -402,9 +402,7 @@ where
 
         let request = if result.is_ok() {
             requester.take_request().map(|mut request| {
-                for (name, value) in request_context.transport_metadata() {
-                    request.headers.insert(name, value);
-                }
+                request_context.extend_transport_metadata(&mut request.headers);
                 request
             })
         } else {
