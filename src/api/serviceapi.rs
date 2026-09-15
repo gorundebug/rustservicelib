@@ -483,6 +483,8 @@ pub struct Stream {
     pub duration: Option<i64>,
     #[serde(rename = "pipeline", skip_serializing_if = "Option::is_none")]
     pub pipeline: Option<String>,
+    #[serde(rename = "component", skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

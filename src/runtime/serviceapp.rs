@@ -312,6 +312,7 @@ impl ServiceApp {
             .expect("service gRPC shutdown lock poisoned") = shutdown.clone();
         let routes_metrics = self.environment.metrics().clone();
         let grpc_methods = self.grpc_metric_methods();
+        let tracing_enabled = self.environment.tracing_enabled();
         *self.grpc_task.lock().await = Some(tokio::spawn(async move {
             tracing::info!(address = %address, "gRPC service listening");
             TonicServer::builder()
@@ -321,6 +322,7 @@ impl ServiceApp {
                     // The layer itself must not own transport lifecycle.
                     routes_metrics,
                     grpc_methods,
+                    tracing_enabled,
                 ))
                 .add_routes(routes)
                 .serve_with_incoming_shutdown(
@@ -441,6 +443,7 @@ impl ServiceApp {
                 config.http_host.clone(),
                 config.http_port,
                 self.http_metric_specs(&config),
+                self.environment.tracing_enabled(),
             ),
             observe_http_server_request,
         ));

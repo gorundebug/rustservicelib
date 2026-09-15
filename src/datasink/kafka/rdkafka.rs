@@ -834,29 +834,34 @@ where
             return;
         };
         let span = if stream.environment().tracing_enabled() && context.sampling_enabled() {
+            let (stream_name, pipeline_name, component_name) = stream.tracing_labels();
             let span = tracing::info_span!(
                 "kafka.output",
-                stream = stream.name(),
+                stream = stream_name,
+                pipeline = pipeline_name,
+                component = component_name,
                 endpoint = self.endpoint_name.as_str(),
                 stream_id = tracing::field::Empty,
                 error = tracing::field::Empty,
                 otel.status_code = tracing::field::Empty,
                 otel.status_message = tracing::field::Empty,
             );
-            let _ = span.set_parent(context.open_telemetry_context().clone());
+            if !span.is_disabled() {
+                let _ = span.set_parent(context.open_telemetry_context().clone());
+            }
             span
         } else {
             tracing::Span::none()
         };
-        let stream_id = span.in_scope(|| self.handler.get_stream_id(&context, &value));
-        span.record("stream_id", stream_id.as_str());
+        let stream_id = crate::runtime::common::scope_if_enabled!(&span, || self.handler.get_stream_id(&context, &value));
+        crate::runtime::telemetry::record_if_enabled!(&span, "stream_id", stream_id.as_str());
         let context = context.with_stream_id(stream_id).with_span_context(&span);
         let (context, mut handler_state) = crate::runtime::common::instrument_if_enabled!(
             self.handler
                 .begin_request(context, self.stream_context.clone()),
             span.clone(),
         );
-        tracing::event!(name: "begin_request", parent: &span, tracing::Level::INFO, {});
+        crate::runtime::common::event_if_enabled!(&span, || tracing::event!(name: "begin_request", parent: &span, tracing::Level::INFO, {}));
 
         self.active_requests.inc();
         let started_at = self.request_duration.is_enabled().then(Instant::now);
@@ -904,7 +909,7 @@ where
                 tracing::event!(name: "consume_message", parent: &span, tracing::Level::INFO, {})
             }
             Err(error) => {
-                crate::runtime::telemetry::record_span_error(&span, error);
+                crate::runtime::telemetry::record_error_if_enabled!(&span, error);
                 tracing::event!(name: "consume_message.error", parent: &span, tracing::Level::ERROR,
                     error = %error,
                     "Kafka sink handler failed"

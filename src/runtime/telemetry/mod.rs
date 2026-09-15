@@ -28,6 +28,9 @@ use crate::runtime::{
 pub(crate) mod librdkafka_statistics;
 pub mod opentelemetry;
 
+#[cfg(test)]
+mod server_tracing_contract_tests;
+
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 #[derive(Default)]
@@ -69,6 +72,81 @@ pub(crate) const HTTP_STATUS_CODES: &[u16] = &[
 /// Record the OpenTelemetry error status as well as a human-readable error
 /// field. The special `otel.status_*` fields are consumed by
 /// `tracing-opentelemetry`; an error log alone does not change span status.
+macro_rules! record_error_if_enabled {
+    ($span:expr, $error:expr $(,)?) => {{
+        let span: &::tracing::Span = $span;
+        if !span.is_disabled() {
+            $crate::runtime::telemetry::record_span_error(span, $error);
+        }
+    }};
+}
+
+pub(crate) use record_error_if_enabled;
+
+/// Keep attribute-key/value evaluation inside the disabled-span guard. A
+/// function wrapper would evaluate arguments before it can inspect the span.
+macro_rules! record_if_enabled {
+    ($span:expr, $key:expr, $value:expr $(,)?) => {{
+        let span: &::tracing::Span = $span;
+        if !span.is_disabled() {
+            span.record($key, $value);
+        }
+    }};
+}
+
+pub(crate) use record_if_enabled;
+
+#[cfg(test)]
+mod attribute_fast_path_tests {
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    use tracing::{Subscriber, span::{Id, Record}};
+    use tracing_subscriber::{Layer, layer::Context, prelude::*};
+
+    struct Records(Arc<AtomicUsize>);
+
+    impl<S: Subscriber> Layer<S> for Records {
+        fn on_record(&self, _id: &Id, _values: &Record<'_>, _ctx: Context<'_, S>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn disabled_span_does_not_evaluate_attribute_key_or_value() {
+        let keys = AtomicUsize::new(0);
+        let values = AtomicUsize::new(0);
+        let span = tracing::Span::none();
+        super::record_if_enabled!(&span, {
+            keys.fetch_add(1, Ordering::Relaxed);
+            "stream_id"
+        }, {
+            values.fetch_add(1, Ordering::Relaxed);
+            String::from("must not allocate")
+        });
+        assert_eq!(keys.load(Ordering::Relaxed), 0);
+        assert_eq!(values.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn enabled_span_records_typed_attributes_exactly_once() {
+        let records = Arc::new(AtomicUsize::new(0));
+        let values = AtomicUsize::new(0);
+        let subscriber = tracing_subscriber::registry().with(Records(records.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("attributes", stream_id = tracing::field::Empty, has_result = tracing::field::Empty);
+            super::record_if_enabled!(&span, "stream_id", {
+                values.fetch_add(1, Ordering::Relaxed);
+                "request-123"
+            });
+            super::record_if_enabled!(&span, "has_result", {
+                values.fetch_add(1, Ordering::Relaxed);
+                false
+            });
+        });
+        assert_eq!(values.load(Ordering::Relaxed), 2);
+        assert_eq!(records.load(Ordering::Relaxed), 2);
+    }
+}
+
 pub(crate) fn record_span_error(span: &tracing::Span, error: impl Display) {
     let message = error.to_string();
     span.record("error", message.as_str());
@@ -254,6 +332,7 @@ type HttpRouteMap = HashMap<Method, HashMap<String, Arc<HttpRouteMetrics>>>;
 #[derive(Clone)]
 pub(crate) struct HttpServerMetrics {
     enabled: bool,
+    tracing_enabled: bool,
     routes: Arc<HttpRouteMap>,
     fallback: Arc<HttpRouteMetrics>,
     host: Arc<str>,
@@ -285,6 +364,7 @@ impl HttpServerMetrics {
         host: String,
         port: u16,
         specs: Vec<HttpRouteMetricSpec>,
+        tracing_enabled: bool,
     ) -> Self {
         let enabled = !metrics.is_noop();
         let host: Arc<str> = host.into();
@@ -323,6 +403,7 @@ impl HttpServerMetrics {
             fallback,
             host,
             port,
+            tracing_enabled,
         }
     }
 
@@ -437,7 +518,11 @@ pub(crate) async fn observe_http_server_request(
     request: Request,
     next: Next,
 ) -> Response<Body> {
-    let tracing_parent = MessageContext::tracing_parent_from_http_headers(request.headers());
+    let tracing_parent = if state.tracing_enabled {
+        MessageContext::tracing_parent_from_http_headers(request.headers())
+    } else {
+        None
+    };
     if !state.enabled && tracing_parent.is_none() {
         return next.run(request).await;
     }
@@ -460,7 +545,7 @@ pub(crate) async fn observe_http_server_request(
     }
 
     let started_at = state.enabled.then(Instant::now);
-    let span = tracing_parent.map(|parent| {
+    let span = tracing_parent.and_then(|parent| {
         let span = tracing::info_span!(
             "http.server.request",
             http.request.method = %method,
@@ -471,8 +556,11 @@ pub(crate) async fn observe_http_server_request(
             otel.status_code = tracing::field::Empty,
             otel.status_message = tracing::field::Empty,
         );
+        if span.is_disabled() {
+            return None;
+        }
         let _ = span.set_parent(parent);
-        span
+        Some(span)
     });
     let response = if let Some(span) = &span {
         next.run(request).instrument(span.clone()).await
@@ -490,7 +578,7 @@ pub(crate) async fn observe_http_server_request(
     if status.is_server_error()
         && let Some(span) = &span
     {
-        record_span_error(span, format!("HTTP status {}", status.as_u16()));
+        record_error_if_enabled!(span, format_args!("HTTP status {}", status.as_u16()));
     }
     if let (Some(route_metrics), Some(started_at)) = (&route_metrics, started_at) {
         let metrics = route_metrics.outcome(status.as_u16());
@@ -509,7 +597,7 @@ pub(crate) async fn observe_http_server_request(
             histogram.observe(size);
         }
         if let Some(span) = &span {
-            span.in_scope(|| {
+            crate::runtime::common::event_if_enabled!(span, || {
                 tracing::info!(
                     http.request.method = %route_metrics.method,
                     http.route = %route_metrics.route,
@@ -526,12 +614,14 @@ pub(crate) async fn observe_http_server_request(
 #[derive(Clone)]
 pub(crate) struct GrpcServerMetricsLayer {
     metrics: GrpcServerMetrics,
+    tracing_enabled: bool,
 }
 
 impl GrpcServerMetricsLayer {
-    pub(crate) fn new(metrics: Metrics, methods: Vec<String>) -> Self {
+    pub(crate) fn new(metrics: Metrics, methods: Vec<String>, tracing_enabled: bool) -> Self {
         Self {
             metrics: GrpcServerMetrics::new(metrics, methods),
+            tracing_enabled,
         }
     }
 }
@@ -543,6 +633,7 @@ impl<S> Layer<S> for GrpcServerMetricsLayer {
         GrpcServerMetricsService {
             inner,
             metrics: self.metrics.clone(),
+            tracing_enabled: self.tracing_enabled,
         }
     }
 }
@@ -551,6 +642,7 @@ impl<S> Layer<S> for GrpcServerMetricsLayer {
 pub(crate) struct GrpcServerMetricsService<S> {
     inner: S,
     metrics: GrpcServerMetrics,
+    tracing_enabled: bool,
 }
 
 type GrpcMethodMap = HashMap<String, Arc<GrpcMethodMetrics>>;
@@ -714,21 +806,22 @@ impl GrpcCallObservation {
         if status != "OK"
             && let Some(span) = &self.span
         {
-            record_span_error(span, format!("gRPC status {status}"));
+            record_error_if_enabled!(span, format_args!("gRPC status {status}"));
         }
         let elapsed = self.started_at.elapsed().as_secs_f64();
         if let Some(metrics) = &self.metrics {
             metrics.observe(status, elapsed);
         }
         if let Some(span) = &self.span {
-            let _guard = span.enter();
-            tracing::info!(
-                rpc.system.name = "grpc",
-                rpc.method = self.metrics.as_ref().map_or("<unmatched>", |metrics| metrics.method.as_str()),
-                rpc.response.status_code = %status,
-                duration_seconds = elapsed,
-                "gRPC call completed"
-            );
+            crate::runtime::common::event_if_enabled!(span, || {
+                tracing::info!(
+                    rpc.system.name = "grpc",
+                    rpc.method = self.metrics.as_ref().map_or("<unmatched>", |metrics| metrics.method.as_str()),
+                    rpc.response.status_code = %status,
+                    duration_seconds = elapsed,
+                    "gRPC call completed"
+                );
+            });
         }
     }
 }
@@ -814,7 +907,11 @@ where
     }
 
     fn call(&mut self, request: axum::http::Request<B>) -> Self::Future {
-        let tracing_parent = MessageContext::tracing_parent_from_http_headers(request.headers());
+        let tracing_parent = if self.tracing_enabled {
+            MessageContext::tracing_parent_from_http_headers(request.headers())
+        } else {
+            None
+        };
         if !self.metrics.enabled && tracing_parent.is_none() {
             return Box::pin(self.inner.call(request));
         }
@@ -824,7 +921,7 @@ where
         });
         let started_at = Instant::now();
         let future = self.inner.call(request);
-        let span = tracing_parent.map(|parent| {
+        let span = tracing_parent.and_then(|parent| {
             let span = tracing::info_span!(
                 "grpc.server.call",
                 rpc.system.name = "grpc",
@@ -835,9 +932,15 @@ where
                 otel.status_code = tracing::field::Empty,
                 otel.status_message = tracing::field::Empty,
             );
+            if span.is_disabled() {
+                return None;
+            }
             let _ = span.set_parent(parent);
-            span
+            Some(span)
         });
+        if metrics.is_none() && span.is_none() {
+            return Box::pin(future);
+        }
         Box::pin(async move {
             let response = if let Some(span) = &span {
                 future.instrument(span.clone()).await

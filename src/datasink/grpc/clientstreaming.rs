@@ -61,9 +61,9 @@ where
             self.span.clone(),
         );
         if let Err(error) = &result {
-            crate::runtime::telemetry::record_span_error(&self.span, error);
+            crate::runtime::telemetry::record_error_if_enabled!(&self.span, error);
         }
-        self.span.in_scope(|| match &result {
+        crate::runtime::common::event_if_enabled!(&self.span, || match &result {
             Ok(()) => tracing::event!(name: "send", tracing::Level::INFO, {}),
             Err(error) => {
                 tracing::event!(name: "send.error", tracing::Level::ERROR, error = %error)
@@ -182,11 +182,11 @@ where
             }
 
             let result = if cancelled {
-                crate::runtime::telemetry::record_span_error(
+                crate::runtime::telemetry::record_error_if_enabled!(
                     &pending.span,
                     "gRPC client stream context cancelled",
                 );
-                pending.span.in_scope(|| {
+                crate::runtime::common::event_if_enabled!(&pending.span, || {
                     tracing::event!(
                         name: "context_cancelled",
                         tracing::Level::WARN,
@@ -200,7 +200,7 @@ where
                     pending.span.clone(),
                 ) {
                     Ok(response) => {
-                        pending.span.in_scope(
+                        crate::runtime::common::event_if_enabled!(&pending.span, 
                             || tracing::event!(name: "close_and_recv", tracing::Level::INFO, {}),
                         );
                         let handled = crate::runtime::common::instrument_if_enabled!(
@@ -213,9 +213,9 @@ where
                             pending.span.clone(),
                         );
                         if let Err(error) = &handled {
-                            crate::runtime::telemetry::record_span_error(&pending.span, error);
+                            crate::runtime::telemetry::record_error_if_enabled!(&pending.span, error);
                         }
-                        pending.span.in_scope(|| match &handled {
+                        crate::runtime::common::event_if_enabled!(&pending.span, || match &handled {
                             Ok(()) => {
                                 tracing::event!(name: "handle_response", tracing::Level::INFO, {})
                             }
@@ -228,8 +228,8 @@ where
                         handled
                     }
                     Err(error) => {
-                        crate::runtime::telemetry::record_span_error(&pending.span, &error);
-                        pending.span.in_scope(|| {
+                        crate::runtime::telemetry::record_error_if_enabled!(&pending.span, &error);
+                        crate::runtime::common::event_if_enabled!(&pending.span, || {
                             tracing::event!(
                                 name: "close_and_recv.error",
                                 tracing::Level::ERROR,
@@ -287,8 +287,13 @@ where
         let init_stream_id = stream_id.clone();
         let pending = match cell
             .get_or_try_init(move || async move {
-                let (context, span) =
-                    start_output_span(context, stream.as_ref(), self.metrics.rpc_method());
+                let (context, span) = if stream.stream().environment().tracing_enabled()
+                    && context.sampling_enabled()
+                {
+                    start_output_span(context, stream.as_ref(), self.metrics.rpc_method())
+                } else {
+                    (context, tracing::Span::none())
+                };
                 let (handler_context, state) = match crate::runtime::common::instrument_if_enabled!(
                     self.handler
                         .begin_request(context, self.stream_context.clone()),
@@ -297,8 +302,8 @@ where
                     Ok(begin) => begin,
                     Err(error) => {
                         self.metrics.begin_request_failed.inc();
-                        crate::runtime::telemetry::record_span_error(&span, &error);
-                        span.in_scope(|| {
+                        crate::runtime::telemetry::record_error_if_enabled!(&span, &error);
+                        crate::runtime::common::event_if_enabled!(&span, || {
                             tracing::event!(
                                 name: "begin_request.error",
                                 tracing::Level::ERROR,
@@ -310,7 +315,7 @@ where
                     }
                 };
                 let request_context = handler_context.clone().with_stream_id(new_stream_id());
-                span.in_scope(|| tracing::event!(name: "begin_request", tracing::Level::INFO, {}));
+                crate::runtime::common::event_if_enabled!(&span, || tracing::event!(name: "begin_request", tracing::Level::INFO, {}));
                 let state = Arc::new(Mutex::new(state));
                 let started_at = self.metrics.request_start();
                 let grpc_started_at = self.metrics.grpc_client_measurement_start();
@@ -320,8 +325,8 @@ where
                 ) {
                     Ok(call) => call,
                     Err(error) => {
-                        crate::runtime::telemetry::record_span_error(&span, &error);
-                        span.in_scope(|| {
+                        crate::runtime::telemetry::record_error_if_enabled!(&span, &error);
+                        crate::runtime::common::event_if_enabled!(&span, || {
                             tracing::event!(
                                 name: "grpc_call.error",
                                 tracing::Level::ERROR,
@@ -344,7 +349,7 @@ where
                         return result.map(|()| unreachable!("gRPC creation error became success"));
                     }
                 };
-                span.in_scope(|| tracing::event!(name: "grpc_call", tracing::Level::INFO, {}));
+                crate::runtime::common::event_if_enabled!(&span, || tracing::event!(name: "grpc_call", tracing::Level::INFO, {}));
                 let pending = Arc::new(Pending {
                     context: handler_context,
                     state,
@@ -394,9 +399,9 @@ where
             pending.span.clone(),
         );
         if let Err(error) = &result {
-            crate::runtime::telemetry::record_span_error(&pending.span, error);
+            crate::runtime::telemetry::record_error_if_enabled!(&pending.span, error);
         }
-        pending.span.in_scope(|| match &result {
+        crate::runtime::common::event_if_enabled!(&pending.span, || match &result {
             Ok(()) => tracing::event!(name: "consume_message", tracing::Level::INFO, {}),
             Err(error) => tracing::event!(
                 name: "consume_message.error",

@@ -20,6 +20,8 @@ where
     caller: Caller,
     from: String,
     to: String,
+    pipeline: String,
+    component: String,
     messages_total: Int64Counter,
     call_statistics: CallStatistics,
     environment: RuntimeEnvironment,
@@ -128,6 +130,7 @@ where
         };
         let from = source_name;
         let to = environment.stream_name(target_id);
+        let (pipeline, component) = environment.stream_grouping(target_id);
         let messages_total = environment
             .metrics()
             .scope(
@@ -136,6 +139,8 @@ where
                     ("service".to_owned(), environment.service_name()),
                     ("from".to_owned(), from.clone()),
                     ("to".to_owned(), to.clone()),
+                    ("pipeline".to_owned(), pipeline.clone()),
+                    ("component".to_owned(), component.clone()),
                 ]
                 .into_iter()
                 .collect(),
@@ -158,6 +163,8 @@ where
             caller,
             from,
             to,
+            pipeline,
+            component,
             messages_total,
             call_statistics,
             environment: environment.clone(),
@@ -182,6 +189,8 @@ where
                 "stream.call",
                 from = %self.from,
                 to = %self.to,
+                pipeline = %self.pipeline,
+                component = %self.component,
                 error = tracing::field::Empty,
                 otel.status_code = tracing::field::Empty,
                 otel.status_message = tracing::field::Empty,
@@ -190,6 +199,8 @@ where
                 "stream.call",
                 from = %self.from,
                 to = %self.to,
+                pipeline = %self.pipeline,
+                component = %self.component,
                 r#type = call_type,
                 error = tracing::field::Empty,
                 otel.status_code = tracing::field::Empty,
@@ -199,6 +210,8 @@ where
                 "stream.call",
                 from = %self.from,
                 to = %self.to,
+                pipeline = %self.pipeline,
+                component = %self.component,
                 r#type = call_type,
                 taskpoolname = pool,
                 error = tracing::field::Empty,

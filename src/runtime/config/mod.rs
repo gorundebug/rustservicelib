@@ -515,6 +515,8 @@ pub struct StreamConfig {
     pub name: String,
     #[serde(default)]
     pub pipeline: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub component: String,
     #[serde(default)]
     pub id_source: i32,
     #[serde(default)]
@@ -539,6 +541,7 @@ impl StreamConfig {
             id,
             name: name.into(),
             pipeline: String::new(),
+            component: String::new(),
             id_source: 0,
             id_sources: Vec::new(),
             id_service: 0,
@@ -579,6 +582,11 @@ impl StreamConfig {
         self.key_type = key_type.map(Into::into);
         self.x_pos = x_pos;
         self.y_pos = y_pos;
+        self
+    }
+
+    pub fn with_component(mut self, component: impl Into<String>) -> Self {
+        self.component = component.into();
         self
     }
 

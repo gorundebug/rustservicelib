@@ -24,6 +24,8 @@ where
     id: i32,
     environment: RuntimeEnvironment,
     name: String,
+    pipeline: String,
+    component: String,
     downstream: ConstructionCell<LinkCollector<T>>,
     serde: Arc<dyn StreamSerde<T>>,
 }
@@ -74,11 +76,14 @@ where
     ) -> Self {
         environment.register_runtime_stream(id);
         let name = environment.stream_name(configured_stream_id(id));
+        let (pipeline, component) = environment.stream_grouping(id);
         Self {
             inner: Arc::new(StreamInner {
                 id,
                 environment,
                 name,
+                pipeline,
+                component,
                 downstream: ConstructionCell::empty(),
                 serde,
             }),
@@ -101,11 +106,14 @@ where
     ) -> Self {
         let id = config.id;
         environment.register_runtime_stream(id);
+        let (pipeline, component) = environment.stream_grouping(id);
         Self {
             inner: Arc::new(StreamInner {
                 id,
                 environment,
                 name,
+                pipeline,
+                component,
                 downstream: ConstructionCell::empty(),
                 serde,
             }),
@@ -216,5 +224,9 @@ where
 
     fn environment(&self) -> &RuntimeEnvironment {
         self.environment()
+    }
+
+    fn tracing_labels(&self) -> (&str, &str, &str) {
+        (&self.inner.name, &self.inner.pipeline, &self.inner.component)
     }
 }

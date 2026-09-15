@@ -334,15 +334,20 @@ where
             return;
         };
         let span = if stream.environment().tracing_enabled() && context.sampling_enabled() {
+            let (stream_name, pipeline_name, component_name) = stream.tracing_labels();
             let span = tracing::info_span!(
                 "http.output",
-                stream = stream.name(),
+                stream = stream_name,
+                pipeline = pipeline_name,
+                component = component_name,
                 endpoint = self.endpoint_name.as_str(),
                 error = tracing::field::Empty,
                 otel.status_code = tracing::field::Empty,
                 otel.status_message = tracing::field::Empty,
             );
-            let _ = span.set_parent(context.open_telemetry_context().clone());
+            if !span.is_disabled() {
+                let _ = span.set_parent(context.open_telemetry_context().clone());
+            }
             span
         } else {
             tracing::Span::none()
@@ -356,8 +361,8 @@ where
             Ok(result) => result,
             Err(error) => {
                 self.begin_request_failed.inc();
-                crate::runtime::telemetry::record_span_error(&span, &error);
-                span.in_scope(|| {
+                crate::runtime::telemetry::record_error_if_enabled!(&span, &error);
+                crate::runtime::common::event_if_enabled!(&span, || {
                     tracing::event!(
                         name: "begin_request.error",
                         tracing::Level::ERROR,
@@ -369,7 +374,7 @@ where
             }
         };
         let request_context = handler_context.clone().with_stream_id(new_stream_id());
-        span.in_scope(|| tracing::event!(name: "begin_request", tracing::Level::INFO, {}));
+        crate::runtime::common::event_if_enabled!(&span, || tracing::event!(name: "begin_request", tracing::Level::INFO, {}));
 
         self.active_requests.inc();
         let started_at = self
@@ -388,9 +393,9 @@ where
             span.clone(),
         );
         if let Err(error) = &result {
-            crate::runtime::telemetry::record_span_error(&span, error);
+            crate::runtime::telemetry::record_error_if_enabled!(&span, error);
         }
-        span.in_scope(|| match &result {
+        crate::runtime::common::event_if_enabled!(&span, || match &result {
             Ok(()) => tracing::event!(name: "consume_message", tracing::Level::INFO, {}),
             Err(error) => tracing::event!(
                 name: "consume_message.error",
@@ -417,7 +422,7 @@ where
                 ) {
                     Ok(response) => {
                         observation.finish(Some(response.status), Some(response.body.len()), false);
-                        span.in_scope(|| {
+                        crate::runtime::common::event_if_enabled!(&span, || {
                             tracing::event!(name: "http_call", tracing::Level::INFO, status_code = response.status);
                         });
                         let handled = crate::runtime::common::instrument_if_enabled!(
@@ -430,9 +435,9 @@ where
                             span.clone(),
                         );
                         if let Err(error) = &handled {
-                            crate::runtime::telemetry::record_span_error(&span, error);
+                            crate::runtime::telemetry::record_error_if_enabled!(&span, error);
                         }
-                        span.in_scope(|| match &handled {
+                        crate::runtime::common::event_if_enabled!(&span, || match &handled {
                             Ok(()) => {
                                 tracing::event!(name: "handle_response", tracing::Level::INFO, {})
                             }
@@ -446,9 +451,9 @@ where
                         handled
                     }
                     Err(error) => {
-                        crate::runtime::telemetry::record_span_error(&span, &error);
+                        crate::runtime::telemetry::record_error_if_enabled!(&span, &error);
                         observation.finish(None, None, true);
-                        span.in_scope(|| {
+                        crate::runtime::common::event_if_enabled!(&span, || {
                             tracing::event!(
                                 name: "http_call.error",
                                 tracing::Level::ERROR,
@@ -461,8 +466,8 @@ where
                 };
             }
             Err(error) if result.is_ok() => {
-                crate::runtime::telemetry::record_span_error(&span, &error);
-                span.in_scope(|| {
+                crate::runtime::telemetry::record_error_if_enabled!(&span, &error);
+                crate::runtime::common::event_if_enabled!(&span, || {
                     tracing::event!(
                         name: "no_request.error",
                         tracing::Level::ERROR,
@@ -495,7 +500,7 @@ where
             self.messages_total.inc();
         } else {
             self.request_errors.inc();
-            span.in_scope(|| {
+            crate::runtime::common::event_if_enabled!(&span, || {
                 tracing::error!("HTTP sink request failed");
             });
         }

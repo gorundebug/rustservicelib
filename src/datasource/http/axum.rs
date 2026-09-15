@@ -24,7 +24,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use crate::{
     operators::InputStream,
     runtime::{
-        common::{Consumer, MessageContext, Payload, RuntimeEndpointConsumer, new_stream_id},
+        common::{Consumer, MessageContext, Payload, RuntimeEndpointConsumer, RuntimeStream, new_stream_id},
         config::{HttpDataConnectorConfig, HttpEndpointConfig, RuntimeDataConnectorConfig},
         datasource::{DataSource, PendingRequests, StreamContext},
         environment::{
@@ -695,9 +695,12 @@ where
         let span = if self.input_stream.stream().environment().tracing_enabled()
             && context.sampling_enabled()
         {
+            let (stream_name, pipeline_name, component_name) = self.input_stream.stream().tracing_labels();
             let span = tracing::info_span!(
                 "http.input",
-                stream = self.input_stream.stream().name(),
+                stream = stream_name,
+                pipeline = pipeline_name,
+                component = component_name,
                 endpoint = %self.endpoint_name,
                 method = %data.method,
                 path = %data.uri.path(),
@@ -705,7 +708,9 @@ where
                 otel.status_code = tracing::field::Empty,
                 otel.status_message = tracing::field::Empty,
             );
-            let _ = span.set_parent(context.open_telemetry_context().clone());
+            if !span.is_disabled() {
+                let _ = span.set_parent(context.open_telemetry_context().clone());
+            }
             span
         } else {
             tracing::Span::none()
@@ -720,8 +725,8 @@ where
             Ok(begin) => begin,
             Err(error) => {
                 self.begin_request_failed.inc();
-                crate::runtime::telemetry::record_span_error(&span, &error);
-                span.in_scope(|| {
+                crate::runtime::telemetry::record_error_if_enabled!(&span, &error);
+                crate::runtime::common::event_if_enabled!(&span, || {
                     tracing::event!(
                         name: "begin_request.error",
                         tracing::Level::ERROR,
@@ -732,7 +737,7 @@ where
                 return data.into_response();
             }
         };
-        span.in_scope(|| tracing::event!(name: "begin_request", tracing::Level::INFO, {}));
+        crate::runtime::common::event_if_enabled!(&span, || tracing::event!(name: "begin_request", tracing::Level::INFO, {}));
         let context = if context.stream_id().is_some() {
             context
         } else {
@@ -760,7 +765,7 @@ where
                 }),
             ) {
                 let result: HandlerResult = Err(Box::new(error));
-                crate::runtime::telemetry::record_span_error(
+                crate::runtime::telemetry::record_error_if_enabled!(
                     &span,
                     result.as_ref().expect_err("duplicate pending request"),
                 );
@@ -796,9 +801,9 @@ where
             span.clone(),
         );
         if let Err(error) = &result {
-            crate::runtime::telemetry::record_span_error(&span, error);
+            crate::runtime::telemetry::record_error_if_enabled!(&span, error);
         }
-        span.in_scope(|| match &result {
+        crate::runtime::common::event_if_enabled!(&span, || match &result {
             Ok(()) => tracing::event!(name: "consume_message", tracing::Level::INFO, {}),
             Err(error) => tracing::event!(
                 name: "consume_message.error",
@@ -811,7 +816,7 @@ where
         if result.is_ok() && has_result {
             tokio::select! {
                 _ = result_context.done.cancelled() => {
-                    span.in_scope(|| tracing::event!(name: "done_received", tracing::Level::INFO, {}));
+                    crate::runtime::common::event_if_enabled!(&span, || tracing::event!(name: "done_received", tracing::Level::INFO, {}));
                 }
                 _ = context.cancelled() => {
                     result_wait_cancelled = true;
@@ -832,10 +837,10 @@ where
         };
         if result_wait_cancelled && result_context.done.is_cancelled() {
             result = Ok(());
-            span.in_scope(|| tracing::event!(name: "done_received", tracing::Level::INFO, {}));
+            crate::runtime::common::event_if_enabled!(&span, || tracing::event!(name: "done_received", tracing::Level::INFO, {}));
         } else if result_wait_cancelled {
-            crate::runtime::telemetry::record_span_error(&span, "HTTP request context cancelled");
-            span.in_scope(|| {
+            crate::runtime::telemetry::record_error_if_enabled!(&span, "HTTP request context cancelled");
+            crate::runtime::common::event_if_enabled!(&span, || {
                 tracing::event!(
                     name: "context_cancelled",
                     tracing::Level::WARN,
@@ -863,7 +868,7 @@ where
             self.messages_total.inc();
         } else {
             self.request_errors.inc();
-            span.in_scope(|| {
+            crate::runtime::common::event_if_enabled!(&span, || {
                 tracing::error!("HTTP source request failed");
             });
         }
@@ -891,9 +896,7 @@ where
             .is_some_and(|current| Arc::ptr_eq(&current, &pending))
         {
             self.late_result.inc();
-            pending
-                .span
-                .in_scope(|| tracing::event!(name: "late_result", tracing::Level::WARN, {}));
+            crate::runtime::common::event_if_enabled!(&pending.span, || tracing::event!(name: "late_result", tracing::Level::WARN, {}));
             return;
         }
         let message_id = crate::runtime::common::instrument_if_enabled!(
@@ -914,7 +917,7 @@ where
             .cloned();
         let Some(callback) = callback else {
             self.unknown_message_id.inc();
-            pending.span.in_scope(|| {
+            crate::runtime::common::event_if_enabled!(&pending.span, || {
                 tracing::event!(
                     name: "unknown_message_id",
                     tracing::Level::WARN,
@@ -942,7 +945,7 @@ where
                 .remove(&message_id);
             if removed.is_none() {
                 self.duplicate_message_id.inc();
-                pending.span.in_scope(|| {
+                crate::runtime::common::event_if_enabled!(&pending.span, || {
                     tracing::event!(
                         name: "duplicate_message_id",
                         tracing::Level::WARN,

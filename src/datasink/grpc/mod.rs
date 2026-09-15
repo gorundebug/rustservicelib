@@ -51,14 +51,20 @@ pub(crate) fn start_output_span(
     if !stream.environment().tracing_enabled() || !context.sampling_enabled() {
         return (context, tracing::Span::none());
     }
+    let (stream_name, pipeline_name, component_name) = stream.tracing_labels();
     let span = tracing::info_span!(
         "grpc.output",
-        stream = stream.name(),
+        stream = stream_name,
+        pipeline = pipeline_name,
+        component = component_name,
         endpoint = endpoint,
         error = tracing::field::Empty,
         otel.status_code = tracing::field::Empty,
         otel.status_message = tracing::field::Empty,
     );
+    if span.is_disabled() {
+        return (context, span);
+    }
     let _ = span.set_parent(context.open_telemetry_context().clone());
     let child = span.context();
     (context.with_open_telemetry_context(child), span)
@@ -82,13 +88,13 @@ impl ResultContext {
     pub(crate) fn with_span(span: tracing::Span) -> Self {
         Self {
             done: tokio_util::sync::CancellationToken::new(),
-            span: Some(span),
+            span: (!span.is_disabled()).then_some(span),
         }
     }
 
     pub fn done(&self) {
         if let Some(span) = &self.span {
-            span.in_scope(|| tracing::event!(name: "done_called", tracing::Level::INFO, {}));
+            crate::runtime::common::event_if_enabled!(&span, || tracing::event!(name: "done_called", tracing::Level::INFO, {}));
         }
         self.done.cancel();
     }
@@ -147,6 +153,69 @@ where
 
 pub(crate) struct RequestSender<ReqT> {
     request: Mutex<Option<ReqT>>,
+}
+
+#[cfg(test)]
+mod result_tracing_tests {
+    use super::ResultContext;
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    use tracing::{Event, Subscriber};
+    use tracing_subscriber::{Layer, layer::Context, prelude::*};
+
+    struct CountEvents(Arc<AtomicUsize>);
+
+    impl<S: Subscriber> Layer<S> for CountEvents {
+        fn on_event(&self, _event: &Event<'_>, _context: Context<'_, S>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn disabled_result_span_does_not_emit_into_an_unrelated_parent() {
+        let events = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(CountEvents(events.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            let parent = tracing::info_span!("unrelated.parent");
+            let _entered = parent.enter();
+            let result = ResultContext::with_span(tracing::Span::none());
+            assert!(result.span.is_none());
+            result.done();
+            assert!(result.is_done());
+        });
+        assert_eq!(events.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn enabled_result_span_keeps_completion_and_event() {
+        let events = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(CountEvents(events.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("grpc.output.test");
+            assert!(!span.is_disabled());
+            let result = ResultContext::with_span(span);
+            assert!(result.span.is_some());
+            result.done();
+            assert!(result.is_done());
+        });
+        assert_eq!(events.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn output_callers_guard_before_helper_arguments() {
+        for source in [
+            include_str!("nostreaming.rs"),
+            include_str!("serverstreaming.rs"),
+            include_str!("clientstreaming.rs"),
+            include_str!("bidistreaming.rs"),
+        ] {
+            let compact: String = source.chars().filter(|ch| !ch.is_whitespace()).collect();
+            assert!(compact.contains(concat!(
+                "ifstream.stream().environment().tracing_enabled()&&context.sampling_enabled(){",
+                "start_output_span(context,stream.as_ref(),self.metrics.rpc_method())",
+                "}else{(context,tracing::Span::none())}"
+            )));
+        }
+    }
 }
 
 impl<ReqT> Default for RequestSender<ReqT> {

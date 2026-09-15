@@ -247,6 +247,17 @@ impl RuntimeEnvironment {
         self.runtime_config().stream_by_id(id)
     }
 
+    // Definition labels only; virtual error outputs use their owner's config.
+    pub(crate) fn stream_grouping(&self, id: i32) -> (String, String) {
+        id.checked_abs()
+            .and_then(|id| self.stream_config(id))
+            .map(|config| {
+                let stream = config.stream();
+                (stream.pipeline.clone(), stream.component.clone())
+            })
+            .unwrap_or_default()
+    }
+
     pub fn stream_name(&self, id: i32) -> String {
         self.stream_config(id)
             .map(|config| config.stream().name.clone())

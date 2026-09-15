@@ -19,6 +19,8 @@ where
 {
     id: i32,
     name: String,
+    pipeline: String,
+    component: String,
     endpoint_id: i32,
     sink_consumer: ConstructionCell<Arc<dyn Consumer<T>>>,
     error_stream: Stream<E>,
@@ -41,6 +43,8 @@ where
         let sink_stream = Arc::new(Self {
             id,
             name: config.stream.name.clone(),
+            pipeline: config.stream.pipeline.clone(),
+            component: config.stream.component.clone(),
             endpoint_id: config.endpoint_id,
             sink_consumer: ConstructionCell::empty(),
             error_stream,
@@ -84,6 +88,10 @@ where
 
     fn environment(&self) -> &RuntimeEnvironment {
         self.error_stream.environment()
+    }
+
+    fn tracing_labels(&self) -> (&str, &str, &str) {
+        (&self.name, &self.pipeline, &self.component)
     }
 }
 
@@ -203,6 +211,10 @@ where
 
     fn environment(&self) -> &RuntimeEnvironment {
         self.result_stream.environment()
+    }
+
+    fn tracing_labels(&self) -> (&str, &str, &str) {
+        self.result_stream.tracing_labels()
     }
 }
 

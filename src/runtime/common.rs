@@ -65,6 +65,36 @@ macro_rules! instrument_if_enabled {
 
 pub(crate) use instrument_if_enabled;
 
+/// Trace-only scopes must not evaluate their closure or fields for a disabled span.
+macro_rules! event_if_enabled {
+    ($span:expr, $event:expr $(,)?) => {{
+        let span: &::tracing::Span = $span;
+        if !span.is_disabled() {
+            let _: () = span.in_scope($event);
+        }
+    }};
+}
+
+pub(crate) use event_if_enabled;
+
+/// Business callbacks still execute when tracing is disabled, without a span scope.
+macro_rules! scope_if_enabled {
+    ($span:expr, $callback:expr $(,)?) => {{
+        let span: &::tracing::Span = $span;
+        if span.is_disabled() {
+            ($callback)()
+        } else {
+            span.in_scope($callback)
+        }
+    }};
+}
+
+pub(crate) use scope_if_enabled;
+
+#[cfg(test)]
+#[path = "span_fast_path_contract_tests.rs"]
+mod span_fast_path_contract_tests;
+
 /// A value wired while a service graph is constructed and read-only after
 /// `ServiceApp::start`. Unlike `Mutex`, `RwLock`, or `OnceLock`, reads are a
 /// plain pointer dereference with no lock or atomic operation.
@@ -356,7 +386,7 @@ impl MessageContext {
     /// `OpenTelemetrySpanExt::context` for `Span::none()` still traverses the
     /// tracing subscriber, so normal requests must not use it.
     pub(crate) fn with_span_context(mut self, span: &tracing::Span) -> Self {
-        if self.sampling_enabled {
+        if self.sampling_enabled && !span.is_disabled() {
             self.open_telemetry = span.context();
         }
         self
@@ -578,6 +608,9 @@ pub trait RuntimeStream: Send + Sync {
     fn name(&self) -> String;
     fn environment(&self) -> &crate::runtime::environment::RuntimeEnvironment;
 
+    /// Borrow immutable stream, pipeline and component labels cached at construction.
+    fn tracing_labels(&self) -> (&str, &str, &str);
+
     fn start_span(
         &self,
         context: MessageContext,
@@ -586,14 +619,20 @@ pub trait RuntimeStream: Send + Sync {
         if !self.environment().tracing_enabled() || !context.sampling_enabled() {
             return (context, tracing::Span::none());
         }
+        let (stream, pipeline, component) = self.tracing_labels();
         let span = tracing::info_span!(
             "stream.operation",
             otel.name = operation,
-            stream = self.name(),
+            stream = stream,
+            pipeline = %pipeline,
+            component = %component,
             error = tracing::field::Empty,
             otel.status_code = tracing::field::Empty,
             otel.status_message = tracing::field::Empty,
         );
+        if span.is_disabled() {
+            return (context, span);
+        }
         let _ = span.set_parent(context.open_telemetry_context().clone());
         let child = span.context();
         (context.with_open_telemetry_context(child), span)
