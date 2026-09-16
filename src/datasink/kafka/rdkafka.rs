@@ -122,11 +122,10 @@ impl RdkafkaKafkaDataSink {
         Self::from_config(stream.environment().clone(), &connector)
     }
 
-    fn add_endpoint(
+    fn get_or_add_endpoint(
         &self,
         endpoint: &KafkaEndpointConfig,
-        runtime_state: Arc<KafkaEndpointRuntimeState>,
-    ) -> RuntimeResult<()> {
+    ) -> RuntimeResult<Arc<KafkaEndpointRuntimeState>> {
         if endpoint.id_data_connector != self.id {
             return Err(RuntimeError::InvalidConfiguration(format!(
                 "Kafka endpoint {:?} references connector {}, expected {}",
@@ -143,11 +142,12 @@ impl RdkafkaKafkaDataSink {
         if self.state.load(Ordering::Acquire) != 0 {
             return Err(RuntimeError::ResourceAlreadyStarted(self.name.clone()));
         }
-        if endpoints.iter().any(|(id, _)| *id == endpoint.id) {
-            return Err(RuntimeError::DuplicateResource(endpoint.name.clone()));
+        if let Some((_, runtime_state)) = endpoints.iter().find(|(id, _)| *id == endpoint.id) {
+            return Ok(Arc::clone(runtime_state));
         }
-        endpoints.push((endpoint.id, runtime_state));
-        Ok(())
+        let runtime_state = KafkaEndpointRuntimeState::new();
+        endpoints.push((endpoint.id, Arc::clone(&runtime_state)));
+        Ok(runtime_state)
     }
 
     async fn create_topics(&self, admin: &AdminClient<DefaultClientContext>) -> HandlerResult {
@@ -717,8 +717,7 @@ where
     H: EndpointHandler<HandlerState, T, R, E> + 'static,
 {
     let (endpoint_config, data_connector_config) = kafka_sink_configs(stream)?;
-    let runtime_state = KafkaEndpointRuntimeState::new();
-    data_sink.add_endpoint(&endpoint_config, Arc::clone(&runtime_state))?;
+    let runtime_state = data_sink.get_or_add_endpoint(&endpoint_config)?;
     let tasks = data_sink.tasks.clone();
     make_endpoint_consumer_with_state(
         stream,
@@ -751,8 +750,7 @@ where
     H: EndpointHandler<HandlerState, T, R, E> + Partitioner<T> + 'static,
 {
     let (endpoint_config, data_connector_config) = kafka_sink_configs(stream)?;
-    let runtime_state = KafkaEndpointRuntimeState::new();
-    data_sink.add_endpoint(&endpoint_config, Arc::clone(&runtime_state))?;
+    let runtime_state = data_sink.get_or_add_endpoint(&endpoint_config)?;
     let tasks = data_sink.tasks.clone();
     let handler = Arc::new(handler);
     let partitioner: Arc<dyn Partitioner<T>> = handler.clone();

@@ -93,6 +93,84 @@ async fn disabled_kafka_sink_owns_endpoints_without_contacting_broker() {
     data_sink.stop(MessageContext::new()).await.unwrap();
 }
 
+#[tokio::test]
+async fn kafka_sink_shares_one_endpoint_between_independent_sink_streams() {
+    let environment = RuntimeEnvironment::default();
+    let first_sink_config = SinkStreamConfig {
+        stream: StreamConfig::new(2, "first publish"),
+        endpoint_id: 3,
+    };
+    let second_sink_config = SinkStreamConfig {
+        stream: StreamConfig::new(4, "second publish"),
+        endpoint_id: 3,
+    };
+    let connector_config = KafkaDataConnectorConfig {
+        id: 5,
+        name: "kafka".to_owned(),
+        brokers: "localhost:9092".to_owned(),
+        version: String::new(),
+        dial_timeout: 0.0,
+        use_partitioner: true,
+        r#async: true,
+        security_protocol: KafkaSecurityProtocol::PLAINTEXT,
+        sasl_mechanism: KafkaSaslMechanism::PLAIN,
+        username: String::new(),
+        password: String::new(),
+    };
+    let endpoint_config = KafkaEndpointConfig {
+        enabled: false,
+        id: 3,
+        name: "orders topic".to_owned(),
+        id_data_connector: 5,
+        tracing_enabled: false,
+        create_topic: false,
+        topic: "orders".to_owned(),
+        partitions: 4,
+        consumer_group: String::new(),
+        replication_factor: 1,
+    };
+    environment.publish_runtime_config(Arc::new(
+        servicelib::runtime::config::RuntimeConfig::from_parts(
+            servicelib::runtime::config::CallSemantics::FunctionCall,
+            [],
+            [
+                StreamConfig::new(1, "first source").into(),
+                first_sink_config.clone().into(),
+                StreamConfig::new(6, "second source").into(),
+                second_sink_config.clone().into(),
+            ],
+            [],
+            [connector_config.into()],
+            [endpoint_config.into()],
+            [],
+        )
+        .unwrap(),
+    ));
+    let first_source = Stream::new(&StreamConfig::new(1, "first source"), environment.clone());
+    let second_source = Stream::new(&StreamConfig::new(6, "second source"), environment);
+    let first_sink = first_source
+        .sink_with_result::<u32, String>(&first_sink_config)
+        .unwrap();
+    let second_sink = second_source
+        .sink_with_result::<u32, String>(&second_sink_config)
+        .unwrap();
+    let data_sink = RdkafkaKafkaDataSink::from_stream(&first_sink).unwrap();
+
+    for sink in [&first_sink, &second_sink] {
+        make_rdkafka_kafka_endpoint_consumer_with_partitioner(
+            sink,
+            Arc::clone(&data_sink),
+            Handler {
+                events: Arc::new(Mutex::new(Vec::new())),
+            },
+        )
+        .unwrap();
+    }
+
+    data_sink.start(MessageContext::new()).await.unwrap();
+    data_sink.stop(MessageContext::new()).await.unwrap();
+}
+
 struct Handler {
     events: Arc<Mutex<Vec<&'static str>>>,
 }
