@@ -51,6 +51,7 @@ pub enum TransformationType {
     Error = 15,
     Delay = 16,
     When = 17,
+    SubStream = 18,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize_repr, Deserialize_repr)]

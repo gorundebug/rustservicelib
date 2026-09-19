@@ -16,6 +16,7 @@ pub mod process;
 pub mod sink;
 pub mod split;
 pub mod streamlink;
+pub mod substream;
 
 pub use case::{BuildSwitchFunction, CaseStream, TypedCaseStream, When, WhenStream};
 pub use delay::{DelayFunction, DelayStream};
@@ -35,3 +36,4 @@ pub use multijoin::{
 pub use process::{ProcessFunction, ProcessStream};
 pub use sink::{SinkStream, SinkStreamWithResult};
 pub use split::SplitStream;
+pub use substream::SubStream;

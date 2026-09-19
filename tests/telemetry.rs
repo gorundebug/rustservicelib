@@ -2,12 +2,15 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use servicelib::{
-    MessageContext, Payload, Stream,
+    Collect, MessageContext, Payload, Stream, SubStream, SubStreamCollectorFunc,
     operators::MapFunction,
     runtime::{
         collector::Collector,
         common::RuntimeStream,
-        config::{CallSemantics, StreamConfig},
+        config::{
+            CallSemantics, MapStreamConfig, RuntimeConfig, RuntimeStreamConfig, StreamConfig,
+            SubStreamConfig,
+        },
         environment::{RuntimeEnvironment, RuntimeResult, tracing::TracingEngine},
         testlog::TestLog,
         testmetrics::TestMetrics,
@@ -93,6 +96,22 @@ fn structured_log_level_and_typed_field_contract() {
 
 struct LoggingMap;
 
+struct ReturningMap;
+
+#[async_trait]
+impl MapFunction<u32, u32> for ReturningMap {
+    async fn map(
+        &self,
+        context: MessageContext,
+        _stream: &dyn RuntimeStream,
+        value: &u32,
+        out: &Collector<u32>,
+    ) {
+        tracing::info!(value = *value, "substream body called");
+        out.out(context, *value).await;
+    }
+}
+
 struct DisabledTracing;
 
 #[async_trait]
@@ -104,6 +123,115 @@ impl TracingEngine for DisabledTracing {
     async fn shutdown(&self) -> RuntimeResult<()> {
         Ok(())
     }
+}
+
+async fn check_substream_tracing(sampled: bool, enabled: bool) {
+    let traces = TestTracing::default();
+    let logs = TestLog::default();
+    let tracing_engine: Arc<dyn TracingEngine> = if enabled {
+        Arc::new(traces.clone())
+    } else {
+        Arc::new(DisabledTracing)
+    };
+    let environment = RuntimeEnvironment::with_telemetry(
+        CallSemantics::FunctionCall,
+        Arc::new(TestMetrics::new()),
+        tracing_engine,
+        Arc::new(logs.clone()),
+    );
+    let mut entry_config = StreamConfig::new(1, "lookup");
+    entry_config.id_source = 2;
+    entry_config.id_service = 1;
+    entry_config.value_type = Some("uint32".to_owned());
+    let mut result_config = StreamConfig::new(2, "result");
+    result_config.id_source = 1;
+    result_config.id_service = 1;
+    result_config.value_type = Some("uint32".to_owned());
+    let entry_config = SubStreamConfig::from(entry_config);
+    let result_config = MapStreamConfig::from(result_config);
+    environment.publish_runtime_config(Arc::new(
+        RuntimeConfig::from_parts(
+            CallSemantics::FunctionCall,
+            [],
+            [
+                RuntimeStreamConfig::from(entry_config.clone()),
+                RuntimeStreamConfig::from(result_config.clone()),
+            ],
+            [],
+            [],
+            [],
+            [],
+        )
+        .unwrap(),
+    ));
+    let entry = SubStream::<u32, u32>::new(&entry_config, environment.clone());
+    let result = entry
+        .stream()
+        .map::<u32, _>(&result_config, ReturningMap)
+        .unwrap();
+    entry.set_source(&result).unwrap();
+    environment.build_runtime_streams().unwrap();
+    let subscriber = tracing_subscriber::registry()
+        .with(logs.clone())
+        .with(traces.clone());
+    let guard = tracing::subscriber::set_default(subscriber);
+    let context = if sampled {
+        MessageContext::new().enable_sampling()
+    } else {
+        MessageContext::new()
+    };
+    let received = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let delivered = Arc::clone(&received);
+    entry
+        .consume(
+            context,
+            42,
+            Arc::new(SubStreamCollectorFunc(
+                move |_: MessageContext, value: Payload<u32>| {
+                    let delivered = Arc::clone(&delivered);
+                    async move {
+                        assert_eq!(*value, 42);
+                        delivered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        true
+                    }
+                },
+            )),
+        )
+        .await
+        .unwrap();
+    drop(guard);
+    assert_eq!(received.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(logs.records().len(), 1);
+    let spans = traces.spans();
+    if sampled && enabled {
+        for expected in ["\"stream.substream\"", "\"stream.map\""] {
+            assert!(
+                spans.iter().any(|span| {
+                    span.fields
+                        .get("otel.name")
+                        .is_some_and(|name| name == expected)
+                }),
+                "missing {expected} span"
+            );
+        }
+    } else {
+        assert!(spans.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn substream_uses_standard_sampled_spans() {
+    check_substream_tracing(true, true).await;
+}
+
+#[tokio::test]
+async fn substream_does_not_trace_without_sampling() {
+    check_substream_tracing(false, true).await;
+}
+
+#[tokio::test]
+async fn substream_bypasses_disabled_tracing_backend() {
+    check_substream_tracing(true, false).await;
 }
 
 #[async_trait]

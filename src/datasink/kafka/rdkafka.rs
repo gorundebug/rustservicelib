@@ -618,8 +618,7 @@ where
     let tasks = TaskTracker::new();
     make_endpoint_consumer_with_state(
         stream,
-        endpoint_config,
-        data_connector_config,
+        (endpoint_config, data_connector_config),
         runtime_state,
         move |topic, key, value, partition, _metadata| send(topic, key, value, partition),
         Arc::new(move |future| {
@@ -632,8 +631,7 @@ where
 
 fn make_endpoint_consumer_with_state<HandlerState, T, R, E, H, F, Fut>(
     stream: &Arc<SinkStreamWithResult<T, R, E>>,
-    endpoint_config: KafkaEndpointConfig,
-    data_connector_config: KafkaDataConnectorConfig,
+    (endpoint_config, data_connector_config): (KafkaEndpointConfig, KafkaDataConnectorConfig),
     runtime_state: Arc<KafkaEndpointRuntimeState>,
     send: F,
     spawn: SpawnFunction,
@@ -721,8 +719,7 @@ where
     let tasks = data_sink.tasks.clone();
     make_endpoint_consumer_with_state(
         stream,
-        endpoint_config,
-        data_connector_config,
+        (endpoint_config, data_connector_config),
         runtime_state,
         move |topic, key, value, partition, metadata| {
             let data_sink = Arc::clone(&data_sink);
@@ -756,8 +753,7 @@ where
     let partitioner: Arc<dyn Partitioner<T>> = handler.clone();
     make_endpoint_consumer_with_state(
         stream,
-        endpoint_config,
-        data_connector_config,
+        (endpoint_config, data_connector_config),
         runtime_state,
         move |topic, key, value, partition, metadata| {
             let data_sink = Arc::clone(&data_sink);

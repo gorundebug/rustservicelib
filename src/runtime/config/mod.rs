@@ -619,6 +619,7 @@ macro_rules! stream_config {
 }
 
 stream_config!(MapStreamConfig);
+stream_config!(SubStreamConfig);
 stream_config!(FilterStreamConfig);
 stream_config!(FlatMapStreamConfig);
 stream_config!(FlatMapIterableStreamConfig);
@@ -724,6 +725,7 @@ pub enum RuntimeStreamConfig {
     When(WhenStreamConfig),
     CycleLink(CycleLinkStreamConfig),
     Input(InputStreamConfig),
+    SubStream(SubStreamConfig),
     Process(ProcessStreamConfig),
     Delay(DelayStreamConfig),
     Sink(SinkStreamConfig),
@@ -746,6 +748,7 @@ impl RuntimeStreamConfig {
             Self::When(config) => &config.stream,
             Self::CycleLink(config) => &config.stream,
             Self::Input(config) => &config.stream,
+            Self::SubStream(config) => &config.stream,
             Self::Process(config) => &config.stream,
             Self::Delay(config) => &config.stream,
             Self::Sink(config) => &config.stream,
@@ -776,6 +779,7 @@ impl RuntimeStreamConfig {
             Self::When(_) => api::TransformationType::When,
             Self::CycleLink(_) => api::TransformationType::CycleLink,
             Self::Input(_) => api::TransformationType::Input,
+            Self::SubStream(_) => api::TransformationType::SubStream,
             Self::Process(_) => api::TransformationType::Process,
             Self::Delay(_) => api::TransformationType::Delay,
             Self::Sink(_) => api::TransformationType::Sink,
@@ -814,6 +818,7 @@ runtime_stream_from!(Case, CaseStreamConfig);
 runtime_stream_from!(When, WhenStreamConfig);
 runtime_stream_from!(CycleLink, CycleLinkStreamConfig);
 runtime_stream_from!(Input, InputStreamConfig);
+runtime_stream_from!(SubStream, SubStreamConfig);
 runtime_stream_from!(Process, ProcessStreamConfig);
 runtime_stream_from!(Delay, DelayStreamConfig);
 runtime_stream_from!(Sink, SinkStreamConfig);

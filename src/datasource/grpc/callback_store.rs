@@ -63,7 +63,7 @@ mod tests {
         let mut seed = 13_u64;
         for value in 0..10_000 {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let id = if seed % 7 == 0 {
+            let id = if seed.is_multiple_of(7) {
                 String::new()
             } else {
                 (seed % 11).to_string()

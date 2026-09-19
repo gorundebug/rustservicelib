@@ -1,6 +1,9 @@
 use std::{
+    any::Any,
     cell::UnsafeCell,
     collections::HashMap,
+    future::Future,
+    marker::PhantomData,
     ops::Deref,
     sync::{
         Arc,
@@ -252,6 +255,36 @@ impl<T> Deref for Payload<T> {
     }
 }
 
+/// The generic key keeps type erasure private to process-local context storage.
+pub(crate) struct ContextKey<T> {
+    identity: Arc<()>,
+    _value: PhantomData<fn() -> T>,
+}
+
+impl<T> ContextKey<T> {
+    pub(crate) fn new() -> Self {
+        Self { identity: Arc::new(()), _value: PhantomData }
+    }
+}
+
+impl<T> Clone for ContextKey<T> {
+    fn clone(&self) -> Self {
+        Self { identity: Arc::clone(&self.identity), _value: PhantomData }
+    }
+}
+
+struct LocalContextValue {
+    key: Arc<()>,
+    value: Arc<dyn Any + Send + Sync>,
+    parent: Option<Arc<LocalContextValue>>,
+}
+
+impl std::fmt::Debug for LocalContextValue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("LocalContextValue").finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct MessageContext {
     cancellation: CancellationToken,
@@ -260,6 +293,7 @@ pub struct MessageContext {
     open_telemetry: OpenTelemetryContext,
     sampling_enabled: bool,
     priority: Option<i32>,
+    local_values: Option<Arc<LocalContextValue>>,
 }
 
 impl Default for MessageContext {
@@ -277,6 +311,7 @@ impl MessageContext {
             open_telemetry: OpenTelemetryContext::new(),
             sampling_enabled: false,
             priority: None,
+            local_values: None,
         }
     }
 
@@ -291,6 +326,7 @@ impl MessageContext {
             open_telemetry: self.open_telemetry.clone(),
             sampling_enabled: self.sampling_enabled,
             priority: self.priority,
+            local_values: self.local_values.clone(),
         }
     }
 
@@ -299,6 +335,26 @@ impl MessageContext {
             deadline: Some(deadline),
             ..Self::new()
         }
+    }
+
+    pub(crate) fn with_local_value<T: Send + Sync + 'static>(
+        mut self, key: &ContextKey<T>, value: Arc<T>,
+    ) -> Self {
+        self.local_values = Some(Arc::new(LocalContextValue {
+            key: Arc::clone(&key.identity), value, parent: self.local_values.take(),
+        }));
+        self
+    }
+
+    pub(crate) fn local_value<T: Send + Sync + 'static>(&self, key: &ContextKey<T>) -> Option<Arc<T>> {
+        let mut current = self.local_values.as_deref();
+        while let Some(binding) = current {
+            if Arc::ptr_eq(&binding.key, &key.identity) {
+                return Arc::clone(&binding.value).downcast::<T>().ok();
+            }
+            current = binding.parent.as_deref();
+        }
+        None
     }
 
     pub fn with_timeout(timeout: Duration) -> Self {
@@ -588,6 +644,37 @@ where
     T: Send + Sync + 'static,
 {
     async fn consume(&self, context: MessageContext, payload: Payload<T>);
+}
+
+/// Return true after the last result required by this invocation.
+#[async_trait]
+pub trait SubStreamCollector<R>: Send + Sync
+where R: Send + Sync + 'static,
+{
+    async fn out(&self, context: MessageContext, payload: Payload<R>) -> bool;
+}
+
+pub struct SubStreamCollectorFunc<F>(pub F);
+
+#[async_trait]
+impl<R, F, Fut> SubStreamCollector<R> for SubStreamCollectorFunc<F>
+where
+    R: Send + Sync + 'static,
+    F: Fn(MessageContext, Payload<R>) -> Fut + Send + Sync,
+    Fut: Future<Output = bool> + Send,
+{
+    async fn out(&self, context: MessageContext, payload: Payload<R>) -> bool {
+        (self.0)(context, payload).await
+    }
+}
+
+#[async_trait]
+pub trait CallableSubStream<T, R>: Send + Sync
+where T: Send + Sync + 'static, R: Send + Sync + 'static,
+{
+    async fn consume(
+        &self, context: MessageContext, value: T, collector: Arc<dyn SubStreamCollector<R>>,
+    ) -> crate::runtime::environment::RuntimeResult<()>;
 }
 
 /// Topology-preserving consumer for a node disabled by its custom properties.

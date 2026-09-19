@@ -225,18 +225,6 @@ where
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::Caller;
-
-    #[test]
-    fn function_call_async_flag_only_changes_caller_metadata() {
-        assert!(!Caller::FunctionCall(false).is_async());
-        assert!(Caller::FunctionCall(true).is_async());
-        assert!(Caller::ParallelCall.is_async());
-    }
-}
-
 pub(crate) fn short_type_name<T>() -> String {
     std::any::type_name::<T>()
         .rsplit("::")
@@ -332,5 +320,17 @@ where
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Caller;
+
+    #[test]
+    fn function_call_async_flag_only_changes_caller_metadata() {
+        assert!(!Caller::FunctionCall(false).is_async());
+        assert!(Caller::FunctionCall(true).is_async());
+        assert!(Caller::ParallelCall.is_async());
     }
 }

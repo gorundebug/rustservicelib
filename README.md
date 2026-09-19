@@ -65,6 +65,7 @@ Graph construction, consumer resolution, dispatch order, middleware chains, and 
 | Operator | Purpose |
 |---|---|
 | `Input` | Receive data from an external system |
+| `SubStream` | Invoke a service-local graph from business code and collect its results |
 | `Sink` | Send data to an external system |
 | `Map` / `Filter` | Transform or conditionally pass values |
 | `FlatMap` / `FlatMapIterable` | Expand a value into multiple outputs |
@@ -75,6 +76,56 @@ Graph construction, consumer resolution, dispatch order, middleware chains, and 
 | `Case` / `When` | Route values conditionally |
 | `Delay` | Deliver later or immediately on cancellation |
 | `CycleLink` | Feed values back into the graph |
+
+---
+
+## Calling A SubStream
+
+A SubStream belongs to one service and reuses its existing graph. Its input type
+is the argument type; an ordinary result-producing stream is connected back to
+the entry with `set_source`. There is no extra result operator or error output.
+Generated services expose typed accessors such as `get_lookup_substream()`.
+Pass only the required handles to business functions through custom makers.
+
+```rust
+use std::{sync::{Arc, Mutex}, time::Duration};
+use servicelib::{MessageContext, Payload, SubStreamCollectorFunc};
+use servicelib::runtime::{common::CallableSubStream, environment::RuntimeResult};
+
+async fn call_lookup(
+    lookup: &dyn CallableSubStream<String, String>,
+    context: MessageContext,
+    value: String,
+) -> RuntimeResult<Vec<String>> {
+    let results = Arc::new(Mutex::new(Vec::<String>::new()));
+    let output = Arc::clone(&results);
+    let collector = Arc::new(SubStreamCollectorFunc(
+        move |_caller: MessageContext, result: Payload<String>| {
+            let output = Arc::clone(&output);
+            async move {
+                output.lock().expect("result lock poisoned").push((*result).clone());
+                true // This invocation needs one result; false keeps receiving.
+            }
+        },
+    ));
+    lookup
+        .consume(context.with_timeout_limit(Duration::from_secs(5)), value, collector)
+        .await?;
+    let values = results.lock().expect("result lock poisoned").clone();
+    Ok(values)
+}
+```
+
+Concurrent and nested invocations have separate collectors even when they share
+a stream ID. A collector receives the original caller context; callbacks for one
+invocation are serialized. Completion drops subsequent results, but does not
+cancel or roll back other graph work. Cancellation and deadlines stop the wait;
+an already running callback is drained before `consume` returns.
+
+Business failures remain part of the graph's typed result contract. Ordinary
+operators, Join storage and worker-pool scheduling are not replaced: a caller
+must not block every worker of a bounded pool while awaiting work queued to that
+same pool. Rust does not support Temporal connectors.
 
 ---
 
@@ -181,3 +232,20 @@ MIT
 | Website | [gorundebug.com](https://www.gorundebug.com) |
 | Email | [serlex777@gmail.com](mailto:serlex777@gmail.com) |
 | Telegram | [t.me/+31qMliw-DeI3M2M6](https://t.me/+31qMliw-DeI3M2M6) |
+## SubStream portability and modeling
+
+SubStream is supported across Go, Python, TypeScript, Rust, C++/userver and
+C++/Boost. Temporal support remains limited to Go, Python and TypeScript; Rust
+SubStreams use the normal Tokio runtime.
+
+In the model, `valueType` describes the argument and the existing `source` field
+points to the result producer, whose output determines the collector type. Use
+one body consumer and ordinary Split for branching. No extra ResultStream,
+endpoint or function dependency declaration is required. A graph should expose
+a meaningful reusable business stage, not every implementation helper.
+
+Generated typed handles can be injected through custom makers. Their weak
+references avoid ownership cycles through business functions; keep the generated
+service alive while using its handles. Do not invoke them before graph binding.
+Concurrent invocation state does not change shared Join keys or storage: use
+appropriate business/correlation keys when the body contains a shared Join.

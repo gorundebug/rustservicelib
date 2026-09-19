@@ -176,13 +176,15 @@ async fn http_sink_preserves_lifecycle_correlation_and_metrics() {
         &["begin", "consume", "response", "end"]
     );
     assert_eq!(&*results.lock().unwrap(), &[17]);
-    let headers = received_headers.lock().unwrap();
-    let headers = headers
-        .as_ref()
-        .expect("HTTP server did not receive headers");
-    assert!(!headers["x-stream-id"].is_empty());
-    assert_ne!(headers["x-stream-id"], "order-42");
-    assert_eq!(headers["x-trace"], "1");
+    {
+        let headers = received_headers.lock().unwrap();
+        let headers = headers
+            .as_ref()
+            .expect("HTTP server did not receive headers");
+        assert!(!headers["x-stream-id"].is_empty());
+        assert_ne!(headers["x-stream-id"], "order-42");
+        assert_eq!(headers["x-trace"], "1");
+    }
     assert_eq!(sink.name(), "reserve inventory");
 
     let metrics = environment.metrics().render_prometheus();

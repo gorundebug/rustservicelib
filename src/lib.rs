@@ -14,9 +14,12 @@ pub mod transformation;
 
 pub use runtime::collector::{Collect, Collector};
 pub use runtime::common::{Consumer, MessageContext, Payload, RuntimeStream};
+pub use runtime::common::{CallableSubStream, SubStreamCollector, SubStreamCollectorFunc};
+pub use operators::SubStream;
 pub use runtime::config::{
     CallSemantics, InputStreamConfig, JoinStreamConfig, LinkConfig, MultiJoinStreamConfig,
     StreamConfig,
+    SubStreamConfig,
 };
 pub use runtime::schedule::{
     ScheduleBackend, ScheduleEndpointFunction, ScheduleTrigger, normalize_temporal_priority,

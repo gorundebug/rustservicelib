@@ -313,6 +313,7 @@ fn status_icon(runtime: &RuntimeConfig, config: &RuntimeStreamConfig) -> &'stati
     }
     match config.transformation_type() {
         TransformationType::Input => MDI_DATABASE_ARROW_RIGHT,
+        TransformationType::SubStream => MDI_FUNCTION,
         TransformationType::Map => MDI_ARROW_LEFT_RIGHT,
         TransformationType::Filter => MDI_FILTER,
         TransformationType::Join | TransformationType::MultiJoin => MDI_CALL_MERGE,
@@ -353,6 +354,7 @@ fn transformation_name(value: TransformationType) -> &'static str {
     match value {
         TransformationType::Undefined => "UNDEFINED",
         TransformationType::Input => "INPUT",
+        TransformationType::SubStream => "SUBSTREAM",
         TransformationType::Map => "MAP",
         TransformationType::Filter => "FILTER",
         TransformationType::Join => "JOIN",

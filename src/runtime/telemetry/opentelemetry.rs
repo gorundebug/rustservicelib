@@ -102,21 +102,6 @@ fn flag_value_enabled(value: &str) -> bool {
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::flag_value_enabled;
-
-    #[test]
-    fn boolean_environment_values_are_strict() {
-        for value in ["1", "true", "TRUE", " yes ", "On"] {
-            assert!(flag_value_enabled(value), "{value:?}");
-        }
-        for value in ["", "0", "false", "no", "off", "anything"] {
-            assert!(!flag_value_enabled(value), "{value:?}");
-        }
-    }
-}
-
 pub fn install_stdout(logs_enabled: bool, tracing_enabled: bool) -> RuntimeResult<()> {
     if !logs_enabled && !tracing_enabled {
         return Ok(());
@@ -265,5 +250,20 @@ impl OpenTelemetry {
                 .map_err(|error| RuntimeError::Transport(error.to_string()))?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::flag_value_enabled;
+
+    #[test]
+    fn boolean_environment_values_are_strict() {
+        for value in ["1", "true", "TRUE", " yes ", "On"] {
+            assert!(flag_value_enabled(value), "{value:?}");
+        }
+        for value in ["", "0", "false", "no", "off", "anything"] {
+            assert!(!flag_value_enabled(value), "{value:?}");
+        }
     }
 }
