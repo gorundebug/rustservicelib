@@ -8,10 +8,30 @@ use servicelib::{
     api::{DataType, TypeDefinitionFormat},
     runtime::{
         common::MessageContext,
-        config::{Config, ConfigLoader, ModuleConfig, RuntimeConfig, TypeConfig},
+        config::{
+            Config, ConfigLoader, DelayStreamConfig, ModuleConfig, RuntimeConfig, StreamConfig,
+            TypeConfig,
+        },
         environment::{Lifecycle, metrics::Metrics},
     },
 };
+
+#[test]
+fn stream_durations_use_dsl_milliseconds_in_yaml() {
+    let config: DelayStreamConfig =
+        serde_yaml::from_str("id: 1\nname: Soft Deadline\nduration: 1000\n").unwrap();
+
+    assert_eq!(config.duration, std::time::Duration::from_millis(1000));
+    assert_eq!(
+        serde_yaml::to_value(DelayStreamConfig {
+            stream: StreamConfig::new(1, "Soft Deadline"),
+            duration: std::time::Duration::from_millis(250),
+        })
+        .unwrap()["duration"]
+            .as_u64(),
+        Some(250),
+    );
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct TestConfig {

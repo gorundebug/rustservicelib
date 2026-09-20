@@ -11,6 +11,29 @@ mod runtime;
 pub use loader::{Config, ConfigLoader};
 pub use runtime::RuntimeConfig;
 
+mod duration_millis {
+    use std::time::Duration;
+
+    use serde::{Deserialize, Deserializer, Serializer, ser::Error as _};
+
+    pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let millis = u64::try_from(duration.as_millis())
+            .map_err(|_| S::Error::custom("duration exceeds the millisecond config range"))?;
+        serializer.serialize_u64(millis)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let millis = u64::deserialize(deserializer)?;
+        Ok(Duration::from_millis(millis))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceConfig {
@@ -662,6 +685,7 @@ impl From<ProcessStreamConfig> for StreamConfig {
 pub struct DelayStreamConfig {
     #[serde(flatten)]
     pub stream: StreamConfig,
+    #[serde(with = "duration_millis")]
     pub duration: std::time::Duration,
 }
 
@@ -698,6 +722,7 @@ pub struct JoinStreamConfig {
     pub stream: StreamConfig,
     pub join_type: JoinType,
     pub join_storage: api::JoinStorageType,
+    #[serde(with = "duration_millis")]
     pub ttl: std::time::Duration,
     pub renew_ttl: bool,
 }
@@ -706,6 +731,7 @@ pub struct JoinStreamConfig {
 pub struct MultiJoinStreamConfig {
     pub stream: StreamConfig,
     pub join_storage: api::JoinStorageType,
+    #[serde(with = "duration_millis")]
     pub ttl: std::time::Duration,
     pub renew_ttl: bool,
 }
