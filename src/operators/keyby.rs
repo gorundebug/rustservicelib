@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde::{Serialize, de::DeserializeOwned};
 
 use crate::runtime::{
     collector::Collector,
@@ -9,7 +8,7 @@ use crate::runtime::{
     config::KeyByStreamConfig,
     datastruct::KeyValue,
     environment::RuntimeResult,
-    serde::{JsonSerde, Serde as ServiceSerde, make_stream_key_value_serde},
+    serde::make_stream_key_value_serde,
     stream::Stream,
 };
 
@@ -67,8 +66,8 @@ where
     // Go: runtime.MakeKeyValueSerde[K, V](env) — fresh, resolving K and V
     // independently rather than a single generic serde over KeyValue<K, V>,
     // matching Go's key/value-split serialization.
-    K: Serialize + DeserializeOwned + Send + Sync + 'static,
-    V: Serialize + DeserializeOwned + Send + Sync + 'static,
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
     F: KeyByFunction<T, K, V> + 'static,
 {
     pub fn make(
@@ -77,8 +76,8 @@ where
         function: F,
     ) -> RuntimeResult<Stream<KeyValue<K, V>>> {
         let serde = make_stream_key_value_serde::<K, V>(
-            Arc::new(JsonSerde::<K>::new()) as Arc<dyn ServiceSerde<K>>,
-            Arc::new(JsonSerde::<V>::new()) as Arc<dyn ServiceSerde<V>>,
+            source.environment().make_serde::<K>(),
+            source.environment().make_serde::<V>(),
         );
         let output = Stream::derived(&config.stream, source.environment().clone(), serde);
         source.try_set_consumer(
@@ -103,8 +102,8 @@ where
         function: F,
     ) -> RuntimeResult<Stream<KeyValue<K, V>>>
     where
-        K: Serialize + DeserializeOwned + Send + Sync + 'static,
-        V: Serialize + DeserializeOwned + Send + Sync + 'static,
+        K: Send + Sync + 'static,
+        V: Send + Sync + 'static,
         F: KeyByFunction<T, K, V> + 'static,
     {
         KeyByStream::make(config, self, function)

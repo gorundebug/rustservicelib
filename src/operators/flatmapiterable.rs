@@ -2,8 +2,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use serde::{Serialize, de::DeserializeOwned};
-
 use crate::runtime::{
     common::{Consumer, MessageContext, Payload},
     config::FlatMapIterableStreamConfig,
@@ -69,7 +67,7 @@ where
     T: StreamIterable<R> + Send + Sync + 'static,
     // Go: runtime.MakeSerde[R](env) — fresh, R (the element type) is a new
     // type at this point, distinct from the iterable T.
-    R: Serialize + DeserializeOwned + Send + Sync + 'static,
+    R: Send + Sync + 'static,
     <T::Items as IntoIterator>::IntoIter: Send,
 {
     pub fn make(
@@ -98,7 +96,7 @@ where
     ) -> RuntimeResult<Stream<R>>
     where
         T: StreamIterable<R>,
-        R: Serialize + DeserializeOwned + Send + Sync + 'static,
+        R: Send + Sync + 'static,
         <T::Items as IntoIterator>::IntoIter: Send,
     {
         FlatMapIterableStream::make(config, self)

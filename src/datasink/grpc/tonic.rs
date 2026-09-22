@@ -17,6 +17,21 @@ use crate::{
     runtime::{common::RuntimeStream, config::RuntimeDataConnectorConfig},
 };
 
+/// Construction-time policy for one gRPC client connector.
+#[derive(Clone, Copy, Debug)]
+pub struct TonicDataSinkOptions {
+    /// Maximum queued request messages per streaming RPC, not a concurrency limit.
+    pub stream_buffer_capacity: usize,
+}
+
+impl Default for TonicDataSinkOptions {
+    fn default() -> Self {
+        Self {
+            stream_buffer_capacity: 16,
+        }
+    }
+}
+
 pub struct TonicDataSink {
     environment: RuntimeEnvironment,
     id: i32,
@@ -24,6 +39,7 @@ pub struct TonicDataSink {
     channels: RwLock<Vec<Channel>>,
     next_channel: AtomicUsize,
     state: AtomicU8,
+    stream_buffer_capacity: usize,
 }
 
 impl TonicDataSink {
@@ -37,7 +53,12 @@ impl TonicDataSink {
             .map_err(|error| RuntimeError::InvalidConfiguration(error.to_string()))
     }
 
-    fn new(environment: RuntimeEnvironment, id: i32, name: String) -> Arc<Self> {
+    fn new(
+        environment: RuntimeEnvironment,
+        id: i32,
+        name: String,
+        options: TonicDataSinkOptions,
+    ) -> Arc<Self> {
         Arc::new(Self {
             environment,
             id,
@@ -45,6 +66,7 @@ impl TonicDataSink {
             channels: RwLock::new(Vec::new()),
             next_channel: AtomicUsize::new(0),
             state: AtomicU8::new(0),
+            stream_buffer_capacity: options.stream_buffer_capacity,
         })
     }
 
@@ -52,8 +74,33 @@ impl TonicDataSink {
         environment: RuntimeEnvironment,
         config: &GrpcDataConnectorConfig,
     ) -> RuntimeResult<Arc<Self>> {
+        Self::from_config_with_options(environment, config, TonicDataSinkOptions::default())
+    }
+
+    /// Customize this client in the service's user-owned infrastructure maker.
+    pub fn from_config_with_options(
+        environment: RuntimeEnvironment,
+        config: &GrpcDataConnectorConfig,
+        options: TonicDataSinkOptions,
+    ) -> RuntimeResult<Arc<Self>> {
+        if options.stream_buffer_capacity == 0
+            || options.stream_buffer_capacity > tokio::sync::Semaphore::MAX_PERMITS
+        {
+            return Err(RuntimeError::InvalidConfiguration(
+                "gRPC client stream_buffer_capacity is outside the supported channel capacity range".to_owned(),
+            ));
+        }
         Self::validate_config(config)?;
-        Ok(Self::new(environment, config.id, config.name.clone()))
+        Ok(Self::new(
+            environment,
+            config.id,
+            config.name.clone(),
+            options,
+        ))
+    }
+
+    pub fn stream_buffer_capacity(&self) -> usize {
+        self.stream_buffer_capacity
     }
 
     pub fn from_stream<T, R, E>(

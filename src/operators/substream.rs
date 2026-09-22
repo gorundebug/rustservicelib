@@ -1,12 +1,14 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use serde::{Serialize, de::DeserializeOwned};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::runtime::{
-    common::{CallableSubStream, ConstructionCell, Consumer, ContextKey, MessageContext, Payload, SubStreamCollector},
+    common::{
+        CallableSubStream, ConstructionCell, Consumer, ContextKey, MessageContext, Payload,
+        SubStreamCollector,
+    },
     config::SubStreamConfig,
     environment::{RuntimeBuildable, RuntimeEnvironment, RuntimeError, RuntimeResult},
     stream::Stream,
@@ -26,7 +28,10 @@ struct Call<R: Send + Sync + 'static> {
 impl<R: Send + Sync + 'static> Call<R> {
     fn close(&self) {
         self.done.cancel();
-        self.callback.lock().expect("SubStream callback lock poisoned").take();
+        self.callback
+            .lock()
+            .expect("SubStream callback lock poisoned")
+            .take();
     }
 
     async fn deliver(&self, payload: Payload<R>) {
@@ -34,9 +39,15 @@ impl<R: Send + Sync + 'static> Call<R> {
         if self.done.is_cancelled() {
             return;
         }
-        let callback = self.callback.lock().expect("SubStream callback lock poisoned")
-            .as_ref().map(|callback| (callback.context.clone(), Arc::clone(&callback.collector)));
-        let Some((context, collector)) = callback else { return; };
+        let callback = self
+            .callback
+            .lock()
+            .expect("SubStream callback lock poisoned")
+            .as_ref()
+            .map(|callback| (callback.context.clone(), Arc::clone(&callback.collector)));
+        let Some((context, collector)) = callback else {
+            return;
+        };
         if context.is_cancelled() {
             self.close();
             return;
@@ -70,12 +81,16 @@ struct SubStreamInner<T: Send + Sync + 'static, R: Send + Sync + 'static> {
 
 impl<T: Send + Sync + 'static, R: Send + Sync + 'static> Clone for SubStream<T, R> {
     fn clone(&self) -> Self {
-        Self { inner: Arc::clone(&self.inner) }
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
     }
 }
 
 impl<T, R> SubStream<T, R>
-where T: Serialize + DeserializeOwned + Send + Sync + 'static, R: Send + Sync + 'static,
+where
+    T: Send + Sync + 'static,
+    R: Send + Sync + 'static,
 {
     pub fn new(config: &SubStreamConfig, environment: RuntimeEnvironment) -> Self {
         let inner = Arc::new(SubStreamInner {
@@ -97,45 +112,71 @@ impl<T: Send + Sync + 'static, R: Send + Sync + 'static> SubStream<T, R> {
 
     pub fn set_source(&self, source: &Stream<R>) -> RuntimeResult<()> {
         if self.inner.source.get().is_some() {
-            return Err(RuntimeError::SourceAlreadySet { stream: self.stream().name() });
+            return Err(RuntimeError::SourceAlreadySet {
+                stream: self.stream().name(),
+            });
         }
         if source.id() == self.stream().id()
-            || source.config().stream().id_service != self.inner.service_id {
+            || source.config().stream().id_service != self.inner.service_id
+        {
             return Err(RuntimeError::InvalidConfiguration(
                 "SubStream result source must be a different stream in the same service".to_owned(),
             ));
         }
-        source.try_set_consumer(Arc::new(ResultLink { key: self.inner.key.clone() }), self.stream().id())?;
-        self.inner.source.set(source.clone()).map_err(|_| RuntimeError::SourceAlreadySet {
-            stream: self.stream().name(),
-        })
+        source.try_set_consumer(
+            Arc::new(ResultLink {
+                key: self.inner.key.clone(),
+            }),
+            self.stream().id(),
+        )?;
+        self.inner
+            .source
+            .set(source.clone())
+            .map_err(|_| RuntimeError::SourceAlreadySet {
+                stream: self.stream().name(),
+            })
     }
 
     pub async fn consume(
-        &self, context: MessageContext, value: T, collector: Arc<dyn SubStreamCollector<R>>,
+        &self,
+        context: MessageContext,
+        value: T,
+        collector: Arc<dyn SubStreamCollector<R>>,
     ) -> RuntimeResult<()> {
         self.inner.build()?;
         if context.is_cancelled() {
             return Err(RuntimeError::ContextCancelled);
         }
         let call = Arc::new(Call {
-            callback: Mutex::new(Some(Callback { context: context.clone(), collector })),
+            callback: Mutex::new(Some(Callback {
+                context: context.clone(),
+                collector,
+            })),
             gate: AsyncMutex::new(()),
             done: CancellationToken::new(),
         });
         let _guard = CallGuard(Arc::clone(&call));
-        let dispatch_context = context.clone().with_local_value(&self.inner.key, Arc::clone(&call));
+        let dispatch_context = context
+            .clone()
+            .with_local_value(&self.inner.key, Arc::clone(&call));
         if !self.stream().environment().tracing_enabled() || !context.sampling_enabled() {
             return self.dispatch(context, dispatch_context, value, &call).await;
         }
-        let (dispatch_context, span) = self.stream().start_span(dispatch_context, "stream.substream");
+        let (dispatch_context, span) = self
+            .stream()
+            .start_span(dispatch_context, "stream.substream");
         crate::runtime::common::instrument_if_enabled!(
-            self.dispatch(context, dispatch_context, value, &call), span,
+            self.dispatch(context, dispatch_context, value, &call),
+            span,
         )
     }
 
     async fn dispatch(
-        &self, context: MessageContext, dispatch_context: MessageContext, value: T, call: &Call<R>,
+        &self,
+        context: MessageContext,
+        dispatch_context: MessageContext,
+        value: T,
+        call: &Call<R>,
     ) -> RuntimeResult<()> {
         let dispatch = self.stream().emit(dispatch_context, Payload::new(value));
         tokio::pin!(dispatch);
@@ -169,22 +210,38 @@ impl<T: Send + Sync + 'static, R: Send + Sync + 'static> SubStream<T, R> {
 impl<T: Send + Sync + 'static, R: Send + Sync + 'static> RuntimeBuildable for SubStreamInner<T, R> {
     fn build(&self) -> RuntimeResult<()> {
         if self.stream.link_collector().is_none() {
-            return Err(RuntimeError::ConsumerNotSet { stream: self.stream.name() });
+            return Err(RuntimeError::ConsumerNotSet {
+                stream: self.stream.name(),
+            });
         }
         if self.source.get().is_none() {
-            return Err(RuntimeError::InvalidConfiguration("SubStream result source is missing".to_owned()));
+            return Err(RuntimeError::InvalidConfiguration(
+                "SubStream result source is missing".to_owned(),
+            ));
         }
-        if self.stream.environment().service_id().is_some_and(|id| id != self.service_id) {
-            return Err(RuntimeError::InvalidConfiguration("SubStream belongs to a different service".to_owned()));
+        if self
+            .stream
+            .environment()
+            .service_id()
+            .is_some_and(|id| id != self.service_id)
+        {
+            return Err(RuntimeError::InvalidConfiguration(
+                "SubStream belongs to a different service".to_owned(),
+            ));
         }
         Ok(())
     }
 }
 
 #[async_trait]
-impl<T: Send + Sync + 'static, R: Send + Sync + 'static> CallableSubStream<T, R> for SubStream<T, R> {
+impl<T: Send + Sync + 'static, R: Send + Sync + 'static> CallableSubStream<T, R>
+    for SubStream<T, R>
+{
     async fn consume(
-        &self, context: MessageContext, value: T, collector: Arc<dyn SubStreamCollector<R>>,
+        &self,
+        context: MessageContext,
+        value: T,
+        collector: Arc<dyn SubStreamCollector<R>>,
     ) -> RuntimeResult<()> {
         SubStream::consume(self, context, value, collector).await
     }

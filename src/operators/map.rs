@@ -2,8 +2,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use serde::{Serialize, de::DeserializeOwned};
-
 use crate::runtime::{
     collector::Collector,
     common::{Consumer, MessageContext, Payload, RuntimeStream},
@@ -61,7 +59,7 @@ impl<T, R, F> MapStream<T, R, F>
 where
     T: Send + Sync + 'static,
     // Go: runtime.MakeSerde[R](env) — fresh, R is a new type at this point.
-    R: Serialize + DeserializeOwned + Send + Sync + 'static,
+    R: Send + Sync + 'static,
     F: MapFunction<T, R> + 'static,
 {
     pub fn make(
@@ -86,7 +84,7 @@ where
 {
     pub fn map<R, F>(&self, config: &MapStreamConfig, function: F) -> RuntimeResult<Stream<R>>
     where
-        R: Serialize + DeserializeOwned + Send + Sync + 'static,
+        R: Send + Sync + 'static,
         F: MapFunction<T, R> + 'static,
     {
         MapStream::make(config, self, function)

@@ -174,7 +174,10 @@ where
             );
             if let Err(error) = result {
                 crate::runtime::telemetry::record_error_if_enabled!(&close_pending.span, &error);
-                crate::runtime::common::event_if_enabled!(&close_pending.span, || tracing::event!(name: "close_send.error", tracing::Level::ERROR, error = %error));
+                crate::runtime::common::event_if_enabled!(
+                    &close_pending.span,
+                    || tracing::event!(name: "close_send.error", tracing::Level::ERROR, error = %error)
+                );
             }
         });
 
@@ -190,7 +193,10 @@ where
                     pending.span.clone(),
                 ) {
                     Ok(Some(response)) => {
-                        crate::runtime::common::event_if_enabled!(&pending.span, || tracing::event!(name: "recv", tracing::Level::INFO, {}));
+                        crate::runtime::common::event_if_enabled!(
+                            &pending.span,
+                            || tracing::event!(name: "recv", tracing::Level::INFO, {})
+                        );
                         result = crate::runtime::common::instrument_if_enabled!(
                             handler.handle_response(
                                 pending.context.clone(),
@@ -202,13 +208,19 @@ where
                         );
                         if result.is_err() {
                             if let Err(error) = &result {
-                                crate::runtime::telemetry::record_error_if_enabled!(&pending.span, error);
+                                crate::runtime::telemetry::record_error_if_enabled!(
+                                    &pending.span,
+                                    error
+                                );
                             }
                             break;
                         }
                     }
                     Ok(None) => {
-                        crate::runtime::common::event_if_enabled!(&pending.span, || tracing::event!(name: "eof", tracing::Level::INFO, {}));
+                        crate::runtime::common::event_if_enabled!(
+                            &pending.span,
+                            || tracing::event!(name: "eof", tracing::Level::INFO, {})
+                        );
                         break;
                     }
                     Err(error) => {
@@ -304,7 +316,10 @@ where
                     }
                 };
                 let request_context = handler_context.clone().with_stream_id(new_stream_id());
-                crate::runtime::common::event_if_enabled!(&span, || tracing::event!(name: "begin_request", tracing::Level::INFO, {}));
+                crate::runtime::common::event_if_enabled!(
+                    &span,
+                    || tracing::event!(name: "begin_request", tracing::Level::INFO, {})
+                );
                 let state = Arc::new(Mutex::new(state));
                 let started_at = self.metrics.request_start();
                 let grpc_started_at = self.metrics.grpc_client_measurement_start();
@@ -338,7 +353,10 @@ where
                         return result.map(|()| unreachable!("gRPC creation error became success"));
                     }
                 };
-                crate::runtime::common::event_if_enabled!(&span, || tracing::event!(name: "grpc_call", tracing::Level::INFO, {}));
+                crate::runtime::common::event_if_enabled!(
+                    &span,
+                    || tracing::event!(name: "grpc_call", tracing::Level::INFO, {})
+                );
                 let pending = Arc::new(Pending {
                     context: handler_context,
                     state,

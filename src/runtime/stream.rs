@@ -1,13 +1,11 @@
 use std::sync::Arc;
 
-use serde::{Serialize, de::DeserializeOwned};
-
 use crate::runtime::{
     collector::{Collect, Collector, LinkCollector},
     common::{ConstructionCell, Consumer, MessageContext, Payload, RuntimeStream},
     config::{RuntimeStreamConfig, StreamConfig},
     environment::{RuntimeEnvironment, RuntimeError, RuntimeResult},
-    serde::{JsonSerde, Serde as ServiceSerde, StreamSerde, make_stream_serde},
+    serde::StreamSerde,
 };
 
 pub struct Stream<T>
@@ -41,23 +39,18 @@ where
     }
 }
 
-// Go: runtime.MakeSerde[T](env) / MakeConsumedStream[T] — root streams and the
-// output type of type-changing operators always resolve a fresh serde for
-// their own type, with no parent to propagate from. Rust has no per-type
-// generated serde registry (unlike Go's type switch or C++'s
-// DefaultSerdeFactory specializations): JsonSerde<T> works generically for
-// any T that derives serde::Serialize + Deserialize, which every generated
-// type does, so no stub/fallback path is needed here.
+// Root streams and type-changing operators resolve their serializer through
+// the service environment, matching Go's runtime.MakeSerde[T](env).
 impl<T> Stream<T>
 where
-    T: Serialize + DeserializeOwned + Send + Sync + 'static,
+    T: Send + Sync + 'static,
 {
     pub fn new(config: &StreamConfig, environment: RuntimeEnvironment) -> Self {
         Self::with_id(config.id, environment)
     }
 
     pub(crate) fn with_id(id: i32, environment: RuntimeEnvironment) -> Self {
-        let serde = make_stream_serde(Arc::new(JsonSerde::<T>::new()) as Arc<dyn ServiceSerde<T>>);
+        let serde = environment.make_serde::<T>();
         Self::with_id_and_serde(id, environment, serde)
     }
 }
@@ -227,6 +220,10 @@ where
     }
 
     fn tracing_labels(&self) -> (&str, &str, &str) {
-        (&self.inner.name, &self.inner.pipeline, &self.inner.component)
+        (
+            &self.inner.name,
+            &self.inner.pipeline,
+            &self.inner.component,
+        )
     }
 }

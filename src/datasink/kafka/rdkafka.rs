@@ -847,7 +847,9 @@ where
         } else {
             tracing::Span::none()
         };
-        let stream_id = crate::runtime::common::scope_if_enabled!(&span, || self.handler.get_stream_id(&context, &value));
+        let stream_id = crate::runtime::common::scope_if_enabled!(&span, || self
+            .handler
+            .get_stream_id(&context, &value));
         crate::runtime::telemetry::record_if_enabled!(&span, "stream_id", stream_id.as_str());
         let context = context.with_stream_id(stream_id).with_span_context(&span);
         let (context, mut handler_state) = crate::runtime::common::instrument_if_enabled!(
@@ -855,7 +857,10 @@ where
                 .begin_request(context, self.stream_context.clone()),
             span.clone(),
         );
-        crate::runtime::common::event_if_enabled!(&span, || tracing::event!(name: "begin_request", parent: &span, tracing::Level::INFO, {}));
+        crate::runtime::common::event_if_enabled!(
+            &span,
+            || tracing::event!(name: "begin_request", parent: &span, tracing::Level::INFO, {})
+        );
 
         self.active_requests.inc();
         let started_at = self.request_duration.is_enabled().then(Instant::now);

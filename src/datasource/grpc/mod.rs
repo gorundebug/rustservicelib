@@ -19,7 +19,10 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use crate::{
     operators::InputStream,
     runtime::{
-        common::{Consumer, MessageContext, Payload, RuntimeEndpointConsumer, RuntimeStream, new_stream_id},
+        common::{
+            Consumer, MessageContext, Payload, RuntimeEndpointConsumer, RuntimeStream,
+            new_stream_id,
+        },
         datasource::{PendingRequests, StreamContext as DataSourceStreamContext},
         environment::{
             RuntimeError, RuntimeResult,
@@ -385,7 +388,8 @@ where
         let span = if self.input_stream.stream().environment().tracing_enabled()
             && context.sampling_enabled()
         {
-            let (stream_name, pipeline_name, component_name) = self.input_stream.stream().tracing_labels();
+            let (stream_name, pipeline_name, component_name) =
+                self.input_stream.stream().tracing_labels();
             let span = tracing::info_span!(
                 "grpc.input",
                 stream = stream_name,
@@ -425,7 +429,10 @@ where
                 return Err(error);
             }
         };
-        crate::runtime::common::event_if_enabled!(&span, || tracing::event!(name: "begin_request", tracing::Level::INFO, {}));
+        crate::runtime::common::event_if_enabled!(
+            &span,
+            || tracing::event!(name: "begin_request", tracing::Level::INFO, {})
+        );
         let context = if context.stream_id().is_some() {
             context
         } else {
@@ -527,7 +534,10 @@ where
             ),
             pending.span.clone(),
         );
-        crate::runtime::common::event_if_enabled!(&pending.span, || tracing::event!(name: "eof", tracing::Level::INFO, {}));
+        crate::runtime::common::event_if_enabled!(
+            &pending.span,
+            || tracing::event!(name: "eof", tracing::Level::INFO, {})
+        );
     }
 
     pub(crate) async fn wait_done(
@@ -569,7 +579,10 @@ where
             .is_some_and(|error| error.downcast_ref::<RequestContextCancelled>().is_some());
         if wait_cancelled && pending.result_context.done.is_cancelled() {
             result = Ok(());
-            crate::runtime::common::event_if_enabled!(&pending.span, || tracing::event!(name: "done_received", tracing::Level::INFO, {}));
+            crate::runtime::common::event_if_enabled!(
+                &pending.span,
+                || tracing::event!(name: "done_received", tracing::Level::INFO, {})
+            );
         } else if wait_cancelled {
             crate::runtime::telemetry::record_error_if_enabled!(
                 &pending.span,
@@ -633,7 +646,10 @@ where
             .is_some_and(|current| Arc::ptr_eq(&current, &pending))
         {
             self.metrics.late_result.inc();
-            crate::runtime::common::event_if_enabled!(&pending.span, || tracing::event!(name: "late_result", tracing::Level::WARN, {}));
+            crate::runtime::common::event_if_enabled!(
+                &pending.span,
+                || tracing::event!(name: "late_result", tracing::Level::WARN, {})
+            );
             return;
         }
         let message_id = crate::runtime::common::instrument_if_enabled!(

@@ -98,8 +98,14 @@ pub(crate) use record_if_enabled;
 
 #[cfg(test)]
 mod attribute_fast_path_tests {
-    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
-    use tracing::{Subscriber, span::{Id, Record}};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tracing::{
+        Subscriber,
+        span::{Id, Record},
+    };
     use tracing_subscriber::{Layer, layer::Context, prelude::*};
 
     struct Records(Arc<AtomicUsize>);
@@ -115,13 +121,17 @@ mod attribute_fast_path_tests {
         let keys = AtomicUsize::new(0);
         let values = AtomicUsize::new(0);
         let span = tracing::Span::none();
-        super::record_if_enabled!(&span, {
-            keys.fetch_add(1, Ordering::Relaxed);
-            "stream_id"
-        }, {
-            values.fetch_add(1, Ordering::Relaxed);
-            String::from("must not allocate")
-        });
+        super::record_if_enabled!(
+            &span,
+            {
+                keys.fetch_add(1, Ordering::Relaxed);
+                "stream_id"
+            },
+            {
+                values.fetch_add(1, Ordering::Relaxed);
+                String::from("must not allocate")
+            }
+        );
         assert_eq!(keys.load(Ordering::Relaxed), 0);
         assert_eq!(values.load(Ordering::Relaxed), 0);
     }
@@ -132,7 +142,11 @@ mod attribute_fast_path_tests {
         let values = AtomicUsize::new(0);
         let subscriber = tracing_subscriber::registry().with(Records(records.clone()));
         tracing::subscriber::with_default(subscriber, || {
-            let span = tracing::info_span!("attributes", stream_id = tracing::field::Empty, has_result = tracing::field::Empty);
+            let span = tracing::info_span!(
+                "attributes",
+                stream_id = tracing::field::Empty,
+                has_result = tracing::field::Empty
+            );
             super::record_if_enabled!(&span, "stream_id", {
                 values.fetch_add(1, Ordering::Relaxed);
                 "request-123"

@@ -10,26 +10,63 @@ use crate::runtime::{
 };
 use crate::{operators::InputStream, runtime::config::RuntimeDataConnectorConfig};
 
+/// Construction-time policy for one gRPC server connector.
+#[derive(Clone, Copy, Debug)]
+pub struct TonicDataSourceOptions {
+    /// Maximum queued response messages per streaming RPC, not a concurrency limit.
+    pub stream_buffer_capacity: usize,
+}
+
+impl Default for TonicDataSourceOptions {
+    fn default() -> Self {
+        Self {
+            stream_buffer_capacity: 16,
+        }
+    }
+}
+
 pub struct TonicDataSource {
     id: i32,
     name: String,
     state: Mutex<u8>,
+    stream_buffer_capacity: usize,
 }
 
 impl TonicDataSource {
-    fn new(id: i32, name: String) -> Arc<Self> {
+    fn new(id: i32, name: String, options: TonicDataSourceOptions) -> Arc<Self> {
         Arc::new(Self {
             id,
             name,
             state: Mutex::new(0),
+            stream_buffer_capacity: options.stream_buffer_capacity,
         })
     }
 
     pub fn from_config(
-        _environment: RuntimeEnvironment,
+        environment: RuntimeEnvironment,
         config: &GrpcDataConnectorConfig,
     ) -> RuntimeResult<Arc<Self>> {
-        Ok(Self::new(config.id, config.name.clone()))
+        Self::from_config_with_options(environment, config, TonicDataSourceOptions::default())
+    }
+
+    /// Customize this server independently of outbound clients in its maker.
+    pub fn from_config_with_options(
+        _environment: RuntimeEnvironment,
+        config: &GrpcDataConnectorConfig,
+        options: TonicDataSourceOptions,
+    ) -> RuntimeResult<Arc<Self>> {
+        if options.stream_buffer_capacity == 0
+            || options.stream_buffer_capacity > tokio::sync::Semaphore::MAX_PERMITS
+        {
+            return Err(RuntimeError::InvalidConfiguration(
+                "gRPC server stream_buffer_capacity is outside the supported channel capacity range".to_owned(),
+            ));
+        }
+        Ok(Self::new(config.id, config.name.clone(), options))
+    }
+
+    pub fn stream_buffer_capacity(&self) -> usize {
+        self.stream_buffer_capacity
     }
 
     pub fn from_input<T, R, E>(input: &InputStream<T, R, E>) -> RuntimeResult<Arc<Self>>

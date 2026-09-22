@@ -2,8 +2,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use serde::{Serialize, de::DeserializeOwned};
-
 use super::error::ErrorStream;
 use crate::runtime::{
     common::{ConstructionCell, Consumer, MessageContext, Payload, RuntimeStream},
@@ -30,7 +28,7 @@ impl<T, E> SinkStream<T, E>
 where
     T: Send + Sync + 'static,
     // Go: SinkStream[T,E].errorConsumer — MakeErrorStream[E](id, env), fresh.
-    E: Serialize + DeserializeOwned + Send + Sync + 'static,
+    E: Send + Sync + 'static,
 {
     pub fn make(config: &SinkStreamConfig, source: &Stream<T>) -> RuntimeResult<Arc<Self>> {
         source
@@ -130,8 +128,8 @@ where
     // Go: SinkStreamWithResult[T,R,E] embeds ConsumedStream[R] via
     // MakeSerde[R](env); errorConsumer via MakeErrorStream[E](id, env). Both
     // R and E are fresh — neither is the sink's consumed input type T.
-    R: Serialize + DeserializeOwned + Send + Sync + 'static,
-    E: Serialize + DeserializeOwned + Send + Sync + 'static,
+    R: Send + Sync + 'static,
+    E: Send + Sync + 'static,
 {
     pub fn make(config: &SinkStreamConfig, source: &Stream<T>) -> RuntimeResult<Arc<Self>> {
         let result_stream = Stream::new(&config.stream, source.environment().clone());
@@ -224,7 +222,7 @@ where
 {
     pub fn sink<E>(&self, config: &SinkStreamConfig) -> RuntimeResult<Arc<SinkStream<T, E>>>
     where
-        E: Serialize + DeserializeOwned + Send + Sync + 'static,
+        E: Send + Sync + 'static,
     {
         SinkStream::make(config, self)
     }
@@ -234,8 +232,8 @@ where
         config: &SinkStreamConfig,
     ) -> RuntimeResult<Arc<SinkStreamWithResult<T, R, E>>>
     where
-        R: Serialize + DeserializeOwned + Send + Sync + 'static,
-        E: Serialize + DeserializeOwned + Send + Sync + 'static,
+        R: Send + Sync + 'static,
+        E: Send + Sync + 'static,
     {
         SinkStreamWithResult::make(config, self)
     }

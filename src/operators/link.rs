@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde::{Serialize, de::DeserializeOwned};
 
 use crate::runtime::{
     common::{ConstructionCell, Consumer, MessageContext, Payload},
@@ -29,7 +28,7 @@ where
 
 impl<T> LinkStream<T>
 where
-    T: Serialize + DeserializeOwned + Send + Sync + 'static,
+    T: Send + Sync + 'static,
 {
     pub fn make(config: &CycleLinkStreamConfig, environment: RuntimeEnvironment) -> Arc<Self> {
         Arc::new(Self {

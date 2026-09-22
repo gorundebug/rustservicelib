@@ -735,11 +735,17 @@ async fn one_function_instance_is_shared_by_independently_configured_operators()
     let function = Arc::new(SharedMap(std::sync::atomic::AtomicUsize::new(0)));
     let first_map = first
         .stream()
-        .map(&StreamConfig::new(2, "First map").into(), Arc::clone(&function))
+        .map(
+            &StreamConfig::new(2, "First map").into(),
+            Arc::clone(&function),
+        )
         .unwrap();
     let second_map = second
         .stream()
-        .map(&StreamConfig::new(5, "Second map").into(), Arc::clone(&function))
+        .map(
+            &StreamConfig::new(5, "Second map").into(),
+            Arc::clone(&function),
+        )
         .unwrap();
     let first_capture = Arc::new(Capture::default());
     let second_capture = Arc::new(Capture::default());

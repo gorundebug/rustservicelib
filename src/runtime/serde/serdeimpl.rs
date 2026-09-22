@@ -15,7 +15,7 @@ pub struct SerdeError {
 }
 
 impl SerdeError {
-    fn new(message: impl Into<String>, offset: usize) -> Self {
+    pub fn new(message: impl Into<String>, offset: usize) -> Self {
         Self {
             message: message.into(),
             offset,

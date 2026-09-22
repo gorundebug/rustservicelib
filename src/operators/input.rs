@@ -2,8 +2,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use serde::{Serialize, de::DeserializeOwned};
-
 use crate::runtime::{
     common::{ConstructionCell, Consumer, MessageContext, Payload},
     config::{InputStreamConfig, RuntimeStreamConfig},
@@ -50,9 +48,9 @@ where
     // Go: MakeInputStream[T,R,E] always resolves a fresh serde for T (no
     // parent stream exists for a root); MakeErrorStream[E] does the same for
     // the error branch. Neither has anything to propagate from.
-    T: Serialize + DeserializeOwned + Send + Sync + 'static,
+    T: Send + Sync + 'static,
     R: Send + Sync + 'static,
-    E: Serialize + DeserializeOwned + Send + Sync + 'static,
+    E: Send + Sync + 'static,
 {
     pub fn new(config: &InputStreamConfig, environment: RuntimeEnvironment) -> Self {
         let error_stream = Stream::with_id(-config.stream.id, environment.clone());

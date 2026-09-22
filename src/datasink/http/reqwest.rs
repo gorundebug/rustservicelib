@@ -381,7 +381,10 @@ where
             }
         };
         let request_context = handler_context.clone().with_stream_id(new_stream_id());
-        crate::runtime::common::event_if_enabled!(&span, || tracing::event!(name: "begin_request", tracing::Level::INFO, {}));
+        crate::runtime::common::event_if_enabled!(
+            &span,
+            || tracing::event!(name: "begin_request", tracing::Level::INFO, {})
+        );
 
         self.active_requests.inc();
         let started_at = self

@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde::{Serialize, de::DeserializeOwned};
 
 use crate::runtime::{
     collector::short_type_name,
@@ -107,10 +106,7 @@ where
     T: Send + Sync + 'static,
     F: BuildSwitchFunction<T> + 'static,
 {
-    pub fn when(&self, config: &WhenStreamConfig) -> Stream<T>
-    where
-        T: Serialize + DeserializeOwned,
-    {
+    pub fn when(&self, config: &WhenStreamConfig) -> Stream<T> {
         let output = Stream::new(&config.stream, self.environment.clone());
         self.environment.register_graph_link(
             self.id,

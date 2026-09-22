@@ -154,7 +154,6 @@ async fn run_custom_sink(environment: RuntimeEnvironment, context: MessageContex
     assert!(!metrics.contains(r#"protocol="local""#));
 }
 
-
 #[tokio::test]
 async fn custom_sink_preserves_the_go_handler_lifecycle() {
     run_custom_sink(RuntimeEnvironment::default(), MessageContext::new()).await;
@@ -236,7 +235,9 @@ async fn custom_sink_groups_sampled_spans_without_unsampled_events() {
         } else {
             MessageContext::new()
         };
-        run_custom_sink(environment, context).with_subscriber(subscriber).await;
+        run_custom_sink(environment, context)
+            .with_subscriber(subscriber)
+            .await;
 
         let spans = capture.spans.lock().unwrap();
         if enabled && sampled {
@@ -251,8 +252,15 @@ async fn custom_sink_groups_sampled_spans_without_unsampled_events() {
             }
             assert_eq!(*capture.events.lock().unwrap(), 2);
         } else {
-            assert!(spans.is_empty(), "disabled/unsampled transport created a span");
-            assert_eq!(*capture.events.lock().unwrap(), 0, "disabled/unsampled transport emitted events");
+            assert!(
+                spans.is_empty(),
+                "disabled/unsampled transport created a span"
+            );
+            assert_eq!(
+                *capture.events.lock().unwrap(),
+                0,
+                "disabled/unsampled transport emitted events"
+            );
         }
     }
 }

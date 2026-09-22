@@ -29,7 +29,10 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use crate::{
     operators::InputStream,
     runtime::{
-        common::{Consumer, MessageContext, Payload, RuntimeEndpointConsumer, RuntimeStream, new_stream_id},
+        common::{
+            Consumer, MessageContext, Payload, RuntimeEndpointConsumer, RuntimeStream,
+            new_stream_id,
+        },
         config::{
             KafkaDataConnectorConfig, KafkaEndpointConfig, RuntimeDataConnectorConfig,
             RuntimeEndpointConfig,
@@ -916,7 +919,8 @@ where
         let span = if self.input_stream.stream().environment().tracing_enabled()
             && context.sampling_enabled()
         {
-            let (stream_name, pipeline_name, component_name) = self.input_stream.stream().tracing_labels();
+            let (stream_name, pipeline_name, component_name) =
+                self.input_stream.stream().tracing_labels();
             let span = tracing::info_span!(
                 "kafka.input",
                 stream = stream_name,
@@ -943,15 +947,21 @@ where
             span.clone(),
         ) {
             Ok(result) => {
-                crate::runtime::common::event_if_enabled!(&span, || tracing::event!(name: "begin_request", parent: &span, tracing::Level::INFO, {}));
+                crate::runtime::common::event_if_enabled!(
+                    &span,
+                    || tracing::event!(name: "begin_request", parent: &span, tracing::Level::INFO, {})
+                );
                 result
             }
             Err(error) => {
                 crate::runtime::telemetry::record_error_if_enabled!(&span, &error);
-                crate::runtime::common::event_if_enabled!(&span, || tracing::event!(name: "begin_request.error", parent: &span, tracing::Level::ERROR,
-                    error = %error,
-                    "Kafka source begin request failed"
-                ));
+                crate::runtime::common::event_if_enabled!(
+                    &span,
+                    || tracing::event!(name: "begin_request.error", parent: &span, tracing::Level::ERROR,
+                        error = %error,
+                        "Kafka source begin request failed"
+                    )
+                );
                 self.metrics.begin_request_failed.inc();
                 return;
             }
@@ -1061,7 +1071,10 @@ where
             result = Ok(());
             tracing::event!(name: "done_received", parent: &span, tracing::Level::INFO, {});
         } else if result_wait_cancelled {
-            crate::runtime::telemetry::record_error_if_enabled!(&span, "Kafka message context cancelled");
+            crate::runtime::telemetry::record_error_if_enabled!(
+                &span,
+                "Kafka message context cancelled"
+            );
             tracing::event!(name: "context_cancelled", parent: &span, tracing::Level::ERROR,
                 error = "Kafka message context cancelled"
             );

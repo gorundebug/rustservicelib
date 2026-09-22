@@ -9,8 +9,6 @@ use std::{
 use async_trait::async_trait;
 use futures::FutureExt;
 
-use serde::{Serialize, de::DeserializeOwned};
-
 use crate::runtime::{
     collector::Collector,
     common::{Consumer, MessageContext, Payload, RuntimeStream},
@@ -53,7 +51,9 @@ where
         values: JoinValues,
         out: &Collector<O>,
     ) -> bool {
-        self.as_ref().multi_join(context, stream, key, values, out).await
+        self.as_ref()
+            .multi_join(context, stream, key, values, out)
+            .await
     }
 }
 
@@ -124,7 +124,7 @@ impl<K, O, F> MultiJoinStream<K, O, F>
 where
     K: Clone + Eq + Hash + Send + Sync + 'static,
     // Go: runtime.MakeSerde[R](env) — fresh, O is the multi-join's output type.
-    O: Serialize + DeserializeOwned + Send + Sync + 'static,
+    O: Send + Sync + 'static,
     F: MultiJoinFunction<K, O> + 'static,
 {
     pub fn make<V>(
@@ -231,7 +231,7 @@ where
         function: F,
     ) -> RuntimeResult<Arc<MultiJoinStream<K, O, F>>>
     where
-        O: Serialize + DeserializeOwned + Send + Sync + 'static,
+        O: Send + Sync + 'static,
         F: MultiJoinFunction<K, O> + 'static,
     {
         MultiJoinStream::make(config, self, function)

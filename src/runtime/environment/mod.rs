@@ -52,6 +52,7 @@ use crate::runtime::{
     common::{ConstructionValue, MessageContext, RuntimeEndpointConsumer},
     config::{CallSemantics, RuntimeConfig, RuntimeStreamConfig, ServiceConfig},
     pool::{DelayPool, PriorityTaskPool, TaskPool},
+    serde::{SerdeProvider, SerdeRegistry, StreamSerde, StubSerde, make_stream_serde},
     store::Storage,
 };
 
@@ -93,6 +94,7 @@ pub(crate) trait RuntimeBuildable: Send + Sync {
 
 #[derive(Clone)]
 pub struct RuntimeEnvironment {
+    serdes: Arc<SerdeRegistry>,
     service_id: Option<i32>,
     runtime_config: Arc<ArcSwap<RuntimeConfig>>,
     graph_links: Arc<RwLock<Vec<GraphLink>>>,
@@ -116,6 +118,7 @@ impl Default for RuntimeEnvironment {
         let metrics_engine = Arc::new(PrometheusMetricsEngine::new());
         Self {
             service_id: None,
+            serdes: Arc::new(SerdeRegistry::default()),
             runtime_config: Arc::new(ArcSwap::from_pointee(RuntimeConfig::default())),
             graph_links: Arc::new(RwLock::new(Vec::new())),
             runtime_streams: Arc::new(RwLock::new(HashSet::new())),
@@ -136,6 +139,30 @@ impl Default for RuntimeEnvironment {
 }
 
 impl RuntimeEnvironment {
+    /// Install the service's custom/generated type resolver before building streams.
+    pub fn set_serde_provider(&self, provider: SerdeProvider) -> RuntimeResult<()> {
+        self.serdes.set_provider(self.service_id, provider)
+    }
+
+    pub fn get_serde<T: Send + Sync + 'static>(&self) -> RuntimeResult<Arc<dyn StreamSerde<T>>> {
+        self.serdes.get::<T>(self)
+    }
+
+    /// Like Go's MakeSerde, unsupported/failed resolutions leave in-memory
+    /// processing available and fail only when serialization is attempted.
+    pub fn make_serde<T: Send + Sync + 'static>(&self) -> Arc<dyn StreamSerde<T>> {
+        match self.get_serde::<T>() {
+            Ok(serde) => serde,
+            Err(error) => {
+                ::tracing::error!(%error, value_type = std::any::type_name::<T>(), "serde resolution failed");
+                self.serdes.cache(
+                    self.service_id,
+                    make_stream_serde(Arc::new(StubSerde::<T>::new())),
+                )
+            }
+        }
+    }
+
     pub(crate) fn spawn_parallel<F>(&self, future: F)
     where
         F: Future<Output = ()> + Send + 'static,

@@ -94,7 +94,10 @@ impl ResultContext {
 
     pub fn done(&self) {
         if let Some(span) = &self.span {
-            crate::runtime::common::event_if_enabled!(&span, || tracing::event!(name: "done_called", tracing::Level::INFO, {}));
+            crate::runtime::common::event_if_enabled!(
+                &span,
+                || tracing::event!(name: "done_called", tracing::Level::INFO, {})
+            );
         }
         self.done.cancel();
     }
@@ -149,6 +152,74 @@ where
         result: &HandlerResult,
         handler_state: Arc<tokio::sync::Mutex<HandlerState>>,
     );
+}
+
+// Multiple endpoint consumers may share a single business handler. Request
+// state and transport ownership remain local to each consumer.
+#[async_trait]
+impl<HandlerState, ReqT, ResR, T, R, E, H> EndpointHandler<HandlerState, ReqT, ResR, T, R, E>
+    for Arc<H>
+where
+    HandlerState: Send + 'static,
+    ReqT: Send + 'static,
+    ResR: Send + 'static,
+    T: Send + Sync + 'static,
+    R: Send + Sync + 'static,
+    E: Send + Sync + 'static,
+    H: EndpointHandler<HandlerState, ReqT, ResR, T, R, E> + ?Sized,
+{
+    async fn begin_request(
+        &self,
+        context: MessageContext,
+        stream: StreamContext<T, R, E>,
+    ) -> HandlerResult<(MessageContext, HandlerState)> {
+        self.as_ref().begin_request(context, stream).await
+    }
+
+    async fn consume_message(
+        &self,
+        context: MessageContext,
+        stream: StreamContext<T, R, E>,
+        handler_state: Arc<tokio::sync::Mutex<HandlerState>>,
+        value: Payload<T>,
+        sender: &dyn Sender<ReqT>,
+        result_context: ResultContext,
+    ) -> HandlerResult {
+        self.as_ref()
+            .consume_message(
+                context,
+                stream,
+                handler_state,
+                value,
+                sender,
+                result_context,
+            )
+            .await
+    }
+
+    async fn handle_response(
+        &self,
+        context: MessageContext,
+        stream: StreamContext<T, R, E>,
+        handler_state: Arc<tokio::sync::Mutex<HandlerState>>,
+        response: ResR,
+    ) -> HandlerResult {
+        self.as_ref()
+            .handle_response(context, stream, handler_state, response)
+            .await
+    }
+
+    async fn end_request(
+        &self,
+        context: MessageContext,
+        stream: StreamContext<T, R, E>,
+        result: &HandlerResult,
+        handler_state: Arc<tokio::sync::Mutex<HandlerState>>,
+    ) {
+        self.as_ref()
+            .end_request(context, stream, result, handler_state)
+            .await;
+    }
 }
 
 pub(crate) struct RequestSender<ReqT> {
@@ -324,7 +395,10 @@ impl EndpointMetrics {
 #[cfg(test)]
 mod result_tracing_tests {
     use super::ResultContext;
-    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     use tracing::{Event, Subscriber};
     use tracing_subscriber::{Layer, layer::Context, prelude::*};
 

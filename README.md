@@ -137,6 +137,42 @@ same pool. Rust does not support Temporal connectors.
 
 HTTP and gRPC propagate stream identity, trace context, baggage, and remaining deadlines where the transport supports them. Process-local scheduling metadata, such as priority, stays local.
 
+### gRPC streaming queues
+
+Each gRPC connector has its own immutable `stream_buffer_capacity`. The default
+is 16 messages per RPC: client connectors buffer outbound request messages, and
+server connectors buffer outbound response messages. Queues remain separate for
+concurrent RPCs; this setting does not limit the number of RPCs or worker threads.
+It counts messages, not bytes. A full queue asynchronously waits for capacity.
+
+Set the policy in the generated service's **user-owned** `custom_makers_init`
+hook in `src/internal/app/service.rs`. For example, for a connector whose maker
+field is `ct_proxy_data_sink`:
+
+```rust
+use std::sync::Arc;
+use servicelib::datasink::grpc::{TonicDataSink, TonicDataSinkOptions};
+
+// Inside custom_makers_init:
+makers.ct_proxy_data_sink = Arc::new(|_context, environment, config| {
+    Box::pin(async move {
+        TonicDataSink::from_config_with_options(
+            environment,
+            config,
+            TonicDataSinkOptions { stream_buffer_capacity: 64 },
+        )
+    })
+});
+```
+
+For a server connector, replace its data-source maker and use
+`servicelib::datasource::grpc::{TonicDataSource, TonicDataSourceOptions}` with
+`TonicDataSource::from_config_with_options`. Server and client policies are
+independent. Zero and capacities above Tokio's channel limit are rejected at
+construction. Existing `from_config` calls keep the default policy. These
+options are not YAML settings and do not change during configuration reload.
+Standard regeneration preserves the user-owned service hook.
+
 ---
 
 ## Configuration And Hot Reload

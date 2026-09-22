@@ -2,8 +2,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use serde::{Serialize, de::DeserializeOwned};
-
 use super::error::ErrorStream;
 use crate::runtime::{
     collector::Collector,
@@ -47,7 +45,9 @@ where
         out: &Collector<R>,
         error: &Collector<E>,
     ) {
-        self.as_ref().process(context, stream, value, out, error).await
+        self.as_ref()
+            .process(context, stream, value, out, error)
+            .await
     }
 }
 
@@ -70,8 +70,8 @@ where
     // Go-aligned: output serde (R) and error serde (E) are both freshly
     // resolved (Go: runtime.MakeSerde[R](env) / MakeErrorStream[E](id, env)) —
     // both are new types at this point in the graph, not the input type T.
-    R: Serialize + DeserializeOwned + Send + Sync + 'static,
-    E: Serialize + DeserializeOwned + Send + Sync + 'static,
+    R: Send + Sync + 'static,
+    E: Send + Sync + 'static,
     F: ProcessFunction<T, R, E> + 'static,
 {
     pub fn make(
@@ -106,8 +106,8 @@ where
         function: F,
     ) -> RuntimeResult<(Stream<R>, Stream<E>)>
     where
-        R: Serialize + DeserializeOwned + Send + Sync + 'static,
-        E: Serialize + DeserializeOwned + Send + Sync + 'static,
+        R: Send + Sync + 'static,
+        E: Send + Sync + 'static,
         F: ProcessFunction<T, R, E> + 'static,
     {
         ProcessStream::make(config, self, function)

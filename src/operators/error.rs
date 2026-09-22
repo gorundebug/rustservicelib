@@ -1,5 +1,3 @@
-use serde::{Serialize, de::DeserializeOwned};
-
 use crate::runtime::{
     common::{MessageContext, Payload},
     config::StreamConfig,
@@ -25,7 +23,7 @@ where
 
 impl<E> ErrorStream<E>
 where
-    E: Serialize + DeserializeOwned + Send + Sync + 'static,
+    E: Send + Sync + 'static,
 {
     pub fn new(owner: &StreamConfig, environment: RuntimeEnvironment) -> Self {
         Self {

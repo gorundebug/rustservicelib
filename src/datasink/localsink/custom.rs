@@ -177,14 +177,19 @@ where
             tracing::Span::none()
         };
         let context = context.with_span_context(&span);
-        let stream_id = crate::runtime::common::scope_if_enabled!(&span, || self.handler.get_stream_id(&context, &value));
+        let stream_id = crate::runtime::common::scope_if_enabled!(&span, || self
+            .handler
+            .get_stream_id(&context, &value));
         let context = context.with_stream_id(stream_id);
         let (handler_context, mut handler_state) = crate::runtime::common::instrument_if_enabled!(
             self.handler.begin_request(context, stream.as_ref()),
             span.clone(),
         );
         if !span.is_disabled() {
-            crate::runtime::common::event_if_enabled!(&span, || tracing::event!(name: "begin_request", tracing::Level::INFO, {}));
+            crate::runtime::common::event_if_enabled!(
+                &span,
+                || tracing::event!(name: "begin_request", tracing::Level::INFO, {})
+            );
         }
         self.active_requests.inc();
         let started_at = self.request_duration.is_enabled().then(Instant::now);

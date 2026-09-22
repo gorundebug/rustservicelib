@@ -24,7 +24,10 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use crate::{
     operators::InputStream,
     runtime::{
-        common::{Consumer, MessageContext, Payload, RuntimeEndpointConsumer, RuntimeStream, new_stream_id},
+        common::{
+            Consumer, MessageContext, Payload, RuntimeEndpointConsumer, RuntimeStream,
+            new_stream_id,
+        },
         config::{HttpDataConnectorConfig, HttpEndpointConfig, RuntimeDataConnectorConfig},
         datasource::{DataSource, PendingRequests, StreamContext},
         environment::{
@@ -404,11 +407,6 @@ where
     R: Send + Sync + 'static,
     E: Send + Sync + 'static,
 {
-    /// Apply reloadable endpoint and service defaults without rebuilding the
-    /// generated transport graph. Handlers that do not cache configuration
-    /// can keep the default no-op implementation.
-    fn reload(&self, _config: &HttpEndpointConfig, _default_timeout_ms: u64) {}
-
     async fn begin_request(
         &self,
         context: MessageContext,
@@ -702,7 +700,8 @@ where
         let span = if self.input_stream.stream().environment().tracing_enabled()
             && context.sampling_enabled()
         {
-            let (stream_name, pipeline_name, component_name) = self.input_stream.stream().tracing_labels();
+            let (stream_name, pipeline_name, component_name) =
+                self.input_stream.stream().tracing_labels();
             let span = tracing::info_span!(
                 "http.input",
                 stream = stream_name,
@@ -744,7 +743,10 @@ where
                 return data.into_response();
             }
         };
-        crate::runtime::common::event_if_enabled!(&span, || tracing::event!(name: "begin_request", tracing::Level::INFO, {}));
+        crate::runtime::common::event_if_enabled!(
+            &span,
+            || tracing::event!(name: "begin_request", tracing::Level::INFO, {})
+        );
         let context = if context.stream_id().is_some() {
             context
         } else {
@@ -844,9 +846,15 @@ where
         };
         if result_wait_cancelled && result_context.done.is_cancelled() {
             result = Ok(());
-            crate::runtime::common::event_if_enabled!(&span, || tracing::event!(name: "done_received", tracing::Level::INFO, {}));
+            crate::runtime::common::event_if_enabled!(
+                &span,
+                || tracing::event!(name: "done_received", tracing::Level::INFO, {})
+            );
         } else if result_wait_cancelled {
-            crate::runtime::telemetry::record_error_if_enabled!(&span, "HTTP request context cancelled");
+            crate::runtime::telemetry::record_error_if_enabled!(
+                &span,
+                "HTTP request context cancelled"
+            );
             crate::runtime::common::event_if_enabled!(&span, || {
                 tracing::event!(
                     name: "context_cancelled",
@@ -903,7 +911,10 @@ where
             .is_some_and(|current| Arc::ptr_eq(&current, &pending))
         {
             self.late_result.inc();
-            crate::runtime::common::event_if_enabled!(&pending.span, || tracing::event!(name: "late_result", tracing::Level::WARN, {}));
+            crate::runtime::common::event_if_enabled!(
+                &pending.span,
+                || tracing::event!(name: "late_result", tracing::Level::WARN, {})
+            );
             return;
         }
         let message_id = crate::runtime::common::instrument_if_enabled!(

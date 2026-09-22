@@ -57,7 +57,9 @@ where
         _error: RuntimeError,
         _out: &Collector<T>,
     ) {
-        self.as_ref().delay_error(_context, _stream, _value, _error, _out).await
+        self.as_ref()
+            .delay_error(_context, _stream, _value, _error, _out)
+            .await
     }
 }
 

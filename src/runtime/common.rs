@@ -263,13 +263,19 @@ pub(crate) struct ContextKey<T> {
 
 impl<T> ContextKey<T> {
     pub(crate) fn new() -> Self {
-        Self { identity: Arc::new(()), _value: PhantomData }
+        Self {
+            identity: Arc::new(()),
+            _value: PhantomData,
+        }
     }
 }
 
 impl<T> Clone for ContextKey<T> {
     fn clone(&self) -> Self {
-        Self { identity: Arc::clone(&self.identity), _value: PhantomData }
+        Self {
+            identity: Arc::clone(&self.identity),
+            _value: PhantomData,
+        }
     }
 }
 
@@ -281,7 +287,9 @@ struct LocalContextValue {
 
 impl std::fmt::Debug for LocalContextValue {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("LocalContextValue").finish_non_exhaustive()
+        formatter
+            .debug_struct("LocalContextValue")
+            .finish_non_exhaustive()
     }
 }
 
@@ -338,15 +346,22 @@ impl MessageContext {
     }
 
     pub(crate) fn with_local_value<T: Send + Sync + 'static>(
-        mut self, key: &ContextKey<T>, value: Arc<T>,
+        mut self,
+        key: &ContextKey<T>,
+        value: Arc<T>,
     ) -> Self {
         self.local_values = Some(Arc::new(LocalContextValue {
-            key: Arc::clone(&key.identity), value, parent: self.local_values.take(),
+            key: Arc::clone(&key.identity),
+            value,
+            parent: self.local_values.take(),
         }));
         self
     }
 
-    pub(crate) fn local_value<T: Send + Sync + 'static>(&self, key: &ContextKey<T>) -> Option<Arc<T>> {
+    pub(crate) fn local_value<T: Send + Sync + 'static>(
+        &self,
+        key: &ContextKey<T>,
+    ) -> Option<Arc<T>> {
         let mut current = self.local_values.as_deref();
         while let Some(binding) = current {
             if Arc::ptr_eq(&binding.key, &key.identity) {
@@ -649,7 +664,8 @@ where
 /// Return true after the last result required by this invocation.
 #[async_trait]
 pub trait SubStreamCollector<R>: Send + Sync
-where R: Send + Sync + 'static,
+where
+    R: Send + Sync + 'static,
 {
     async fn out(&self, context: MessageContext, payload: Payload<R>) -> bool;
 }
@@ -670,10 +686,15 @@ where
 
 #[async_trait]
 pub trait CallableSubStream<T, R>: Send + Sync
-where T: Send + Sync + 'static, R: Send + Sync + 'static,
+where
+    T: Send + Sync + 'static,
+    R: Send + Sync + 'static,
 {
     async fn consume(
-        &self, context: MessageContext, value: T, collector: Arc<dyn SubStreamCollector<R>>,
+        &self,
+        context: MessageContext,
+        value: T,
+        collector: Arc<dyn SubStreamCollector<R>>,
     ) -> crate::runtime::environment::RuntimeResult<()>;
 }
 
