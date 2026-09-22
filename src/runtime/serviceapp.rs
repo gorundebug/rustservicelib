@@ -479,6 +479,13 @@ impl ServiceApp {
                     let method = match endpoint.http_method_type {
                         crate::api::HTTPMethodType::GET => axum::http::Method::GET,
                         crate::api::HTTPMethodType::POST => axum::http::Method::POST,
+                        crate::api::HTTPMethodType::PUT => axum::http::Method::PUT,
+                        crate::api::HTTPMethodType::PATCH => axum::http::Method::PATCH,
+                        crate::api::HTTPMethodType::DELETE => axum::http::Method::DELETE,
+                        crate::api::HTTPMethodType::HEAD => axum::http::Method::HEAD,
+                        crate::api::HTTPMethodType::OPTIONS => axum::http::Method::OPTIONS,
+                        crate::api::HTTPMethodType::TRACE => axum::http::Method::TRACE,
+                        crate::api::HTTPMethodType::CONNECT => axum::http::Method::CONNECT,
                         crate::api::HTTPMethodType::Undefined => return None,
                     };
                     Some(HttpRouteMetricSpec {

@@ -27,6 +27,25 @@ where
     );
 }
 
+// Sharing a business function does not share operator configuration or state.
+#[async_trait]
+impl<T, R, F> FlatMapFunction<T, R> for Arc<F>
+where
+    T: Send + Sync + 'static,
+    R: Send + Sync + 'static,
+    F: FlatMapFunction<T, R> + ?Sized,
+{
+    async fn flat_map(
+        &self,
+        context: MessageContext,
+        stream: &dyn RuntimeStream,
+        value: &T,
+        out: &Collector<R>,
+    ) {
+        self.as_ref().flat_map(context, stream, value, out).await
+    }
+}
+
 pub struct FlatMapStream<T, R, F>
 where
     T: Send + Sync + 'static,

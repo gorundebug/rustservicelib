@@ -29,6 +29,26 @@ where
     );
 }
 
+// Sharing a business function does not share operator configuration or state.
+#[async_trait]
+impl<T, K, V, F> KeyByFunction<T, K, V> for Arc<F>
+where
+    T: Send + Sync + 'static,
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
+    F: KeyByFunction<T, K, V> + ?Sized,
+{
+    async fn key_by(
+        &self,
+        context: MessageContext,
+        stream: &dyn RuntimeStream,
+        value: &T,
+        out: &Collector<KeyValue<K, V>>,
+    ) {
+        self.as_ref().key_by(context, stream, value, out).await
+    }
+}
+
 pub struct KeyByStream<T, K, V, F>
 where
     T: Send + Sync + 'static,

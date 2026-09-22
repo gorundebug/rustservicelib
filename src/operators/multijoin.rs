@@ -37,6 +37,26 @@ where
     ) -> bool;
 }
 
+// Sharing a business function does not share operator configuration or state.
+#[async_trait]
+impl<K, O, F> MultiJoinFunction<K, O> for Arc<F>
+where
+    K: Send + Sync + 'static,
+    O: Send + Sync + 'static,
+    F: MultiJoinFunction<K, O> + ?Sized,
+{
+    async fn multi_join(
+        &self,
+        context: MessageContext,
+        stream: &dyn RuntimeStream,
+        key: K,
+        values: JoinValues,
+        out: &Collector<O>,
+    ) -> bool {
+        self.as_ref().multi_join(context, stream, key, values, out).await
+    }
+}
+
 pub fn downcast_join_values<T>(values: &JoinValues, index: usize) -> Vec<T>
 where
     T: Clone + Send + Sync + 'static,

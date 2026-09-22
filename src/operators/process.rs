@@ -30,6 +30,27 @@ where
     );
 }
 
+// Sharing a business function does not share operator configuration or state.
+#[async_trait]
+impl<T, R, E, F> ProcessFunction<T, R, E> for Arc<F>
+where
+    T: Send + Sync + 'static,
+    R: Send + Sync + 'static,
+    E: Send + Sync + 'static,
+    F: ProcessFunction<T, R, E> + ?Sized,
+{
+    async fn process(
+        &self,
+        context: MessageContext,
+        stream: &dyn RuntimeStream,
+        value: &T,
+        out: &Collector<R>,
+        error: &Collector<E>,
+    ) {
+        self.as_ref().process(context, stream, value, out, error).await
+    }
+}
+
 pub struct ProcessStream<T, R, E, F>
 where
     T: Send + Sync + 'static,

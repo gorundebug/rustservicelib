@@ -34,6 +34,29 @@ where
     ) -> bool;
 }
 
+// Sharing a business function does not share operator configuration or state.
+#[async_trait]
+impl<K, L, R, O, F> JoinFunction<K, L, R, O> for Arc<F>
+where
+    K: Send + Sync + 'static,
+    L: Clone + Send + Sync + 'static,
+    R: Clone + Send + Sync + 'static,
+    O: Send + Sync + 'static,
+    F: JoinFunction<K, L, R, O> + ?Sized,
+{
+    async fn join(
+        &self,
+        context: MessageContext,
+        stream: &dyn RuntimeStream,
+        key: K,
+        left: Vec<L>,
+        right: Vec<R>,
+        out: &Collector<O>,
+    ) -> bool {
+        self.as_ref().join(context, stream, key, left, right, out).await
+    }
+}
+
 pub struct JoinStream<K, L, R, O, F>
 where
     K: Clone + Eq + Hash + Send + Sync + 'static,

@@ -635,6 +635,13 @@ where
         let expected_method = match config.http_method_type {
             crate::api::HTTPMethodType::GET => Method::GET,
             crate::api::HTTPMethodType::POST => Method::POST,
+            crate::api::HTTPMethodType::PUT => Method::PUT,
+            crate::api::HTTPMethodType::PATCH => Method::PATCH,
+            crate::api::HTTPMethodType::DELETE => Method::DELETE,
+            crate::api::HTTPMethodType::HEAD => Method::HEAD,
+            crate::api::HTTPMethodType::OPTIONS => Method::OPTIONS,
+            crate::api::HTTPMethodType::TRACE => Method::TRACE,
+            crate::api::HTTPMethodType::CONNECT => Method::CONNECT,
             crate::api::HTTPMethodType::Undefined => return Router::new(),
         };
         Router::new().route(

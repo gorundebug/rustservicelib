@@ -258,6 +258,13 @@ where
     let method = match endpoint_config.http_method_type {
         crate::api::HTTPMethodType::GET => "GET",
         crate::api::HTTPMethodType::POST => "POST",
+        crate::api::HTTPMethodType::PUT => "PUT",
+        crate::api::HTTPMethodType::PATCH => "PATCH",
+        crate::api::HTTPMethodType::DELETE => "DELETE",
+        crate::api::HTTPMethodType::HEAD => "HEAD",
+        crate::api::HTTPMethodType::OPTIONS => "OPTIONS",
+        crate::api::HTTPMethodType::TRACE => "TRACE",
+        crate::api::HTTPMethodType::CONNECT => "CONNECT",
         crate::api::HTTPMethodType::Undefined => "",
     };
     let metric_url = format!(

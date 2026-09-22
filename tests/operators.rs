@@ -698,3 +698,62 @@ async fn source_context_preserves_shared_payload_identity() {
     let captured = capture.0.lock().unwrap();
     assert!(Arc::ptr_eq(&original, &captured[0].1));
 }
+
+#[tokio::test]
+async fn one_function_instance_is_shared_by_independently_configured_operators() {
+    struct SharedMap(std::sync::atomic::AtomicUsize);
+
+    #[async_trait]
+    impl MapFunction<i32, i32> for SharedMap {
+        async fn map(
+            &self,
+            context: MessageContext,
+            _stream: &dyn RuntimeStream,
+            value: &i32,
+            out: &Collector<i32>,
+        ) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            out.collect(context, *value * 2).await;
+        }
+    }
+
+    let environment = test_environment(Vec::new(), Vec::new());
+    let first = servicelib::operators::InputStream::<i32, (), ()>::new(
+        &InputStreamConfig {
+            stream: StreamConfig::new(1, "First input"),
+            endpoint_id: 10,
+        },
+        environment.clone(),
+    );
+    let second = servicelib::operators::InputStream::<i32, (), ()>::new(
+        &InputStreamConfig {
+            stream: StreamConfig::new(4, "Second input"),
+            endpoint_id: 11,
+        },
+        environment,
+    );
+    let function = Arc::new(SharedMap(std::sync::atomic::AtomicUsize::new(0)));
+    let first_map = first
+        .stream()
+        .map(&StreamConfig::new(2, "First map").into(), Arc::clone(&function))
+        .unwrap();
+    let second_map = second
+        .stream()
+        .map(&StreamConfig::new(5, "Second map").into(), Arc::clone(&function))
+        .unwrap();
+    let first_capture = Arc::new(Capture::default());
+    let second_capture = Arc::new(Capture::default());
+    first_map.set_consumer(Arc::clone(&first_capture), 3);
+    second_map.set_consumer(Arc::clone(&second_capture), 6);
+
+    tokio::join!(
+        first.consume(MessageContext::new(), 21),
+        second.consume(MessageContext::new(), 7),
+    );
+
+    assert_eq!(function.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(first_map.id(), 2);
+    assert_eq!(second_map.id(), 5);
+    assert_eq!(*first_capture.0.lock().unwrap()[0].1, 42);
+    assert_eq!(*second_capture.0.lock().unwrap()[0].1, 14);
+}

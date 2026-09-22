@@ -33,6 +33,34 @@ where
     }
 }
 
+// Sharing a business function does not share operator configuration or state.
+#[async_trait]
+impl<T, F> DelayFunction<T> for Arc<F>
+where
+    T: Send + Sync + 'static,
+    F: DelayFunction<T> + ?Sized,
+{
+    async fn duration(
+        &self,
+        context: MessageContext,
+        stream: &dyn RuntimeStream,
+        value: &T,
+    ) -> Duration {
+        self.as_ref().duration(context, stream, value).await
+    }
+
+    async fn delay_error(
+        &self,
+        _context: MessageContext,
+        _stream: &dyn RuntimeStream,
+        _value: &T,
+        _error: RuntimeError,
+        _out: &Collector<T>,
+    ) {
+        self.as_ref().delay_error(_context, _stream, _value, _error, _out).await
+    }
+}
+
 pub struct DelayStream<T, F>
 where
     T: Send + Sync + 'static,

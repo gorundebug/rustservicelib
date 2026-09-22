@@ -72,6 +72,20 @@ pub enum HTTPMethodType {
     GET,
     #[serde(rename = "POST")]
     POST,
+    #[serde(rename = "PUT")]
+    PUT,
+    #[serde(rename = "PATCH")]
+    PATCH,
+    #[serde(rename = "DELETE")]
+    DELETE,
+    #[serde(rename = "HEAD")]
+    HEAD,
+    #[serde(rename = "OPTIONS")]
+    OPTIONS,
+    #[serde(rename = "TRACE")]
+    TRACE,
+    #[serde(rename = "CONNECT")]
+    CONNECT,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize_repr, Deserialize_repr)]

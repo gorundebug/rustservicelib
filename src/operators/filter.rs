@@ -17,6 +17,18 @@ where
     async fn filter(&self, context: MessageContext, stream: &dyn RuntimeStream, value: &T) -> bool;
 }
 
+// Sharing a business function does not share operator configuration or state.
+#[async_trait]
+impl<T, F> FilterFunction<T> for Arc<F>
+where
+    T: Send + Sync + 'static,
+    F: FilterFunction<T> + ?Sized,
+{
+    async fn filter(&self, context: MessageContext, stream: &dyn RuntimeStream, value: &T) -> bool {
+        self.as_ref().filter(context, stream, value).await
+    }
+}
+
 pub struct FilterStream<T, F>
 where
     T: Send + Sync + 'static,
