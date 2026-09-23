@@ -31,7 +31,7 @@ use crate::{
     runtime::{
         common::{
             Consumer, MessageContext, Payload, RuntimeEndpointConsumer, RuntimeStream,
-            new_stream_id,
+            STREAM_ID_HEADER, new_stream_id,
         },
         config::{
             KafkaDataConnectorConfig, KafkaEndpointConfig, RuntimeDataConnectorConfig,
@@ -132,7 +132,7 @@ where
 {
     callbacks: Mutex<HashMap<String, ResultCallback<HandlerState, T, R, E>>>,
     done: CancellationToken,
-    span: tracing::Span,
+    span: Option<tracing::Span>,
 }
 
 impl<HandlerState, T, R, E> ResultContext<HandlerState, T, R, E>
@@ -142,7 +142,7 @@ where
     R: Send + Sync + 'static,
     E: Send + Sync + 'static,
 {
-    fn new(span: tracing::Span) -> Self {
+    fn new(span: Option<tracing::Span>) -> Self {
         Self {
             callbacks: Mutex::new(HashMap::new()),
             done: CancellationToken::new(),
@@ -162,7 +162,12 @@ where
     }
 
     pub fn done(&self) {
-        tracing::event!(name: "done_called", parent: &self.span, tracing::Level::INFO, {});
+        if let Some(span) = self.span.as_ref() {
+            crate::runtime::common::event_if_enabled!(
+                span,
+                || tracing::event!(name: "done_called", parent: span, tracing::Level::INFO, {})
+            );
+        }
         self.done.cancel();
     }
 }
@@ -220,7 +225,7 @@ where
     result_context: Arc<ResultContext<HandlerState, T, R, E>>,
     lifetime: RwLock<()>,
     started_at: Option<Instant>,
-    span: tracing::Span,
+    span: Option<tracing::Span>,
 }
 
 struct Concurrency {
@@ -262,6 +267,7 @@ where
     input_stream: InputStream<T, R, E>,
     stream_context: StreamContext<T, R, E>,
     endpoint_name: String,
+    tracing_enabled: bool,
     handler: Arc<H>,
     pending: RotatingMap<String, Arc<KafkaResult<HandlerState, T, R, E>>>,
     concurrency: Concurrency,
@@ -722,6 +728,7 @@ where
         self.endpoint_consumer.start();
         *self.context.lock().await = Some(context.clone());
         let endpoint_consumer = Arc::clone(&self.endpoint_consumer);
+        let tracing_enabled = self.environment.tracing_enabled();
         let stop = self.stop.clone();
         *task = Some(tokio::spawn(async move {
             let mut lanes = HashMap::new();
@@ -746,6 +753,11 @@ where
                         headers
                             .iter()
                             .filter_map(|header| {
+                                if !tracing_enabled
+                                    && !header.key.eq_ignore_ascii_case("x-stream-id")
+                                {
+                                    return None;
+                                }
                                 let key = header.key.to_ascii_lowercase();
                                 matches!(
                                     key.as_str(),
@@ -909,15 +921,22 @@ where
         }
         let _active_request = ActiveRequestGuard(&self.concurrency);
 
-        let mut metadata = context.metadata().clone();
-        metadata.extend(message.transport_metadata.clone());
+        let tracing_enabled = self.tracing_enabled;
+        let context = if tracing_enabled {
+            let mut metadata = context.metadata().clone();
+            metadata.extend(message.transport_metadata.clone());
+            context.with_metadata(metadata)
+        } else if let Some(stream_id) = message.transport_metadata.get(STREAM_ID_HEADER) {
+            context.with_stream_id(stream_id.clone())
+        } else {
+            context
+        };
         let context = crate::runtime::datasource::apply_endpoint_tracing(
-            context.with_metadata(metadata),
+            context,
             self.input_stream.stream().environment(),
             self.input_stream.endpoint_id(),
         );
-        let span = if self.input_stream.stream().environment().tracing_enabled()
-            && context.sampling_enabled()
+        let span = if tracing_enabled && context.sampling_enabled()
         {
             let (stream_name, pipeline_name, component_name) =
                 self.input_stream.stream().tracing_labels();
@@ -936,33 +955,43 @@ where
             if !span.is_disabled() {
                 let _ = span.set_parent(context.open_telemetry_context().clone());
             }
-            span
+            (!span.is_disabled()).then_some(span)
         } else {
-            tracing::Span::none()
+            None
         };
-        let context = context.with_span_context(&span);
-        let (context, handler_state) = match crate::runtime::common::instrument_if_enabled!(
+        let context = if let Some(span) = span.as_ref() {
+            context.with_span_context(span)
+        } else {
+            context
+        };
+        let (context, handler_state) = match crate::runtime::common::instrument_if_present!(
             self.handler
                 .begin_request(context, self.stream_context.clone()),
             span.clone(),
         ) {
             Ok(result) => {
-                crate::runtime::common::event_if_enabled!(
-                    &span,
-                    || tracing::event!(name: "begin_request", parent: &span, tracing::Level::INFO, {})
-                );
+                if let Some(trace_span) = span.as_ref() {
+                    crate::runtime::common::event_if_enabled!(
+                        trace_span,
+                        || tracing::event!(name: "begin_request", parent: trace_span, tracing::Level::INFO, {})
+                    );
+                }
                 result
             }
             Err(error) => {
-                crate::runtime::telemetry::record_error_if_enabled!(&span, &error);
-                crate::runtime::common::event_if_enabled!(
-                    &span,
-                    || tracing::event!(name: "begin_request.error", parent: &span, tracing::Level::ERROR,
-                        error = %error,
-                        "Kafka source begin request failed"
-                    )
-                );
-                self.metrics.begin_request_failed.inc();
+                crate::runtime::telemetry::record_error_if_present!(span.as_ref(), &error);
+                if let Some(trace_span) = span.as_ref() {
+                    crate::runtime::common::event_if_enabled!(
+                        trace_span,
+                        || tracing::event!(name: "begin_request.error", parent: trace_span, tracing::Level::ERROR,
+                            error = %error,
+                            "Kafka source begin request failed"
+                        )
+                    );
+                }
+                if self.metrics.request_duration.is_enabled() {
+                    self.metrics.begin_request_failed.inc();
+                }
                 return;
             }
         };
@@ -972,10 +1001,10 @@ where
             context.with_stream_id(new_stream_id())
         };
         let stream_id = context.stream_id().unwrap().to_owned();
-        crate::runtime::telemetry::record_if_enabled!(&span, "stream_id", stream_id.as_str());
+        crate::runtime::telemetry::record_if_present!(span.as_ref(), "stream_id", stream_id.as_str());
         let handler_state = Arc::new(AsyncMutex::new(handler_state));
         let has_result = self.input_stream.result_stream().is_some();
-        crate::runtime::telemetry::record_if_enabled!(&span, "has_result", has_result);
+        crate::runtime::telemetry::record_if_present!(span.as_ref(), "has_result", has_result);
         let result_context = Arc::new(ResultContext::new(span.clone()));
         let kafka_result = Arc::new(KafkaResult {
             handler_state: Arc::clone(&handler_state),
@@ -989,18 +1018,20 @@ where
             span: span.clone(),
         });
 
-        self.metrics.active_requests.inc();
+        if kafka_result.started_at.is_some() {
+            self.metrics.active_requests.inc();
+        }
         if has_result {
             if let Err(error) = self
                 .pending
                 .set(stream_id.clone(), Arc::clone(&kafka_result))
             {
                 let result: HandlerResult = Err(Box::new(error));
-                crate::runtime::telemetry::record_error_if_enabled!(
-                    &span,
+                crate::runtime::telemetry::record_error_if_present!(
+                    span.as_ref(),
                     result.as_ref().expect_err("duplicate pending request"),
                 );
-                crate::runtime::common::instrument_if_enabled!(
+                crate::runtime::common::instrument_if_present!(
                     self.handler.end_request(
                         context,
                         self.stream_context.clone(),
@@ -1009,19 +1040,19 @@ where
                     ),
                     span,
                 );
-                self.metrics.active_requests.dec();
                 if let Some(started_at) = kafka_result.started_at {
+                    self.metrics.active_requests.dec();
                     self.metrics
                         .request_duration
                         .observe(started_at.elapsed().as_secs_f64());
+                    self.metrics.request_errors.inc();
                 }
-                self.metrics.request_errors.inc();
                 return;
             }
             self.metrics.pending_requests.add(&stream_id);
         }
 
-        let mut result = crate::runtime::common::instrument_if_enabled!(
+        let mut result = crate::runtime::common::instrument_if_present!(
             self.handler.consume_message(
                 context.clone(),
                 self.stream_context.clone(),
@@ -1033,14 +1064,24 @@ where
         );
         match &result {
             Ok(()) => {
-                tracing::event!(name: "consume_message", parent: &span, tracing::Level::INFO, {})
+                if let Some(trace_span) = span.as_ref() {
+                    crate::runtime::common::event_if_enabled!(
+                        trace_span,
+                        || tracing::event!(name: "consume_message", parent: trace_span, tracing::Level::INFO, {})
+                    );
+                }
             }
             Err(error) => {
-                crate::runtime::telemetry::record_error_if_enabled!(&span, error);
-                tracing::event!(name: "consume_message.error", parent: &span, tracing::Level::ERROR,
-                    error = %error,
-                    "Kafka source handler failed"
-                );
+                crate::runtime::telemetry::record_error_if_present!(span.as_ref(), error);
+                if let Some(trace_span) = span.as_ref() {
+                    crate::runtime::common::event_if_enabled!(
+                        trace_span,
+                        || tracing::event!(name: "consume_message.error", parent: trace_span, tracing::Level::ERROR,
+                            error = %error,
+                            "Kafka source handler failed"
+                        )
+                    );
+                }
             }
         }
 
@@ -1048,7 +1089,12 @@ where
         if result.is_ok() && has_result {
             tokio::select! {
                 _ = result_context.done.cancelled() => {
-                    tracing::event!(name: "done_received", parent: &span, tracing::Level::INFO, {});
+                    if let Some(trace_span) = span.as_ref() {
+                        crate::runtime::common::event_if_enabled!(
+                            trace_span,
+                            || tracing::event!(name: "done_received", parent: trace_span, tracing::Level::INFO, {})
+                        );
+                    }
                 }
                 _ = context.cancelled() => {
                     result_wait_cancelled = true;
@@ -1069,41 +1115,55 @@ where
         };
         if result_wait_cancelled && result_context.done.is_cancelled() {
             result = Ok(());
-            tracing::event!(name: "done_received", parent: &span, tracing::Level::INFO, {});
+            if let Some(trace_span) = span.as_ref() {
+                crate::runtime::common::event_if_enabled!(
+                    trace_span,
+                    || tracing::event!(name: "done_received", parent: trace_span, tracing::Level::INFO, {})
+                );
+            }
         } else if result_wait_cancelled {
-            crate::runtime::telemetry::record_error_if_enabled!(
-                &span,
+            crate::runtime::telemetry::record_error_if_present!(
+                span.as_ref(),
                 "Kafka message context cancelled"
             );
-            tracing::event!(name: "context_cancelled", parent: &span, tracing::Level::ERROR,
-                error = "Kafka message context cancelled"
-            );
+            if let Some(trace_span) = span.as_ref() {
+                crate::runtime::common::event_if_enabled!(
+                    trace_span,
+                    || tracing::event!(name: "context_cancelled", parent: trace_span, tracing::Level::ERROR,
+                        error = "Kafka message context cancelled"
+                    )
+                );
+            }
         }
-        crate::runtime::common::instrument_if_enabled!(
+        crate::runtime::common::instrument_if_present!(
             self.handler
                 .end_request(context, self.stream_context.clone(), &result, handler_state),
             span.clone(),
         );
-        self.metrics.active_requests.dec();
         if let Some(started_at) = kafka_result.started_at {
+            self.metrics.active_requests.dec();
             self.metrics
                 .request_duration
                 .observe(started_at.elapsed().as_secs_f64());
-        }
-        if result.is_ok() {
-            self.metrics.messages_total.inc();
-        } else {
-            self.metrics.request_errors.inc();
+            if result.is_ok() {
+                self.metrics.messages_total.inc();
+            } else {
+                self.metrics.request_errors.inc();
+            }
         }
     }
 
     async fn consume_result(&self, context: MessageContext, value: Payload<R>) {
         let Some(stream_id) = context.stream_id() else {
-            self.metrics.missing_stream_id.inc();
+            if self.metrics.request_duration.is_enabled() {
+                self.metrics.missing_stream_id.inc();
+            }
             return;
         };
         let Some(result) = self.pending.get(stream_id) else {
-            self.metrics.late_result.inc();
+            if self.metrics.request_duration.is_enabled() {
+                self.metrics.late_result.inc();
+            }
             return;
         };
         let _lifetime = result.lifetime.read().await;
@@ -1112,11 +1172,18 @@ where
             .get(stream_id)
             .is_some_and(|current| Arc::ptr_eq(&current, &result))
         {
-            self.metrics.late_result.inc();
-            tracing::event!(name: "late_result", parent: &result.span, tracing::Level::WARN, {});
+            if self.metrics.request_duration.is_enabled() {
+                self.metrics.late_result.inc();
+            }
+            if let Some(span) = result.span.as_ref() {
+                crate::runtime::common::event_if_enabled!(
+                    span,
+                    || tracing::event!(name: "late_result", parent: span, tracing::Level::WARN, {})
+                );
+            }
             return;
         }
-        let message_id = crate::runtime::common::instrument_if_enabled!(
+        let message_id = crate::runtime::common::instrument_if_present!(
             self.handler.get_message_id(
                 &context,
                 &self.stream_context,
@@ -1133,13 +1200,20 @@ where
             .get(&message_id)
             .cloned();
         let Some(callback) = callback else {
-            self.metrics.unknown_message_id.inc();
-            tracing::event!(name: "unknown_message_id", parent: &result.span, tracing::Level::WARN,
-                message_id
-            );
+            if self.metrics.request_duration.is_enabled() {
+                self.metrics.unknown_message_id.inc();
+            }
+            if let Some(span) = result.span.as_ref() {
+                crate::runtime::common::event_if_enabled!(
+                    span,
+                    || tracing::event!(name: "unknown_message_id", parent: span, tracing::Level::WARN,
+                        message_id
+                    )
+                );
+            }
             return;
         };
-        if crate::runtime::common::instrument_if_enabled!(
+        if crate::runtime::common::instrument_if_present!(
             callback(
                 context,
                 self.stream_context.clone(),
@@ -1155,15 +1229,27 @@ where
                 .expect("Kafka result callbacks lock poisoned")
                 .remove(&message_id);
             if removed.is_none() {
-                self.metrics.duplicate_message_id.inc();
-                tracing::event!(name: "duplicate_message_id", parent: &result.span, tracing::Level::WARN,
-                    message_id
-                );
+                if self.metrics.request_duration.is_enabled() {
+                    self.metrics.duplicate_message_id.inc();
+                }
+                if let Some(span) = result.span.as_ref() {
+                    crate::runtime::common::event_if_enabled!(
+                        span,
+                        || tracing::event!(name: "duplicate_message_id", parent: span, tracing::Level::WARN,
+                            message_id
+                        )
+                    );
+                }
             }
         }
-        tracing::event!(name: "result_consumed", parent: &result.span, tracing::Level::INFO,
-            message_id
-        );
+        if let Some(span) = result.span.as_ref() {
+            crate::runtime::common::event_if_enabled!(
+                span,
+                || tracing::event!(name: "result_consumed", parent: span, tracing::Level::INFO,
+                    message_id
+                )
+            );
+        }
     }
 }
 
@@ -1196,6 +1282,7 @@ where
         stream_context: StreamContext::new(input_stream.clone()),
         input_stream: input_stream.clone(),
         endpoint_name: endpoint_config.name,
+        tracing_enabled: input_stream.stream().environment().tracing_enabled(),
         handler: Arc::new(handler),
         pending: pending.clone(),
         concurrency: Concurrency {

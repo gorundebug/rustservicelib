@@ -24,8 +24,8 @@ impl<ResR> UnarySender<ResR> {
         }
     }
 
-    fn set_span(&self, span: tracing::Span) {
-        *self.span.lock().expect("gRPC unary span lock poisoned") = Some(span);
+    fn set_span(&self, span: Option<tracing::Span>) {
+        *self.span.lock().expect("gRPC unary span lock poisoned") = span;
     }
 
     pub(super) fn take(&self) -> Option<ResR> {
@@ -82,7 +82,10 @@ where
             .expect("gRPC unary span lock poisoned")
             .as_ref()
         {
-            tracing::event!(name: "send", parent: span, tracing::Level::INFO, {});
+            crate::runtime::common::event_if_enabled!(
+                span,
+                || tracing::event!(name: "send", parent: span, tracing::Level::INFO, {})
+            );
         }
         self.sent.notify_one();
         Ok(())
@@ -147,12 +150,17 @@ where
             if self.endpoint_consumer.has_result() {
                 match sender.receive(pending.context.read().await.clone()).await {
                     Ok(value) => {
-                        tracing::event!(
-                            name: "result_received",
-                            parent: &pending.span,
-                            tracing::Level::INFO,
-                            {}
-                        );
+                        if let Some(span) = pending.span.as_ref() {
+                            crate::runtime::common::event_if_enabled!(
+                                span,
+                                || tracing::event!(
+                                    name: "result_received",
+                                    parent: span,
+                                    tracing::Level::INFO,
+                                    {}
+                                )
+                            );
+                        }
                         Some(value)
                     }
                     Err(error) => {

@@ -85,11 +85,15 @@ pub struct ResultContext {
 }
 
 impl ResultContext {
-    pub(crate) fn with_span(span: tracing::Span) -> Self {
+    pub(crate) fn with_optional_span(span: Option<&tracing::Span>) -> Self {
         Self {
             done: tokio_util::sync::CancellationToken::new(),
-            span: (!span.is_disabled()).then_some(span),
+            span: span.filter(|span| !span.is_disabled()).cloned(),
         }
+    }
+
+    pub(crate) fn with_span(span: &tracing::Span) -> Self {
+        Self::with_optional_span(Some(span))
     }
 
     pub fn done(&self) {
@@ -350,16 +354,20 @@ impl EndpointMetrics {
     }
 
     pub(crate) fn request_start(&self) -> Option<Instant> {
+        if !self.enabled {
+            return None;
+        }
         self.active_requests.inc();
-        self.enabled.then(Instant::now)
+        Some(Instant::now())
     }
 
     pub(crate) fn request_end(&self, started_at: Option<Instant>, result: &HandlerResult) {
+        let Some(started_at) = started_at else {
+            return;
+        };
         self.active_requests.dec();
-        if let Some(started_at) = started_at {
-            self.request_duration
-                .observe(started_at.elapsed().as_secs_f64());
-        }
+        self.request_duration
+            .observe(started_at.elapsed().as_secs_f64());
         if result.is_ok() {
             self.messages_total.inc();
         } else {
@@ -367,8 +375,14 @@ impl EndpointMetrics {
         }
     }
 
-    pub(crate) fn grpc_client_start(&self) -> GrpcClientObservation {
-        self.grpc_client_metrics.start()
+    pub(crate) fn begin_request_failed(&self) {
+        if self.enabled {
+            self.begin_request_failed.inc();
+        }
+    }
+
+    pub(crate) fn grpc_client_start(&self) -> Option<GrpcClientObservation> {
+        self.enabled.then(|| self.grpc_client_metrics.start())
     }
 
     pub(crate) fn grpc_client_measurement_start(&self) -> Option<Instant> {
@@ -417,7 +431,7 @@ mod result_tracing_tests {
         tracing::subscriber::with_default(subscriber, || {
             let parent = tracing::info_span!("unrelated.parent");
             let _entered = parent.enter();
-            let result = ResultContext::with_span(tracing::Span::none());
+            let result = ResultContext::with_span(&tracing::Span::none());
             assert!(result.span.is_none());
             result.done();
             assert!(result.is_done());
@@ -432,7 +446,7 @@ mod result_tracing_tests {
         tracing::subscriber::with_default(subscriber, || {
             let span = tracing::info_span!("grpc.output.test");
             assert!(!span.is_disabled());
-            let result = ResultContext::with_span(span);
+            let result = ResultContext::with_span(&span);
             assert!(result.span.is_some());
             result.done();
             assert!(result.is_done());

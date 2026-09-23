@@ -157,7 +157,7 @@ where
 
     pub async fn consume_payload(&self, context: MessageContext, payload: Payload<T>) {
         let (context, span) = self.inner.stream.start_span(context, "stream.input");
-        crate::runtime::common::instrument_if_enabled!(
+        crate::runtime::common::instrument_if_present!(
             self.inner.stream.emit(context, payload),
             span,
         );

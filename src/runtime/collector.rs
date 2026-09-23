@@ -22,7 +22,7 @@ where
     to: String,
     pipeline: String,
     component: String,
-    messages_total: Int64Counter,
+    messages_total: Option<Int64Counter>,
     call_statistics: CallStatistics,
     environment: RuntimeEnvironment,
 }
@@ -131,25 +131,31 @@ where
         let from = source_name;
         let to = environment.stream_name(target_id);
         let (pipeline, component) = environment.stream_grouping(target_id);
-        let messages_total = environment
-            .metrics()
-            .scope(
-                "stream",
-                [
-                    ("service".to_owned(), environment.service_name()),
-                    ("from".to_owned(), from.clone()),
-                    ("to".to_owned(), to.clone()),
-                    ("pipeline".to_owned(), pipeline.clone()),
-                    ("component".to_owned(), component.clone()),
-                ]
-                .into_iter()
-                .collect(),
+        let messages_total = if environment.metrics().is_noop() {
+            None
+        } else {
+            Some(
+                environment
+                    .metrics()
+                    .scope(
+                        "stream",
+                        [
+                            ("service".to_owned(), environment.service_name()),
+                            ("from".to_owned(), from.clone()),
+                            ("to".to_owned(), to.clone()),
+                            ("pipeline".to_owned(), pipeline.clone()),
+                            ("component".to_owned(), component.clone()),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    )
+                    .counter(
+                        "messages_total",
+                        "Total number of messages processed by stream link",
+                        Labels::new(),
+                    )?,
             )
-            .counter(
-                "messages_total",
-                "Total number of messages processed by stream link",
-                Labels::new(),
-            )?;
+        };
         let call_statistics = CallStatistics::default();
         environment.register_graph_link(
             source_id,
@@ -180,9 +186,9 @@ where
         context: MessageContext,
         call_type: Option<&'static str>,
         pool: Option<&str>,
-    ) -> (MessageContext, tracing::Span) {
+    ) -> (MessageContext, Option<tracing::Span>) {
         if !self.environment.tracing_enabled() || !context.sampling_enabled() {
-            return (context, tracing::Span::none());
+            return (context, None);
         }
         let span = match (call_type, pool) {
             (None, _) => tracing::info_span!(
@@ -219,9 +225,12 @@ where
                 otel.status_message = tracing::field::Empty,
             ),
         };
+        if span.is_disabled() {
+            return (context, None);
+        }
         let _ = span.set_parent(context.open_telemetry_context().clone());
         let child = span.context();
-        (context.with_open_telemetry_context(child), span)
+        (context.with_open_telemetry_context(child), Some(span))
     }
 }
 
@@ -243,11 +252,13 @@ where
 
     async fn out_payload(&self, context: MessageContext, payload: Payload<T>) {
         self.call_statistics.inc();
-        self.messages_total.inc();
+        if let Some(counter) = &self.messages_total {
+            counter.inc();
+        }
         match &self.caller {
             Caller::FunctionCall(_) => {
                 let (context, span) = self.start_span(context, None, None);
-                crate::runtime::common::instrument_if_enabled!(
+                crate::runtime::common::instrument_if_present!(
                     self.consumer.consume(context, payload),
                     span,
                 );
@@ -256,7 +267,7 @@ where
                 let (context, span) = self.start_span(context, Some("parallel"), None);
                 let consumer = Arc::clone(&self.consumer);
                 self.environment.spawn_parallel(async move {
-                    crate::runtime::common::instrument_if_enabled!(
+                    crate::runtime::common::instrument_if_present!(
                         consumer.consume(context, payload),
                         span,
                     );
@@ -264,14 +275,14 @@ where
             }
             Caller::TaskPool(pool) => {
                 let (context, span) = self.start_span(context, Some("taskpool"), Some(pool.name()));
-                let rejection_span = span.clone();
+                let rejection_span = span.as_ref().filter(|span| !span.is_disabled()).cloned();
                 let consumer = Arc::clone(&self.consumer);
                 let task_context = context.clone();
                 if let Err(error) = pool
                     .add_task(
                         context,
                         Box::pin(async move {
-                            crate::runtime::common::instrument_if_enabled!(
+                            crate::runtime::common::instrument_if_present!(
                                 consumer.consume(task_context, payload),
                                 span,
                             );
@@ -279,20 +290,25 @@ where
                     )
                     .await
                 {
-                    crate::runtime::telemetry::record_span_error(&rejection_span, &error);
-                    rejection_span.in_scope(|| {
+                    let report = || {
                         tracing::warn!(
                             pool = pool.name(),
                             error = %error,
                             "task pool rejected task"
                         )
-                    });
+                    };
+                    if let Some(rejection_span) = rejection_span {
+                        crate::runtime::telemetry::record_span_error(&rejection_span, &error);
+                        rejection_span.in_scope(report);
+                    } else {
+                        report();
+                    }
                 }
             }
             Caller::PriorityTaskPool { pool, priority } => {
                 let (context, span) =
                     self.start_span(context, Some("prioritytaskpool"), Some(pool.name()));
-                let rejection_span = span.clone();
+                let rejection_span = span.as_ref().filter(|span| !span.is_disabled()).cloned();
                 let priority = context.priority().unwrap_or(*priority);
                 let consumer = Arc::clone(&self.consumer);
                 let task_context = context.clone();
@@ -301,7 +317,7 @@ where
                         context,
                         priority,
                         Box::pin(async move {
-                            crate::runtime::common::instrument_if_enabled!(
+                            crate::runtime::common::instrument_if_present!(
                                 consumer.consume(task_context, payload),
                                 span,
                             );
@@ -309,14 +325,19 @@ where
                     )
                     .await
                 {
-                    crate::runtime::telemetry::record_span_error(&rejection_span, &error);
-                    rejection_span.in_scope(|| {
+                    let report = || {
                         tracing::warn!(
                             pool = pool.name(),
                             error = %error,
                             "priority task pool rejected task"
                         )
-                    });
+                    };
+                    if let Some(rejection_span) = rejection_span {
+                        crate::runtime::telemetry::record_span_error(&rejection_span, &error);
+                        rejection_span.in_scope(report);
+                    } else {
+                        report();
+                    }
                 }
             }
         }

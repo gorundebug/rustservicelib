@@ -83,7 +83,7 @@ where
 {
     async fn consume(&self, context: MessageContext, payload: Payload<T>) {
         let (context, span) = self.output.start_span(context, "stream.filter");
-        crate::runtime::common::instrument_if_enabled!(
+        crate::runtime::common::instrument_if_present!(
             async {
                 if self
                     .function

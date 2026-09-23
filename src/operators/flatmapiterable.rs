@@ -112,7 +112,7 @@ where
 {
     async fn consume(&self, context: MessageContext, value: Payload<T>) {
         let (context, span) = self.output.start_span(context, "stream.flatmap_iterable");
-        crate::runtime::common::instrument_if_enabled!(
+        crate::runtime::common::instrument_if_present!(
             async {
                 let mut items = value
                     .into_value()

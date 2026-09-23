@@ -94,7 +94,7 @@ where
 {
     callbacks: Mutex<CallbackStore<ResultCallback<HandlerState, T, ResR, R, E>>>,
     done: CancellationToken,
-    span: tracing::Span,
+    span: Option<tracing::Span>,
 }
 
 impl<HandlerState, T, ResR, R, E> ResultContext<HandlerState, T, ResR, R, E>
@@ -105,7 +105,7 @@ where
     R: Send + Sync + 'static,
     E: Send + Sync + 'static,
 {
-    fn new(span: tracing::Span) -> Self {
+    fn new(span: Option<tracing::Span>) -> Self {
         Self {
             callbacks: Mutex::new(CallbackStore::new()),
             done: CancellationToken::new(),
@@ -125,12 +125,12 @@ where
     }
 
     pub fn done(&self) {
-        tracing::event!(
-            name: "done_called",
-            parent: &self.span,
-            tracing::Level::INFO,
-            {}
-        );
+        if let Some(span) = self.span.as_ref() {
+            crate::runtime::common::event_if_enabled!(
+                span,
+                || tracing::event!(name: "done_called", parent: span, tracing::Level::INFO, {})
+            );
+        }
         self.done.cancel();
     }
 
@@ -203,7 +203,7 @@ where
     result_context: Arc<ResultContext<HandlerState, T, ResR, R, E>>,
     lifetime: RwLock<()>,
     started_at: Option<Instant>,
-    span: tracing::Span,
+    span: Option<tracing::Span>,
 }
 
 struct EndpointMetrics {
@@ -404,21 +404,27 @@ where
             if !span.is_disabled() {
                 let _ = span.set_parent(context.open_telemetry_context().clone());
             }
-            span
+            (!span.is_disabled()).then_some(span)
         } else {
-            tracing::Span::none()
+            None
         };
-        let context = context.with_span_context(&span);
-        let (context, state) = match crate::runtime::common::instrument_if_enabled!(
+        let context = if let Some(trace_span) = span.as_ref() {
+            context.with_span_context(trace_span)
+        } else {
+            context
+        };
+        let (context, state) = match crate::runtime::common::instrument_if_present!(
             self.handler
                 .begin_request(context, self.stream_context.clone()),
             span.clone(),
         ) {
             Ok(begin) => begin,
             Err(error) => {
-                self.metrics.begin_request_failed.inc();
-                crate::runtime::telemetry::record_error_if_enabled!(&span, &error);
-                crate::runtime::common::event_if_enabled!(&span, || {
+                if self.metrics.request_duration.is_enabled() {
+                    self.metrics.begin_request_failed.inc();
+                }
+                crate::runtime::telemetry::record_error_if_present!(span.as_ref(), &error);
+                crate::runtime::common::event_if_present!(span.as_ref(), || {
                     tracing::event!(
                         name: "begin_request.error",
                         tracing::Level::ERROR,
@@ -429,8 +435,8 @@ where
                 return Err(error);
             }
         };
-        crate::runtime::common::event_if_enabled!(
-            &span,
+        crate::runtime::common::event_if_present!(
+            span.as_ref(),
             || tracing::event!(name: "begin_request", tracing::Level::INFO, {})
         );
         let context = if context.stream_id().is_some() {
@@ -439,8 +445,10 @@ where
             context.with_stream_id(new_stream_id())
         };
         let stream_id = context.stream_id().unwrap().to_owned();
-        crate::runtime::telemetry::record_if_enabled!(&span, "stream_id", stream_id.as_str());
-        self.metrics.active_requests.inc();
+        crate::runtime::telemetry::record_if_present!(span.as_ref(), "stream_id", stream_id.as_str());
+        if self.metrics.request_duration.is_enabled() {
+            self.metrics.active_requests.inc();
+        }
         let pending = Arc::new(Pending {
             context: RwLock::new(context),
             state: Arc::new(AsyncMutex::new(state)),
@@ -461,11 +469,11 @@ where
                 .is_err()
             {
                 let result: HandlerResult = Err("duplicate gRPC stream ID".into());
-                crate::runtime::telemetry::record_error_if_enabled!(
-                    &pending.span,
+                crate::runtime::telemetry::record_error_if_present!(
+                    pending.span.as_ref(),
                     "duplicate gRPC stream ID",
                 );
-                let _ = crate::runtime::common::instrument_if_enabled!(
+                let _ = crate::runtime::common::instrument_if_present!(
                     self.handler.end_request(
                         pending.context.read().await.clone(),
                         self.stream_context.clone(),
@@ -474,13 +482,13 @@ where
                     ),
                     pending.span.clone(),
                 );
-                self.metrics.active_requests.dec();
                 if let Some(started_at) = pending.started_at {
+                    self.metrics.active_requests.dec();
                     self.metrics
                         .request_duration
                         .observe(started_at.elapsed().as_secs_f64());
+                    self.metrics.request_errors.inc();
                 }
-                self.metrics.request_errors.inc();
                 return match result {
                     Err(error) => Err(error),
                     Ok(()) => unreachable!("duplicate stream ID is always an error"),
@@ -497,7 +505,7 @@ where
         request: ReqT,
     ) -> HandlerResult {
         let context = pending.context.read().await.clone();
-        let result = crate::runtime::common::instrument_if_enabled!(
+        let result = crate::runtime::common::instrument_if_present!(
             self.handler.consume_message(
                 context,
                 self.stream_context.clone(),
@@ -509,9 +517,9 @@ where
             pending.span.clone(),
         );
         if let Err(error) = &result {
-            crate::runtime::telemetry::record_error_if_enabled!(&pending.span, error);
+            crate::runtime::telemetry::record_error_if_present!(pending.span.as_ref(), error);
         }
-        crate::runtime::common::event_if_enabled!(&pending.span, || match &result {
+        crate::runtime::common::event_if_present!(pending.span.as_ref(), || match &result {
             Ok(_) => tracing::event!(name: "consume_message", tracing::Level::INFO, {}),
             Err(error) => tracing::event!(
                 name: "consume_message.error",
@@ -526,7 +534,7 @@ where
     }
 
     pub(crate) async fn eof(&self, pending: &Arc<Pending<HandlerState, T, ResR, R, E>>) {
-        crate::runtime::common::instrument_if_enabled!(
+        crate::runtime::common::instrument_if_present!(
             self.handler.eof(
                 pending.context.read().await.clone(),
                 self.stream_context.clone(),
@@ -534,8 +542,8 @@ where
             ),
             pending.span.clone(),
         );
-        crate::runtime::common::event_if_enabled!(
-            &pending.span,
+        crate::runtime::common::event_if_present!(
+            pending.span.as_ref(),
             || tracing::event!(name: "eof", tracing::Level::INFO, {})
         );
     }
@@ -547,7 +555,7 @@ where
         let context = pending.context.read().await.clone();
         tokio::select! {
             _ = pending.result_context.cancelled() => {
-                crate::runtime::common::event_if_enabled!(&pending.span, || tracing::event!(name: "done_received", tracing::Level::INFO, {}));
+                crate::runtime::common::event_if_present!(pending.span.as_ref(), || tracing::event!(name: "done_received", tracing::Level::INFO, {}));
                 Ok(())
             },
             _ = context.cancelled() => {
@@ -579,16 +587,16 @@ where
             .is_some_and(|error| error.downcast_ref::<RequestContextCancelled>().is_some());
         if wait_cancelled && pending.result_context.done.is_cancelled() {
             result = Ok(());
-            crate::runtime::common::event_if_enabled!(
-                &pending.span,
+            crate::runtime::common::event_if_present!(
+                pending.span.as_ref(),
                 || tracing::event!(name: "done_received", tracing::Level::INFO, {})
             );
         } else if wait_cancelled {
-            crate::runtime::telemetry::record_error_if_enabled!(
-                &pending.span,
+            crate::runtime::telemetry::record_error_if_present!(
+                pending.span.as_ref(),
                 "gRPC request context cancelled",
             );
-            crate::runtime::common::event_if_enabled!(&pending.span, || {
+            crate::runtime::common::event_if_present!(pending.span.as_ref(), || {
                 tracing::event!(
                     name: "context_cancelled",
                     tracing::Level::WARN,
@@ -596,7 +604,7 @@ where
                 )
             });
         }
-        let end_result = crate::runtime::common::instrument_if_enabled!(
+        let end_result = crate::runtime::common::instrument_if_present!(
             self.handler.end_request(
                 pending.context.read().await.clone(),
                 self.stream_context.clone(),
@@ -608,17 +616,19 @@ where
         if end_result.is_err() {
             result = end_result;
         }
-        self.metrics.active_requests.dec();
         if let Some(started_at) = pending.started_at {
+            self.metrics.active_requests.dec();
             self.metrics
                 .request_duration
                 .observe(started_at.elapsed().as_secs_f64());
+            if result.is_ok() {
+                self.metrics.messages_total.inc();
+            } else {
+                self.metrics.request_errors.inc();
+            }
         }
-        if result.is_ok() {
-            self.metrics.messages_total.inc();
-        } else {
-            self.metrics.request_errors.inc();
-            crate::runtime::common::event_if_enabled!(&pending.span, || {
+        if result.is_err() {
+            crate::runtime::common::event_if_present!(pending.span.as_ref(), || {
                 tracing::error!("gRPC source request failed");
             });
         }
@@ -627,12 +637,16 @@ where
 
     async fn consume_result(&self, context: MessageContext, value: Payload<R>) {
         let Some(stream_id) = context.stream_id().map(str::to_owned) else {
-            self.metrics.missing_stream_id.inc();
+            if self.metrics.request_duration.is_enabled() {
+                self.metrics.missing_stream_id.inc();
+            }
             tracing::error!("consumeResult called without streamID");
             return;
         };
         let Some(pending) = self.pending.get(&stream_id) else {
-            self.metrics.late_result.inc();
+            if self.metrics.request_duration.is_enabled() {
+                self.metrics.late_result.inc();
+            }
             tracing::warn!(
                 session_id = stream_id,
                 "consumeResult: session not found in pending"
@@ -645,14 +659,16 @@ where
             .get(&stream_id)
             .is_some_and(|current| Arc::ptr_eq(&current, &pending))
         {
-            self.metrics.late_result.inc();
-            crate::runtime::common::event_if_enabled!(
-                &pending.span,
+            if self.metrics.request_duration.is_enabled() {
+                self.metrics.late_result.inc();
+            }
+            crate::runtime::common::event_if_present!(
+                pending.span.as_ref(),
                 || tracing::event!(name: "late_result", tracing::Level::WARN, {})
             );
             return;
         }
-        let message_id = crate::runtime::common::instrument_if_enabled!(
+        let message_id = crate::runtime::common::instrument_if_present!(
             self.handler.get_message_id(
                 &context,
                 &self.stream_context,
@@ -669,8 +685,10 @@ where
             .get(&message_id)
             .cloned();
         let Some(callback) = callback else {
-            self.metrics.unknown_message_id.inc();
-            crate::runtime::common::event_if_enabled!(&pending.span, || {
+            if self.metrics.request_duration.is_enabled() {
+                self.metrics.unknown_message_id.inc();
+            }
+            crate::runtime::common::event_if_present!(pending.span.as_ref(), || {
                 tracing::event!(
                         name: "unknown_message_id",
                         tracing::Level::WARN,
@@ -680,7 +698,7 @@ where
             });
             return;
         };
-        if crate::runtime::common::instrument_if_enabled!(
+        if crate::runtime::common::instrument_if_present!(
             callback(
                 context,
                 self.stream_context.clone(),
@@ -697,8 +715,10 @@ where
                 .expect("gRPC source callbacks lock poisoned")
                 .remove(&message_id);
             if removed.is_none() {
-                self.metrics.duplicate_message_id.inc();
-                crate::runtime::common::event_if_enabled!(&pending.span, || {
+                if self.metrics.request_duration.is_enabled() {
+                    self.metrics.duplicate_message_id.inc();
+                }
+                crate::runtime::common::event_if_present!(pending.span.as_ref(), || {
                     tracing::event!(
                         name: "duplicate_message_id",
                         tracing::Level::WARN,
@@ -708,12 +728,17 @@ where
                 });
             }
         }
-        tracing::event!(
-            name: "result_consumed",
-            parent: &pending.span,
-            tracing::Level::INFO,
-            message_id
-        );
+        if let Some(span) = pending.span.as_ref() {
+            crate::runtime::common::event_if_enabled!(
+                span,
+                || tracing::event!(
+                    name: "result_consumed",
+                    parent: span,
+                    tracing::Level::INFO,
+                    message_id
+                )
+            );
+        }
     }
 }
 

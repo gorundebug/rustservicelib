@@ -121,7 +121,7 @@ where
     async fn consume(&self, context: MessageContext, payload: Payload<T>) {
         let (context, span) = self.output.start_span(context, "stream.keyby");
         let out = self.output.collector();
-        crate::runtime::common::instrument_if_enabled!(
+        crate::runtime::common::instrument_if_present!(
             self.function.key_by(context, &self.output, &payload, &out),
             span,
         );

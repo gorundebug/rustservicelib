@@ -50,7 +50,7 @@ struct ScheduledDelay {
 /// uses the latter, exactly like the Go operator.
 pub struct DelayPool {
     state: Mutex<DelayPoolState>,
-    metrics: OnceLock<DelayPoolMetrics>,
+    metrics: OnceLock<Option<DelayPoolMetrics>>,
     active_tasks: Arc<AtomicUsize>,
 }
 
@@ -84,6 +84,10 @@ impl DelayPool {
 
     pub(crate) fn configure_metrics(&self, environment: &RuntimeEnvironment) -> RuntimeResult<()> {
         if self.metrics.get().is_some() {
+            return Ok(());
+        }
+        if environment.metrics().is_noop() {
+            let _ = self.metrics.set(None);
             return Ok(());
         }
         let scope = environment.metrics().scope(
@@ -124,7 +128,7 @@ impl DelayPool {
                     .collect(),
             )?,
         };
-        let _ = self.metrics.set(metrics);
+        let _ = self.metrics.set(Some(metrics));
         Ok(())
     }
 
@@ -193,7 +197,7 @@ impl DelayPool {
             }
         };
         let expedited_by_deadline = requested_at.is_none_or(|requested| run_at < requested);
-        let metrics = self.metrics.get().cloned();
+        let metrics = self.metrics.get().cloned().flatten();
         let scheduled = ScheduledDelay {
             context,
             run_at,
@@ -247,7 +251,7 @@ impl DelayPool {
             _ = context.cancelled() => true,
         };
         if timed_out {
-            if let Some(metrics) = self.metrics.get() {
+            if let Some(metrics) = self.metrics.get().and_then(Option::as_ref) {
                 metrics.stop_timeout.inc();
             }
             tracing::warn!("delay pool stopped by timeout");

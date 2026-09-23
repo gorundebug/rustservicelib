@@ -465,6 +465,7 @@ where
     topic: String,
     partition: PartitionFunction,
     context: MessageContext,
+    tracing_enabled: bool,
     collect: Arc<dyn Fn(MessageContext, R) -> BoxFuture<()> + Send + Sync>,
     send: SendFunction,
     spawn: SpawnFunction,
@@ -499,10 +500,11 @@ where
         let key = self.key.clone();
         let value = self.value.clone();
         let context = self.context.clone();
+        let tracing_enabled = self.tracing_enabled;
         let collect = Arc::clone(&self.collect);
         let send = Arc::clone(&self.send);
         (self.spawn)(Box::pin(async move {
-            let metadata = context.transport_metadata();
+            let metadata = context.transport_metadata_with_tracing(tracing_enabled);
             let (partition, offset, error) =
                 match send(topic, key, value, partition, metadata).await {
                     Ok((partition, offset)) => (partition, offset, None),
@@ -519,7 +521,8 @@ where
             self.key.clone(),
             self.value.clone(),
             partition,
-            self.context.transport_metadata(),
+            self.context
+                .transport_metadata_with_tracing(self.tracing_enabled),
         )
         .await
     }
@@ -578,6 +581,7 @@ where
     stream: Weak<SinkStreamWithResult<T, R, E>>,
     stream_context: StreamContext<T, R, E>,
     endpoint_name: String,
+    tracing_enabled: bool,
     runtime_state: Arc<KafkaEndpointRuntimeState>,
     topic: String,
     handler: Arc<H>,
@@ -664,6 +668,7 @@ where
         stream: Arc::downgrade(stream),
         stream_context: SinkStreamContext::new(Arc::downgrade(stream)),
         endpoint_name: endpoint_config.name,
+        tracing_enabled: stream.environment().tracing_enabled(),
         runtime_state,
         topic: endpoint_config.topic,
         handler,
@@ -827,7 +832,7 @@ where
         let Some(stream) = self.stream.upgrade() else {
             return;
         };
-        let span = if stream.environment().tracing_enabled() && context.sampling_enabled() {
+        let span = if self.tracing_enabled && context.sampling_enabled() {
             let (stream_name, pipeline_name, component_name) = stream.tracing_labels();
             let span = tracing::info_span!(
                 "kafka.output",
@@ -842,28 +847,41 @@ where
             );
             if !span.is_disabled() {
                 let _ = span.set_parent(context.open_telemetry_context().clone());
+                Some(span)
+            } else {
+                None
             }
-            span
         } else {
-            tracing::Span::none()
+            None
         };
-        let stream_id = crate::runtime::common::scope_if_enabled!(&span, || self
+        let stream_id = crate::runtime::common::scope_if_present!(span.as_ref(), || self
             .handler
             .get_stream_id(&context, &value));
-        crate::runtime::telemetry::record_if_enabled!(&span, "stream_id", stream_id.as_str());
-        let context = context.with_stream_id(stream_id).with_span_context(&span);
-        let (context, mut handler_state) = crate::runtime::common::instrument_if_enabled!(
+        crate::runtime::telemetry::record_if_present!(span.as_ref(), "stream_id", stream_id.as_str());
+        let context = context.with_stream_id(stream_id);
+        let context = if let Some(span) = span.as_ref() {
+            context.with_span_context(span)
+        } else {
+            context
+        };
+        let (context, mut handler_state) = crate::runtime::common::instrument_if_present!(
             self.handler
                 .begin_request(context, self.stream_context.clone()),
             span.clone(),
         );
-        crate::runtime::common::event_if_enabled!(
-            &span,
-            || tracing::event!(name: "begin_request", parent: &span, tracing::Level::INFO, {})
-        );
+        if let Some(trace_span) = span.as_ref() {
+            crate::runtime::common::event_if_enabled!(
+                trace_span,
+                || tracing::event!(name: "begin_request", parent: trace_span, tracing::Level::INFO, {})
+            );
+        }
 
-        self.active_requests.inc();
-        let started_at = self.request_duration.is_enabled().then(Instant::now);
+        let started_at = if self.request_duration.is_enabled() {
+            self.active_requests.inc();
+            Some(Instant::now())
+        } else {
+            None
+        };
         let value = value.into_arc();
         let collect_context = self.stream_context.clone();
         let collect = Arc::new(move |context, result| {
@@ -888,12 +906,13 @@ where
             topic: self.topic.clone(),
             partition,
             context: context.clone(),
+            tracing_enabled: self.tracing_enabled,
             collect,
             send: Arc::clone(&self.send),
             spawn: Arc::clone(&self.spawn),
             _error: std::marker::PhantomData,
         };
-        let result = crate::runtime::common::instrument_if_enabled!(
+        let result = crate::runtime::common::instrument_if_present!(
             self.handler.consume_message(
                 context.clone(),
                 self.stream_context.clone(),
@@ -905,30 +924,40 @@ where
         );
         match &result {
             Ok(()) => {
-                tracing::event!(name: "consume_message", parent: &span, tracing::Level::INFO, {})
+                if let Some(trace_span) = span.as_ref() {
+                    crate::runtime::common::event_if_enabled!(
+                        trace_span,
+                        || tracing::event!(name: "consume_message", parent: trace_span, tracing::Level::INFO, {})
+                    );
+                }
             }
             Err(error) => {
-                crate::runtime::telemetry::record_error_if_enabled!(&span, error);
-                tracing::event!(name: "consume_message.error", parent: &span, tracing::Level::ERROR,
-                    error = %error,
-                    "Kafka sink handler failed"
-                );
+                crate::runtime::telemetry::record_error_if_present!(span.as_ref(), error);
+                if let Some(trace_span) = span.as_ref() {
+                    crate::runtime::common::event_if_enabled!(
+                        trace_span,
+                        || tracing::event!(name: "consume_message.error", parent: trace_span, tracing::Level::ERROR,
+                            error = %error,
+                            "Kafka sink handler failed"
+                        )
+                    );
+                }
             }
         }
-        crate::runtime::common::instrument_if_enabled!(
+        crate::runtime::common::instrument_if_present!(
             self.handler
                 .end_request(context, self.stream_context.clone(), &result, handler_state),
             span.clone(),
         );
-        self.active_requests.dec();
         if let Some(started_at) = started_at {
+            self.active_requests.dec();
             self.request_duration
                 .observe(started_at.elapsed().as_secs_f64());
-        }
-        if result.is_ok() {
-            self.messages_total.inc();
-        } else {
-            self.request_errors.inc();
+            if result.is_ok() {
+                self.messages_total.inc();
+            } else {
+                self.request_errors.inc();
+            }
         }
         drop(stream);
     }

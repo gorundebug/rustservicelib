@@ -114,7 +114,7 @@ where
 
     async fn consume_value(&self, context: MessageContext, key: K, index: usize, value: DynValue) {
         let (context, span) = self.output.start_span(context, "stream.join");
-        crate::runtime::common::instrument_if_enabled!(
+        crate::runtime::common::instrument_if_present!(
             self.store
                 .join_value(context, key, index, value, Arc::clone(&self.callback)),
             span,

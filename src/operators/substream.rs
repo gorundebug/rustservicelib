@@ -165,7 +165,7 @@ impl<T: Send + Sync + 'static, R: Send + Sync + 'static> SubStream<T, R> {
         let (dispatch_context, span) = self
             .stream()
             .start_span(dispatch_context, "stream.substream");
-        crate::runtime::common::instrument_if_enabled!(
+        crate::runtime::common::instrument_if_present!(
             self.dispatch(context, dispatch_context, value, &call),
             span,
         )

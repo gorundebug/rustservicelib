@@ -82,20 +82,22 @@ where
         };
         let (context, span) =
             if stream.stream().environment().tracing_enabled() && context.sampling_enabled() {
-                start_output_span(context, stream.as_ref(), self.metrics.rpc_method())
+                let (context, span) =
+                    start_output_span(context, stream.as_ref(), self.metrics.rpc_method());
+                (context, (!span.is_disabled()).then_some(span))
             } else {
-                (context, tracing::Span::none())
+                (context, None)
             };
-        let (context, state) = match crate::runtime::common::instrument_if_enabled!(
+        let (context, state) = match crate::runtime::common::instrument_if_present!(
             self.handler
                 .begin_request(context, self.stream_context.clone()),
-            span.clone(),
+            span,
         ) {
             Ok(begin) => begin,
             Err(error) => {
-                self.metrics.begin_request_failed.inc();
-                crate::runtime::telemetry::record_error_if_enabled!(&span, &error);
-                crate::runtime::common::event_if_enabled!(&span, || {
+                self.metrics.begin_request_failed();
+                crate::runtime::telemetry::record_error_if_present!(span.as_ref(), &error);
+                crate::runtime::common::event_if_present!(span.as_ref(), || {
                     tracing::event!(
                         name: "begin_request.error",
                         tracing::Level::ERROR,
@@ -107,28 +109,28 @@ where
             }
         };
         let request_context = context.clone().with_stream_id(new_stream_id());
-        crate::runtime::common::event_if_enabled!(
-            &span,
+        crate::runtime::common::event_if_present!(
+            span.as_ref(),
             || tracing::event!(name: "begin_request", tracing::Level::INFO, {})
         );
         let state = Arc::new(tokio::sync::Mutex::new(state));
         let started_at = self.metrics.request_start();
         let sender = RequestSender::default();
-        let mut result = crate::runtime::common::instrument_if_enabled!(
+        let mut result = crate::runtime::common::instrument_if_present!(
             self.handler.consume_message(
                 context.clone(),
                 self.stream_context.clone(),
                 Arc::clone(&state),
                 value,
                 &sender,
-                ResultContext::with_span(span.clone()),
+                ResultContext::with_optional_span(span.as_ref()),
             ),
-            span.clone(),
+            span,
         );
         if let Err(error) = &result {
-            crate::runtime::telemetry::record_error_if_enabled!(&span, error);
+            crate::runtime::telemetry::record_error_if_present!(span.as_ref(), error);
         }
-        crate::runtime::common::event_if_enabled!(&span, || match &result {
+        crate::runtime::common::event_if_present!(span.as_ref(), || match &result {
             Ok(()) => tracing::event!(name: "consume_message", tracing::Level::INFO, {}),
             Err(error) => tracing::event!(
                 name: "consume_message.error",
@@ -141,13 +143,13 @@ where
             result = match sender.take() {
                 Ok(request) => {
                     let observation = self.metrics.grpc_client_start();
-                    match crate::runtime::common::instrument_if_enabled!(
+                    match crate::runtime::common::instrument_if_present!(
                         (self.client_function)(request_context, request),
-                        span.clone(),
+                        span,
                     ) {
                         Ok(mut responses) => {
-                            crate::runtime::common::event_if_enabled!(
-                                &span,
+                            crate::runtime::common::event_if_present!(
+                                span.as_ref(),
                                 || tracing::event!(name: "grpc_call", tracing::Level::INFO, {}),
                             );
                             let mut response_result = Ok(());
@@ -156,24 +158,24 @@ where
                                 response_result = match response {
                                     Ok(response) => {
                                         messages_received += 1;
-                                        crate::runtime::common::instrument_if_enabled!(
+                                        crate::runtime::common::instrument_if_present!(
                                             self.handler.handle_response(
                                                 context.clone(),
                                                 self.stream_context.clone(),
                                                 Arc::clone(&state),
                                                 response,
                                             ),
-                                            span.clone(),
+                                            span,
                                         )
                                     }
                                     Err(error) => Err(error),
                                 };
                                 if response_result.is_err() {
                                     if let Err(error) = &response_result {
-                                        crate::runtime::telemetry::record_error_if_enabled!(
-                                            &span, error
+                                        crate::runtime::telemetry::record_error_if_present!(
+                                            span.as_ref(), error
                                         );
-                                        crate::runtime::common::event_if_enabled!(&span, || {
+                                        crate::runtime::common::event_if_present!(span.as_ref(), || {
                                             tracing::event!(
                                                 name: "handle_response.error",
                                                 tracing::Level::ERROR,
@@ -184,23 +186,27 @@ where
                                     break;
                                 }
                             }
-                            crate::runtime::common::event_if_enabled!(
-                                &span,
+                            crate::runtime::common::event_if_present!(
+                                span.as_ref(),
                                 || tracing::event!(name: "eof", tracing::Level::INFO, messages_received)
                             );
-                            observation.finish(if response_result.is_ok() {
-                                "OK"
-                            } else {
-                                "UNKNOWN"
-                            });
+                            if let Some(observation) = observation {
+                                observation.finish(if response_result.is_ok() {
+                                    "OK"
+                                } else {
+                                    "UNKNOWN"
+                                });
+                            }
                             response_result
                         }
                         Err(error) => {
-                            crate::runtime::telemetry::record_error_if_enabled!(&span, &error);
-                            observation.finish(crate::runtime::telemetry::grpc_error_status(
-                                error.as_ref(),
-                            ));
-                            crate::runtime::common::event_if_enabled!(&span, || {
+                            crate::runtime::telemetry::record_error_if_present!(span.as_ref(), &error);
+                            if let Some(observation) = observation {
+                                observation.finish(crate::runtime::telemetry::grpc_error_status(
+                                    error.as_ref(),
+                                ));
+                            }
+                            crate::runtime::common::event_if_present!(span.as_ref(), || {
                                 tracing::event!(
                                     name: "grpc_call.error",
                                     tracing::Level::ERROR,
@@ -215,10 +221,10 @@ where
                 Err(error) => Err(error),
             };
         }
-        crate::runtime::common::instrument_if_enabled!(
+        crate::runtime::common::instrument_if_present!(
             self.handler
                 .end_request(context, self.stream_context.clone(), &result, state),
-            span.clone(),
+            span,
         );
         self.metrics.request_end(started_at, &result);
     }

@@ -311,19 +311,26 @@ impl ServiceApp {
             .lock()
             .expect("service gRPC shutdown lock poisoned") = shutdown.clone();
         let routes_metrics = self.environment.metrics().clone();
-        let grpc_methods = self.grpc_metric_methods();
         let tracing_enabled = self.environment.tracing_enabled();
+        let metrics_enabled = !routes_metrics.is_noop();
+        let telemetry_layer = (metrics_enabled || tracing_enabled).then(|| {
+            GrpcServerMetricsLayer::new(
+                // The registry is shared with the Prometheus endpoint.
+                // This keeps transport and stream metrics in one scrape.
+                // The layer itself must not own transport lifecycle.
+                routes_metrics,
+                if metrics_enabled {
+                    self.grpc_metric_methods()
+                } else {
+                    Vec::new()
+                },
+                tracing_enabled,
+            )
+        });
         *self.grpc_task.lock().await = Some(tokio::spawn(async move {
             tracing::info!(address = %address, "gRPC service listening");
             TonicServer::builder()
-                .layer(GrpcServerMetricsLayer::new(
-                    // The registry is shared with the Prometheus endpoint.
-                    // This keeps transport and stream metrics in one scrape.
-                    // The layer itself must not own transport lifecycle.
-                    routes_metrics,
-                    grpc_methods,
-                    tracing_enabled,
-                ))
+                .layer(tower::util::option_layer(telemetry_layer))
                 .add_routes(routes)
                 .serve_with_incoming_shutdown(
                     TcpListenerStream::new(listener),
@@ -437,16 +444,19 @@ impl ServiceApp {
         }
 
         let address = format!("{}:{}", config.http_host, config.http_port);
-        router = router.layer(middleware::from_fn_with_state(
-            HttpServerMetrics::new(
-                self.environment.metrics().clone(),
-                config.http_host.clone(),
-                config.http_port,
-                self.http_metric_specs(&config),
-                self.environment.tracing_enabled(),
-            ),
-            observe_http_server_request,
-        ));
+        let tracing_enabled = self.environment.tracing_enabled();
+        if tracing_enabled || !self.environment.metrics().is_noop() {
+            router = router.layer(middleware::from_fn_with_state(
+                HttpServerMetrics::new(
+                    self.environment.metrics().clone(),
+                    config.http_host.clone(),
+                    config.http_port,
+                    self.http_metric_specs(&config),
+                    tracing_enabled,
+                ),
+                observe_http_server_request,
+            ));
+        }
         let listener = TcpListener::bind(&address)
             .await
             .map_err(|error| RuntimeError::Transport(error.to_string()))?;

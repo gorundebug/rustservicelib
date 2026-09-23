@@ -55,6 +55,33 @@ fn traceparent_is_sampled(value: &str) -> bool {
 /// an `async fn`: the no-tracing branch must not add another Future/poll layer
 /// to every operator and transport call on the hot path.
 macro_rules! instrument_if_enabled {
+    ($future:expr, $span:ident . clone() $(,)?) => {{
+        let future = $future;
+        let span: &::tracing::Span = &$span;
+        if span.is_disabled() {
+            future.await
+        } else {
+            ::tracing::Instrument::instrument(future, ::tracing::Span::clone(span)).await
+        }
+    }};
+    ($future:expr, $owner:ident . $field:ident . clone() $(,)?) => {{
+        let future = $future;
+        let span: &::tracing::Span = &$owner.$field;
+        if span.is_disabled() {
+            future.await
+        } else {
+            ::tracing::Instrument::instrument(future, ::tracing::Span::clone(span)).await
+        }
+    }};
+    ($future:expr, $span:ident $(,)?) => {{
+        let future = $future;
+        let span: &::tracing::Span = &$span;
+        if span.is_disabled() {
+            future.await
+        } else {
+            ::tracing::Instrument::instrument(future, ::tracing::Span::clone(span)).await
+        }
+    }};
     ($future:expr, $span:expr $(,)?) => {{
         let future = $future;
         let span = $span;
@@ -68,6 +95,30 @@ macro_rules! instrument_if_enabled {
 
 pub(crate) use instrument_if_enabled;
 
+/// Links without tracing do not construct even a disabled span.
+macro_rules! instrument_if_present {
+    ($future:expr, $span:ident $(,)?) => {{
+        let future = $future;
+        match &$span {
+            Some(span) if !span.is_disabled() => {
+                ::tracing::Instrument::instrument(future, ::tracing::Span::clone(span)).await
+            }
+            _ => future.await,
+        }
+    }};
+    ($future:expr, $span:expr $(,)?) => {{
+        let future = $future;
+        match $span {
+            Some(span) if !span.is_disabled() => {
+                ::tracing::Instrument::instrument(future, span).await
+            }
+            _ => future.await,
+        }
+    }};
+}
+
+pub(crate) use instrument_if_present;
+
 /// Trace-only scopes must not evaluate their closure or fields for a disabled span.
 macro_rules! event_if_enabled {
     ($span:expr, $event:expr $(,)?) => {{
@@ -79,6 +130,18 @@ macro_rules! event_if_enabled {
 }
 
 pub(crate) use event_if_enabled;
+
+macro_rules! event_if_present {
+    ($span:expr, $event:expr $(,)?) => {{
+        if let Some(span) = $span {
+            if !span.is_disabled() {
+                let _: () = span.in_scope($event);
+            }
+        }
+    }};
+}
+
+pub(crate) use event_if_present;
 
 /// Business callbacks still execute when tracing is disabled, without a span scope.
 macro_rules! scope_if_enabled {
@@ -93,6 +156,18 @@ macro_rules! scope_if_enabled {
 }
 
 pub(crate) use scope_if_enabled;
+
+macro_rules! scope_if_present {
+    ($span:expr, $callback:expr $(,)?) => {{
+        let callback = $callback;
+        match $span {
+            Some(span) if !span.is_disabled() => span.in_scope(callback),
+            _ => callback(),
+        }
+    }};
+}
+
+pub(crate) use scope_if_present;
 
 #[cfg(test)]
 #[path = "span_fast_path_contract_tests.rs"]
@@ -404,6 +479,13 @@ impl MessageContext {
         self
     }
 
+    /// Retain transport metadata without extracting a trace when the service
+    /// has no tracing engine. Business handlers can still read the headers.
+    pub(crate) fn with_metadata_untraced(mut self, metadata: HashMap<String, String>) -> Self {
+        self.metadata = Arc::new(metadata);
+        self
+    }
+
     /// Builds the transport tracing state without copying every HTTP header
     /// into framework metadata. HTTP datasource endpoints still preserve all
     /// request headers in their own `MessageContext`; this constructor is for
@@ -498,11 +580,32 @@ impl MessageContext {
         metadata
     }
 
+    pub(crate) fn transport_metadata_with_tracing(
+        &self,
+        tracing_enabled: bool,
+    ) -> HashMap<String, String> {
+        let mut metadata = HashMap::new();
+        self.extend_transport_metadata_with_tracing(&mut metadata, tracing_enabled);
+        metadata
+    }
+
     pub(crate) fn extend_transport_metadata(&self, metadata: &mut HashMap<String, String>) {
-        for name in [STREAM_ID_HEADER, TRACE_SAMPLING_HEADER] {
-            if let Some(value) = self.metadata.get(name) {
-                metadata.insert(name.to_owned(), value.clone());
-            }
+        self.extend_transport_metadata_with_tracing(metadata, true);
+    }
+
+    pub(crate) fn extend_transport_metadata_with_tracing(
+        &self,
+        metadata: &mut HashMap<String, String>,
+        tracing_enabled: bool,
+    ) {
+        if let Some(value) = self.metadata.get(STREAM_ID_HEADER) {
+            metadata.insert(STREAM_ID_HEADER.to_owned(), value.clone());
+        }
+        if !tracing_enabled {
+            return;
+        }
+        if let Some(value) = self.metadata.get(TRACE_SAMPLING_HEADER) {
+            metadata.insert(TRACE_SAMPLING_HEADER.to_owned(), value.clone());
         }
         if self.open_telemetry.span().span_context().is_valid() {
             global::get_text_map_propagator(|propagator| {
@@ -512,14 +615,29 @@ impl MessageContext {
     }
 
     pub fn from_tonic_request<T>(request: &tonic::Request<T>) -> Self {
+        Self::from_tonic_request_with_tracing(request, true)
+    }
+
+    pub fn from_tonic_request_with_tracing<T>(
+        request: &tonic::Request<T>,
+        tracing_enabled: bool,
+    ) -> Self {
         let metadata: HashMap<String, String> = request
             .metadata()
             .iter()
             .filter_map(|entry| match entry {
-                tonic::metadata::KeyAndValueRef::Ascii(key, value) => value
-                    .to_str()
-                    .ok()
-                    .map(|value| (key.as_str().to_owned(), value.to_owned())),
+                tonic::metadata::KeyAndValueRef::Ascii(key, value) => {
+                    let name = key.as_str();
+                    if !tracing_enabled
+                        && (name == TRACE_SAMPLING_HEADER
+                            || name == "traceparent"
+                            || name == "tracestate"
+                            || name == "baggage")
+                    {
+                        return None;
+                    }
+                    value.to_str().ok().map(|value| (name.to_owned(), value.to_owned()))
+                }
                 tonic::metadata::KeyAndValueRef::Binary(_, _) => None,
             })
             .collect();
@@ -536,7 +654,11 @@ impl MessageContext {
                 _ => None,
             }
         });
-        let context = Self::new().with_metadata(metadata);
+        let context = if tracing_enabled {
+            Self::new().with_metadata(metadata)
+        } else {
+            Self::new().with_metadata_untraced(metadata)
+        };
         if let Some(timeout) = timeout {
             Self {
                 deadline: Some(Instant::now() + timeout),
@@ -603,6 +725,27 @@ impl MessageContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn untraced_metadata_preserves_headers_without_enabling_sampling() {
+        let metadata = HashMap::from([
+            (TRACE_SAMPLING_HEADER.to_owned(), "1".to_owned()),
+            ("x-business-header".to_owned(), "value".to_owned()),
+        ]);
+        let untraced = MessageContext::new().with_metadata_untraced(metadata.clone());
+        assert_eq!(
+            untraced.metadata().get(TRACE_SAMPLING_HEADER).map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            untraced.metadata().get("x-business-header").map(String::as_str),
+            Some("value")
+        );
+        assert!(!untraced.sampling_enabled());
+
+        let traced = MessageContext::new().with_metadata(metadata);
+        assert!(traced.sampling_enabled());
+    }
 
     #[tokio::test(start_paused = true)]
     async fn cancellation_wait_observes_deadline() {
@@ -723,9 +866,9 @@ pub trait RuntimeStream: Send + Sync {
         &self,
         context: MessageContext,
         operation: &'static str,
-    ) -> (MessageContext, tracing::Span) {
+    ) -> (MessageContext, Option<tracing::Span>) {
         if !self.environment().tracing_enabled() || !context.sampling_enabled() {
-            return (context, tracing::Span::none());
+            return (context, None);
         }
         let (stream, pipeline, component) = self.tracing_labels();
         let span = tracing::info_span!(
@@ -739,11 +882,11 @@ pub trait RuntimeStream: Send + Sync {
             otel.status_message = tracing::field::Empty,
         );
         if span.is_disabled() {
-            return (context, span);
+            return (context, None);
         }
         let _ = span.set_parent(context.open_telemetry_context().clone());
         let child = span.context();
-        (context.with_open_telemetry_context(child), span)
+        (context.with_open_telemetry_context(child), Some(span))
     }
 }
 

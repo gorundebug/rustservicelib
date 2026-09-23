@@ -18,7 +18,7 @@ use thiserror::Error;
 use self::{
     log::{LogsEngine, StdoutLogsEngine},
     metrics::{Metrics, MetricsEngine, PrometheusMetricsEngine, TokioRuntimeMetrics},
-    tracing::{StdoutTracingEngine, TracingEngine},
+    tracing::{NoopTracingEngine, StdoutTracingEngine, TracingEngine},
 };
 
 /// Plain call counter for the live status-page graph view, deliberately kept
@@ -108,6 +108,7 @@ pub struct RuntimeEnvironment {
     metrics_engine: Arc<dyn MetricsEngine>,
     tokio_runtime_metrics: Arc<TokioRuntimeMetrics>,
     tracing_engine: Arc<dyn TracingEngine>,
+    tracing_enabled: bool,
     logs_engine: Arc<dyn LogsEngine>,
     delay_pool: Arc<DelayPool>,
     parallel_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
@@ -131,6 +132,7 @@ impl Default for RuntimeEnvironment {
             metrics_engine,
             tokio_runtime_metrics: Arc::new(TokioRuntimeMetrics::default()),
             tracing_engine: Arc::new(StdoutTracingEngine),
+            tracing_enabled: true,
             logs_engine: Arc::new(StdoutLogsEngine),
             delay_pool: Arc::new(DelayPool::default()),
             parallel_tasks: Arc::new(Mutex::new(Vec::new())),
@@ -209,16 +211,28 @@ impl RuntimeEnvironment {
         }
     }
 
+    /// Disable span construction when no tracing subscriber is installed.
+    /// In particular, the generated service uses this for stdout mode with
+    /// SERVICELIB_NOOP_TRACING, where there is no OpenTelemetry engine to
+    /// report its disabled state.
+    pub fn without_tracing(mut self) -> Self {
+        self.tracing_engine = Arc::new(NoopTracingEngine);
+        self.tracing_enabled = false;
+        self
+    }
+
     pub fn with_telemetry(
         default_call_semantics: CallSemantics,
         metrics_engine: Arc<dyn MetricsEngine>,
         tracing_engine: Arc<dyn TracingEngine>,
         logs_engine: Arc<dyn LogsEngine>,
     ) -> Self {
+        let tracing_enabled = tracing_engine.enabled();
         Self {
             metrics: metrics_engine.metrics().clone(),
             metrics_engine,
             tracing_engine,
+            tracing_enabled,
             logs_engine,
             runtime_config: Arc::new(ArcSwap::from_pointee(
                 RuntimeConfig::with_default_call_semantics(default_call_semantics),
@@ -538,7 +552,7 @@ impl RuntimeEnvironment {
     }
 
     pub fn tracing_enabled(&self) -> bool {
-        self.tracing_engine.enabled()
+        self.tracing_enabled
     }
 
     pub fn logs_engine(&self) -> &Arc<dyn LogsEngine> {

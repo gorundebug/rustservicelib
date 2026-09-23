@@ -79,7 +79,7 @@ where
 {
     callbacks: Mutex<HashMap<String, ResultCallback<HandlerState, T, R, E>>>,
     done: CancellationToken,
-    span: tracing::Span,
+    span: Option<tracing::Span>,
 }
 
 impl<HandlerState, T, R, E> ResultContext<HandlerState, T, R, E>
@@ -89,7 +89,7 @@ where
     R: Send + Sync + 'static,
     E: Send + Sync + 'static,
 {
-    fn new(span: tracing::Span) -> Self {
+    fn new(span: Option<tracing::Span>) -> Self {
         Self {
             callbacks: Mutex::new(HashMap::new()),
             done: CancellationToken::new(),
@@ -109,8 +109,8 @@ where
     }
 
     pub fn done(&self) {
-        crate::runtime::common::event_if_enabled!(
-            &self.span,
+        crate::runtime::common::event_if_present!(
+            self.span.as_ref(),
             || tracing::event!(name: "done_called", tracing::Level::INFO, {})
         );
         self.done.cancel();
@@ -169,7 +169,7 @@ where
     handler_state: Arc<HandlerState>,
     result_context: Arc<ResultContext<HandlerState, T, R, E>>,
     lifetime: RwLock<()>,
-    span: tracing::Span,
+    span: Option<tracing::Span>,
 }
 
 struct Concurrency {
@@ -277,14 +277,20 @@ where
             );
             if !span.is_disabled() {
                 let _ = span.set_parent(context.open_telemetry_context().clone());
+                Some(span)
+            } else {
+                None
             }
-            span
         } else {
-            tracing::Span::none()
+            None
         };
-        let context = context.with_span_context(&span);
+        let context = if let Some(span) = span.as_ref() {
+            context.with_span_context(span)
+        } else {
+            context
+        };
 
-        let begin = crate::runtime::common::instrument_if_enabled!(
+        let begin = crate::runtime::common::instrument_if_present!(
             self.handler
                 .begin_request(context, self.stream_context.clone()),
             span.clone(),
@@ -292,9 +298,11 @@ where
         let (handler_context, handler_state) = match begin {
             Ok(value) => value,
             Err(error) => {
-                self.metrics.begin_request_failed.inc();
-                crate::runtime::telemetry::record_error_if_enabled!(&span, &error);
-                crate::runtime::common::event_if_enabled!(&span, || {
+                if self.metrics.request_duration.is_enabled() {
+                    self.metrics.begin_request_failed.inc();
+                }
+                crate::runtime::telemetry::record_error_if_present!(span.as_ref(), &error);
+                crate::runtime::common::event_if_present!(span.as_ref(), || {
                     tracing::event!(
                         name: "begin_request.error",
                         tracing::Level::ERROR,
@@ -305,8 +313,8 @@ where
                 return;
             }
         };
-        crate::runtime::common::event_if_enabled!(
-            &span,
+        crate::runtime::common::event_if_present!(
+            span.as_ref(),
             || tracing::event!(name: "begin_request", tracing::Level::INFO, {})
         );
         let handler_context = if handler_context.stream_id().is_some() {
@@ -321,12 +329,12 @@ where
         let handler_state = Arc::new(handler_state);
         let result_context = Arc::new(ResultContext::new(span.clone()));
         let has_result = self.input_stream.result_stream().is_some();
-        self.metrics.active_requests.inc();
-        let started_at = self
-            .metrics
-            .request_duration
-            .is_enabled()
-            .then(Instant::now);
+        let started_at = if self.metrics.request_duration.is_enabled() {
+            self.metrics.active_requests.inc();
+            Some(Instant::now())
+        } else {
+            None
+        };
         if has_result {
             if let Err(error) = self.pending.set(
                 stream_id.clone(),
@@ -338,11 +346,11 @@ where
                 }),
             ) {
                 let result: HandlerResult = Err(Box::new(error));
-                crate::runtime::telemetry::record_error_if_enabled!(
-                    &span,
+                crate::runtime::telemetry::record_error_if_present!(
+                    span.as_ref(),
                     result.as_ref().expect_err("duplicate pending request"),
                 );
-                crate::runtime::common::instrument_if_enabled!(
+                crate::runtime::common::instrument_if_present!(
                     self.handler.end_request(
                         handler_context,
                         self.stream_context.clone(),
@@ -351,19 +359,19 @@ where
                     ),
                     span,
                 );
-                self.metrics.active_requests.dec();
                 if let Some(started_at) = started_at {
+                    self.metrics.active_requests.dec();
                     self.metrics
                         .request_duration
                         .observe(started_at.elapsed().as_secs_f64());
+                    self.metrics.request_errors.inc();
                 }
-                self.metrics.request_errors.inc();
                 return;
             }
             self.metrics.pending_requests.add(&stream_id);
         }
 
-        let mut result = crate::runtime::common::instrument_if_enabled!(
+        let mut result = crate::runtime::common::instrument_if_present!(
             self.handler.consume_message(
                 handler_context.clone(),
                 self.stream_context.clone(),
@@ -374,9 +382,9 @@ where
             span.clone(),
         );
         if let Err(error) = &result {
-            crate::runtime::telemetry::record_error_if_enabled!(&span, error);
+            crate::runtime::telemetry::record_error_if_present!(span.as_ref(), error);
         }
-        crate::runtime::common::event_if_enabled!(&span, || match &result {
+        crate::runtime::common::event_if_present!(span.as_ref(), || match &result {
             Ok(()) => tracing::event!(name: "consume_message", tracing::Level::INFO, {}),
             Err(error) => tracing::event!(
                 name: "consume_message.error",
@@ -390,7 +398,7 @@ where
         if result.is_ok() && has_result {
             tokio::select! {
                 _ = result_context.done.cancelled() => {
-                    crate::runtime::common::event_if_enabled!(&span, || tracing::event!(name: "done_received", tracing::Level::INFO, {}));
+                    crate::runtime::common::event_if_present!(span.as_ref(), || tracing::event!(name: "done_received", tracing::Level::INFO, {}));
                 }
                 _ = handler_context.cancelled() => {
                     result_wait_cancelled = true;
@@ -414,16 +422,16 @@ where
         };
         if result_wait_cancelled && result_context.done.is_cancelled() {
             result = Ok(());
-            crate::runtime::common::event_if_enabled!(
-                &span,
+            crate::runtime::common::event_if_present!(
+                span.as_ref(),
                 || tracing::event!(name: "done_received", tracing::Level::INFO, {})
             );
         } else if result_wait_cancelled {
-            crate::runtime::telemetry::record_error_if_enabled!(
-                &span,
+            crate::runtime::telemetry::record_error_if_present!(
+                span.as_ref(),
                 "custom source context cancelled"
             );
-            crate::runtime::common::event_if_enabled!(&span, || {
+            crate::runtime::common::event_if_present!(span.as_ref(), || {
                 tracing::event!(
                     name: "context_cancelled",
                     tracing::Level::WARN,
@@ -431,7 +439,7 @@ where
                 );
             });
         }
-        crate::runtime::common::instrument_if_enabled!(
+        crate::runtime::common::instrument_if_present!(
             self.handler.end_request(
                 handler_context,
                 self.stream_context.clone(),
@@ -440,27 +448,31 @@ where
             ),
             span.clone(),
         );
-        self.metrics.active_requests.dec();
         if let Some(started_at) = started_at {
+            self.metrics.active_requests.dec();
             self.metrics
                 .request_duration
                 .observe(started_at.elapsed().as_secs_f64());
-        }
-        if result.is_ok() {
-            self.metrics.messages_total.inc();
-        } else {
-            self.metrics.request_errors.inc();
+            if result.is_ok() {
+                self.metrics.messages_total.inc();
+            } else {
+                self.metrics.request_errors.inc();
+            }
         }
     }
 
     async fn consume_result(&self, context: MessageContext, value: Payload<R>) {
         let Some(stream_id) = context.stream_id().map(str::to_owned) else {
-            self.metrics.missing_stream_id.inc();
+            if self.metrics.request_duration.is_enabled() {
+                self.metrics.missing_stream_id.inc();
+            }
             tracing::error!("consumeResult called without streamID");
             return;
         };
         let Some(pending) = self.pending.get(&stream_id) else {
-            self.metrics.late_result.inc();
+            if self.metrics.request_duration.is_enabled() {
+                self.metrics.late_result.inc();
+            }
             tracing::warn!(
                 session_id = stream_id,
                 "consumeResult: session not found in pending"
@@ -473,14 +485,16 @@ where
             .get(&stream_id)
             .is_some_and(|current| Arc::ptr_eq(&current, &pending))
         {
-            self.metrics.late_result.inc();
-            crate::runtime::common::event_if_enabled!(
-                &pending.span,
+            if self.metrics.request_duration.is_enabled() {
+                self.metrics.late_result.inc();
+            }
+            crate::runtime::common::event_if_present!(
+                pending.span.as_ref(),
                 || tracing::event!(name: "late_result", tracing::Level::WARN, {})
             );
             return;
         }
-        let message_id = crate::runtime::common::scope_if_enabled!(&pending.span, || {
+        let message_id = crate::runtime::common::scope_if_present!(pending.span.as_ref(), || {
             self.handler.get_message_id(
                 &context,
                 &self.stream_context,
@@ -496,8 +510,10 @@ where
             .get(&message_id)
             .cloned();
         let Some(callback) = callback else {
-            self.metrics.unknown_message_id.inc();
-            crate::runtime::common::event_if_enabled!(&pending.span, || {
+            if self.metrics.request_duration.is_enabled() {
+                self.metrics.unknown_message_id.inc();
+            }
+            crate::runtime::common::event_if_present!(pending.span.as_ref(), || {
                 tracing::event!(
                     name: "unknown_message_id",
                     tracing::Level::WARN,
@@ -507,7 +523,7 @@ where
             });
             return;
         };
-        if crate::runtime::common::instrument_if_enabled!(
+        if crate::runtime::common::instrument_if_present!(
             callback(
                 context,
                 self.stream_context.clone(),
@@ -523,8 +539,10 @@ where
                 .expect("result callbacks lock poisoned")
                 .remove(&message_id);
             if removed.is_none() {
-                self.metrics.duplicate_message_id.inc();
-                crate::runtime::common::event_if_enabled!(&pending.span, || {
+                if self.metrics.request_duration.is_enabled() {
+                    self.metrics.duplicate_message_id.inc();
+                }
+                crate::runtime::common::event_if_present!(pending.span.as_ref(), || {
                     tracing::event!(
                         name: "duplicate_message_id",
                         tracing::Level::WARN,
@@ -534,8 +552,8 @@ where
                 });
             }
         }
-        crate::runtime::common::event_if_enabled!(
-            &pending.span,
+        crate::runtime::common::event_if_present!(
+            pending.span.as_ref(),
             || tracing::event!(name: "result_consumed", tracing::Level::INFO, message_id),
         );
     }

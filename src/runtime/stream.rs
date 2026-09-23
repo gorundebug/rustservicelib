@@ -186,7 +186,7 @@ where
         &self,
         context: MessageContext,
         operation: &'static str,
-    ) -> (MessageContext, tracing::Span) {
+    ) -> (MessageContext, Option<tracing::Span>) {
         RuntimeStream::start_span(self, context, operation)
     }
 

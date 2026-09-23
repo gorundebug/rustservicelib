@@ -25,3 +25,17 @@ impl TracingEngine for StdoutTracingEngine {
         Ok(())
     }
 }
+
+#[derive(Default)]
+pub struct NoopTracingEngine;
+
+#[async_trait]
+impl TracingEngine for NoopTracingEngine {
+    fn enabled(&self) -> bool {
+        false
+    }
+
+    async fn shutdown(&self) -> RuntimeResult<()> {
+        Ok(())
+    }
+}

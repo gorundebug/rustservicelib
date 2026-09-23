@@ -103,7 +103,7 @@ fn filtered_operator_and_grpc_spans_preserve_the_propagation_context() {
             .enable_sampling()
             .with_open_telemetry_context(parent.clone());
         let (operator_context, span) = stream.start_span(context.clone(), "stream.map");
-        assert!(span.is_disabled());
+        assert!(span.is_none());
         assert_eq!(
             operator_context
                 .open_telemetry_context()
@@ -119,6 +119,34 @@ fn filtered_operator_and_grpc_spans_preserve_the_propagation_context() {
             parent.span().span_context()
         );
     });
+}
+
+#[test]
+fn noop_tracing_environment_skips_sampled_operator_spans() {
+    use super::RuntimeStream;
+    use crate::runtime::{config::CallSemantics, environment::RuntimeEnvironment};
+
+    struct Stream(RuntimeEnvironment);
+    impl RuntimeStream for Stream {
+        fn id(&self) -> i32 {
+            1
+        }
+        fn name(&self) -> String {
+            "Reserve".to_owned()
+        }
+        fn environment(&self) -> &RuntimeEnvironment {
+            &self.0
+        }
+        fn tracing_labels(&self) -> (&str, &str, &str) {
+            ("Reserve", "booking", "Inventory")
+        }
+    }
+
+    let stream = Stream(RuntimeEnvironment::new(CallSemantics::FunctionCall).without_tracing());
+    assert!(!stream.environment().tracing_enabled());
+    let context = super::MessageContext::new().enable_sampling();
+    let (_, span) = stream.start_span(context, "stream.map");
+    assert!(span.is_none());
 }
 
 #[test]

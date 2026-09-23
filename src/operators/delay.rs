@@ -117,8 +117,8 @@ where
 {
     async fn consume(&self, context: MessageContext, payload: Payload<T>) {
         let (context, span) = self.output.start_span(context, "stream.delay");
-        let event_span = span.clone();
-        crate::runtime::common::instrument_if_enabled!(
+        let event_span = span;
+        crate::runtime::common::instrument_if_present!(
             async {
                 let duration = self
                     .function
@@ -135,19 +135,24 @@ where
                 let error_context = context.clone();
                 let (error_payload, payload) = payload.share();
                 let delayed_span = event_span.clone();
+                let trace_delayed_event = delayed_span
+                    .as_ref()
+                    .is_some_and(|span| !span.is_disabled());
                 let scheduled = self
                     .output
                     .environment()
                     .delay_pool()
                     .delay(context, duration, async move {
-                        crate::runtime::common::instrument_if_enabled!(
+                        crate::runtime::common::instrument_if_present!(
                             async {
                                 if delayed_context.is_cancelled() {
-                                    tracing::event!(
-                                        name: "delay.skipped",
-                                        tracing::Level::WARN,
-                                        reason = "context canceled"
-                                    );
+                                    if trace_delayed_event {
+                                        tracing::event!(
+                                            name: "delay.skipped",
+                                            tracing::Level::WARN,
+                                            reason = "context canceled"
+                                        );
+                                    }
                                     return;
                                 }
                                 output.emit(delayed_context, payload).await;
@@ -157,21 +162,26 @@ where
                     })
                     .await;
                 if let Err(error) = scheduled {
-                    tracing::event!(
-                        name: "delay.skipped",
-                        parent: &event_span,
-                        tracing::Level::WARN,
-                        error = %error,
-                        reason = "delay_pool_rejected",
-                        "delay skipped"
-                    );
+                    if let Some(event_span) = event_span.as_ref() {
+                        crate::runtime::common::event_if_enabled!(
+                            event_span,
+                            || tracing::event!(
+                                name: "delay.skipped",
+                                parent: event_span,
+                                tracing::Level::WARN,
+                                error = %error,
+                                reason = "delay_pool_rejected",
+                                "delay skipped"
+                            )
+                        );
+                    }
                     let out = self.output.collector();
                     self.function
                         .delay_error(error_context, &self.output, &error_payload, error, &out)
                         .await;
                 }
             },
-            span,
+            event_span,
         );
     }
 }

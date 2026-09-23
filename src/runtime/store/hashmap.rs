@@ -36,7 +36,7 @@ struct HashMapJoinStorageInner<K> {
     config: Arc<dyn Fn() -> (Duration, bool) + Send + Sync>,
     stopped: AtomicBool,
     started: AtomicBool,
-    metrics: OnceLock<HashMapJoinStorageMetrics>,
+    metrics: OnceLock<Option<HashMapJoinStorageMetrics>>,
 }
 
 struct HashMapJoinStorageMetrics {
@@ -106,6 +106,10 @@ where
         if self.inner.metrics.get().is_some() {
             return Ok(());
         }
+        if environment.metrics().is_noop() {
+            let _ = self.inner.metrics.set(None);
+            return Ok(());
+        }
         let scope = environment.metrics().scope(
             "hashmap_join_storage",
             [
@@ -115,7 +119,7 @@ where
             .into_iter()
             .collect(),
         );
-        let _ = self.inner.metrics.set(HashMapJoinStorageMetrics {
+        let _ = self.inner.metrics.set(Some(HashMapJoinStorageMetrics {
             count: scope.gauge(
                 "count",
                 "Elements count stored in a join storage",
@@ -126,7 +130,7 @@ where
                 "Total number of items evicted from join storage by TTL",
                 Labels::new(),
             )?,
-        });
+        }));
         Ok(())
     }
 
@@ -173,7 +177,7 @@ where
                 .is_some_and(|stored| Arc::ptr_eq(stored, &item))
             {
                 items.remove(&key);
-                if let Some(metrics) = store.metrics.get() {
+                if let Some(metrics) = store.metrics.get().and_then(Option::as_ref) {
                     metrics.count.dec();
                     metrics.evictions_total.inc();
                 }
@@ -188,7 +192,7 @@ where
             .is_some_and(|stored| Arc::ptr_eq(stored, item))
         {
             items.remove(key);
-            if let Some(metrics) = self.inner.metrics.get() {
+            if let Some(metrics) = self.inner.metrics.get().and_then(Option::as_ref) {
                 metrics.count.dec();
             }
         }
@@ -225,7 +229,7 @@ where
                         callback: Arc::clone(&callback),
                     }));
                     items.insert(key.clone(), Arc::clone(&item));
-                    if let Some(metrics) = self.inner.metrics.get() {
+                    if let Some(metrics) = self.inner.metrics.get().and_then(Option::as_ref) {
                         metrics.count.inc();
                     }
                     (item, true)
@@ -305,7 +309,7 @@ where
     async fn stop(&self, _context: MessageContext) {
         self.inner.stopped.store(true, Ordering::Release);
         self.inner.items.lock().await.clear();
-        if let Some(metrics) = self.inner.metrics.get() {
+        if let Some(metrics) = self.inner.metrics.get().and_then(Option::as_ref) {
             metrics.count.set(0);
         }
     }

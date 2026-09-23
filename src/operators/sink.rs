@@ -102,7 +102,7 @@ where
     async fn consume(&self, context: MessageContext, payload: Payload<T>) {
         let (context, span) = RuntimeStream::start_span(self, context, "stream.sink");
         if let Some(consumer) = self.sink_consumer.get() {
-            crate::runtime::common::instrument_if_enabled!(
+            crate::runtime::common::instrument_if_present!(
                 consumer.consume(context, payload),
                 span
             );
@@ -185,7 +185,7 @@ where
     async fn consume(&self, context: MessageContext, payload: Payload<T>) {
         let (context, span) = RuntimeStream::start_span(self, context, "stream.sink");
         if let Some(consumer) = self.sink_consumer.get() {
-            crate::runtime::common::instrument_if_enabled!(
+            crate::runtime::common::instrument_if_present!(
                 consumer.consume(context, payload),
                 span
             );

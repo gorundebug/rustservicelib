@@ -107,6 +107,9 @@ pub fn apply_endpoint_tracing(
     environment: &RuntimeEnvironment,
     endpoint_id: i32,
 ) -> MessageContext {
+    if !environment.tracing_enabled() {
+        return context;
+    }
     if environment
         .runtime_config()
         .endpoint_by_id(endpoint_id)
@@ -119,9 +122,8 @@ pub fn apply_endpoint_tracing(
 }
 
 pub(crate) struct PendingRequests {
-    enabled: bool,
     gauge: Int64Gauge,
-    started: Arc<PendingRequestTimestamps>,
+    started: Option<Arc<PendingRequestTimestamps>>,
 }
 
 impl PendingRequests {
@@ -131,35 +133,36 @@ impl PendingRequests {
             "Number of requests awaiting a pipeline result",
             Labels::new(),
         )?;
-        let started = Arc::new(PendingRequestTimestamps::new());
-        let observable = Arc::clone(&started);
-        scope.observable_float64_gauge(
-            "pending_oldest_age_seconds",
-            "Age in seconds of the oldest pending request awaiting a pipeline result",
-            Labels::new(),
-            Arc::new(move || observable.oldest_age()),
-        )?;
-        Ok(Self {
-            enabled: gauge.is_enabled(),
-            gauge,
-            started,
-        })
+        let started = if gauge.is_enabled() {
+            let started = Arc::new(PendingRequestTimestamps::new());
+            let observable = Arc::clone(&started);
+            scope.observable_float64_gauge(
+                "pending_oldest_age_seconds",
+                "Age in seconds of the oldest pending request awaiting a pipeline result",
+                Labels::new(),
+                Arc::new(move || observable.oldest_age()),
+            )?;
+            Some(started)
+        } else {
+            None
+        };
+        Ok(Self { gauge, started })
     }
 
     pub(crate) fn add(&self, stream_id: &str) {
-        if !self.enabled {
+        let Some(started) = &self.started else {
             return;
-        }
+        };
         self.gauge.inc();
-        self.started.insert(stream_id);
+        started.insert(stream_id);
     }
 
     pub(crate) fn remove(&self, stream_id: &str) {
-        if !self.enabled {
+        let Some(started) = &self.started else {
             return;
-        }
+        };
         self.gauge.dec();
-        self.started.remove(stream_id);
+        started.remove(stream_id);
     }
 }
 
@@ -169,6 +172,7 @@ impl PendingRequests {
 /// contract. Protocol-specific information belongs to transport metrics and
 /// must not change the framework labels defined by Go.
 pub struct DataSourceEndpointMetrics {
+    enabled: bool,
     messages_total: Int64Counter,
     request_errors: Int64Counter,
     active_requests: Int64Gauge,
@@ -203,6 +207,7 @@ impl DataSourceEndpointMetrics {
         .collect();
         let scope = metrics.scope("datasource_endpoint", labels);
         Ok(Self {
+            enabled: !metrics.is_noop(),
             messages_total: scope.counter(
                 "messages_total",
                 "Total number of successfully processed messages in data source endpoint",
@@ -230,20 +235,30 @@ impl DataSourceEndpointMetrics {
         })
     }
 
-    pub fn request_start(&self) -> Instant {
+    pub fn request_start(&self) -> Option<Instant> {
+        if !self.enabled {
+            return None;
+        }
         self.active_requests.inc();
-        Instant::now()
+        Some(Instant::now())
     }
 
     pub fn pending_add(&self, stream_id: &str) {
-        self.pending_requests.add(stream_id);
+        if self.enabled {
+            self.pending_requests.add(stream_id);
+        }
     }
 
     pub fn pending_remove(&self, stream_id: &str) {
-        self.pending_requests.remove(stream_id);
+        if self.enabled {
+            self.pending_requests.remove(stream_id);
+        }
     }
 
-    pub fn request_end(&self, started_at: Instant, success: bool) {
+    pub fn request_end(&self, started_at: Option<Instant>, success: bool) {
+        let Some(started_at) = started_at else {
+            return;
+        };
         self.active_requests.dec();
         self.request_duration
             .observe(started_at.elapsed().as_secs_f64());
@@ -385,5 +400,31 @@ where
         if let Some(sender) = sender {
             let _ = sender.send(payload);
         }
+    }
+}
+
+#[cfg(test)]
+mod telemetry_tests {
+    use super::PendingRequests;
+    use crate::runtime::environment::metrics::{Labels, Metrics};
+
+    #[test]
+    fn pending_request_timestamps_exist_only_when_metrics_are_enabled() {
+        let noop = Metrics::noop();
+        let noop_scope = noop.scope("datasource_endpoint", Labels::new());
+        let noop_pending = PendingRequests::new(&noop_scope).unwrap();
+        assert!(noop_pending.started.is_none());
+        noop_pending.add("request");
+        noop_pending.remove("request");
+        assert_eq!(noop_pending.gauge.get(), 0);
+
+        let metrics = Metrics::default();
+        let scope = metrics.scope("datasource_endpoint", Labels::new());
+        let pending = PendingRequests::new(&scope).unwrap();
+        assert!(pending.started.is_some());
+        pending.add("request");
+        assert_eq!(pending.gauge.get(), 1);
+        pending.remove("request");
+        assert_eq!(pending.gauge.get(), 0);
     }
 }

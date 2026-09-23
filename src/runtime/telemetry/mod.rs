@@ -83,6 +83,18 @@ macro_rules! record_error_if_enabled {
 
 pub(crate) use record_error_if_enabled;
 
+macro_rules! record_error_if_present {
+    ($span:expr, $error:expr $(,)?) => {{
+        if let Some(span) = $span {
+            if !span.is_disabled() {
+                $crate::runtime::telemetry::record_span_error(span, $error);
+            }
+        }
+    }};
+}
+
+pub(crate) use record_error_if_present;
+
 /// Keep attribute-key/value evaluation inside the disabled-span guard. A
 /// function wrapper would evaluate arguments before it can inspect the span.
 macro_rules! record_if_enabled {
@@ -95,6 +107,18 @@ macro_rules! record_if_enabled {
 }
 
 pub(crate) use record_if_enabled;
+
+macro_rules! record_if_present {
+    ($span:expr, $key:expr, $value:expr $(,)?) => {{
+        if let Some(span) = $span {
+            if !span.is_disabled() {
+                span.record($key, $value);
+            }
+        }
+    }};
+}
+
+pub(crate) use record_if_present;
 
 #[cfg(test)]
 mod attribute_fast_path_tests {
@@ -186,6 +210,10 @@ struct HttpClientMetricsInner {
 }
 
 impl HttpClientMetrics {
+    pub(crate) fn enabled(&self) -> bool {
+        self.inner.enabled
+    }
+
     pub(crate) fn new(metrics: Metrics, method: &str, url: &str) -> Self {
         let enabled = !metrics.is_noop();
         let parsed = reqwest::Url::parse(url).ok();
@@ -675,7 +703,7 @@ struct GrpcMethodMetrics {
 
 struct GrpcCallObservation {
     metrics: Option<Arc<GrpcMethodMetrics>>,
-    started_at: Instant,
+    started_at: Option<Instant>,
     span: Option<tracing::Span>,
 }
 
@@ -817,16 +845,16 @@ pub(crate) fn grpc_error_status(error: &(dyn std::error::Error + 'static)) -> &'
 impl GrpcCallObservation {
     fn finish(self, status: &str) {
         let status = grpc_status_name(status);
+        let elapsed = self.started_at.map(|started_at| started_at.elapsed().as_secs_f64());
         if status != "OK"
             && let Some(span) = &self.span
         {
             record_error_if_enabled!(span, format_args!("gRPC status {status}"));
         }
-        let elapsed = self.started_at.elapsed().as_secs_f64();
-        if let Some(metrics) = &self.metrics {
+        if let (Some(metrics), Some(elapsed)) = (&self.metrics, elapsed) {
             metrics.observe(status, elapsed);
         }
-        if let Some(span) = &self.span {
+        if let (Some(span), Some(elapsed)) = (&self.span, elapsed) {
             crate::runtime::common::event_if_enabled!(span, || {
                 tracing::info!(
                     rpc.system.name = "grpc",
@@ -933,7 +961,6 @@ where
             self.metrics
                 .method(request.uri().path().trim_start_matches('/'))
         });
-        let started_at = Instant::now();
         let future = self.inner.call(request);
         let span = tracing_parent.and_then(|parent| {
             let span = tracing::info_span!(
@@ -952,6 +979,7 @@ where
             let _ = span.set_parent(parent);
             Some(span)
         });
+        let started_at = (metrics.is_some() || span.is_some()).then(Instant::now);
         if metrics.is_none() && span.is_none() {
             return Box::pin(future);
         }

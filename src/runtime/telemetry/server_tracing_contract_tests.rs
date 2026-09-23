@@ -4,7 +4,6 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Instant,
 };
 
 use axum::{
@@ -221,7 +220,7 @@ fn grpc_completion_does_not_leak_events_into_an_unrelated_parent() {
             };
             GrpcCallObservation {
                 metrics: None,
-                started_at: Instant::now(),
+                started_at: None,
                 span: Some(span),
             }
             .finish("13");

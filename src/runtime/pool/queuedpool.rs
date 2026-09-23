@@ -289,7 +289,7 @@ pub(super) struct QueuedPool {
     sender: mpsc::UnboundedSender<Command>,
     receiver: Mutex<Option<mpsc::UnboundedReceiver<Command>>>,
     drained: watch::Sender<bool>,
-    metrics: PoolMetrics,
+    metrics: Option<PoolMetrics>,
 }
 
 impl QueuedPool {
@@ -309,10 +309,15 @@ impl QueuedPool {
                     RuntimeError::TaskPoolNotFound(name.clone())
                 }
             })?;
-        let metrics = PoolMetrics::new(&name, priority, &environment)?;
-        metrics
-            .executors_target
-            .set(Self::resolve_executors(fallback_executors) as i64);
+        let metrics = if environment.metrics().is_noop() {
+            None
+        } else {
+            let metrics = PoolMetrics::new(&name, priority, &environment)?;
+            metrics
+                .executors_target
+                .set(Self::resolve_executors(fallback_executors) as i64);
+            Some(metrics)
+        };
         let (sender, receiver) = mpsc::unbounded_channel();
         let (drained, _) = watch::channel(false);
         Ok(Arc::new(Self {
@@ -393,11 +398,15 @@ impl QueuedPool {
         task: BoxTask,
     ) -> RuntimeResult<()> {
         if context.is_cancelled() {
-            self.metrics.task_rejected.inc();
+            if let Some(metrics) = &self.metrics {
+                metrics.task_rejected.inc();
+            }
             return Err(RuntimeError::ContextCancelled);
         }
         if self.state.load(Ordering::Acquire) == 2 {
-            self.metrics.task_rejected.inc();
+            if let Some(metrics) = &self.metrics {
+                metrics.task_rejected.inc();
+            }
             return Err(RuntimeError::ResourceStopped(self.name.clone()));
         }
         self.launch();
@@ -428,7 +437,9 @@ impl QueuedPool {
         tokio::select! {
             _ = &mut wait => {},
             _ = context.cancelled() => {
-                self.metrics.stop_timeout.inc();
+                if let Some(metrics) = &self.metrics {
+                    metrics.stop_timeout.inc();
+                }
                 tracing::warn!(pool = self.name, "task pool stopped by timeout");
                 wait.await;
             }
@@ -454,22 +465,32 @@ impl QueuedPool {
             tokio::select! {
                 biased;
                 Some(Ok(id)) = cancellations.next(), if !cancellations.is_empty() => {
-                    if queue.promote(id) { self.metrics.task_cancelled.inc(); }
+                    if queue.promote(id) {
+                        if let Some(metrics) = &self.metrics {
+                            metrics.task_cancelled.inc();
+                        }
+                    }
                 }
                 command = receiver.recv(), if receiving => match command {
                     Some(Command::Add(context, priority, task, reply)) => {
                         if stopped {
-                            self.metrics.task_rejected.inc();
+                            if let Some(metrics) = &self.metrics {
+                                metrics.task_rejected.inc();
+                            }
                             let _ = reply.send(Err(RuntimeError::ResourceStopped(self.name.clone())));
                         } else if context.is_cancelled() {
-                            self.metrics.task_rejected.inc();
+                            if let Some(metrics) = &self.metrics {
+                                metrics.task_rejected.inc();
+                            }
                             let _ = reply.send(Err(RuntimeError::ContextCancelled));
                         } else {
                             let id = next_id; next_id += 1;
                             let (cancel, registration) = AbortHandle::new_pair();
                             cancellations.push(Abortable::new(async move { context.cancelled().await; id }.boxed(), registration));
                             queue.push(id, priority, Entry { task, cancellation: cancel });
-                            self.metrics.queue_length.set(queue.len() as i64);
+                            if let Some(metrics) = &self.metrics {
+                                metrics.queue_length.set(queue.len() as i64);
+                            }
                             let _ = reply.send(Ok(()));
                         }
                     }
@@ -498,30 +519,41 @@ impl QueuedPool {
                     let metrics = self.metrics.clone();
                     let completion = self.sender.clone();
                     workers.spawn(async move {
-                        metrics.executors_allocated.inc();
+                        if let Some(metrics) = &metrics {
+                            metrics.executors_allocated.inc();
+                        }
                         while let Some(task) = rx.recv().await {
-                            metrics.executors_busy.inc();
-                            let started_at =
-                                metrics.execution_duration.is_enabled().then(Instant::now);
+                            if let Some(metrics) = &metrics {
+                                metrics.executors_busy.inc();
+                            }
+                            let started_at = metrics.as_ref().and_then(|metrics| {
+                                metrics.execution_duration.is_enabled().then(Instant::now)
+                            });
                             super::run_task(&name, task).await;
-                            metrics.executors_busy.dec();
-                            metrics.tasks_total.inc();
-                            if let Some(started_at) = started_at {
-                                metrics
-                                    .execution_duration
-                                    .observe(started_at.elapsed().as_secs_f64());
+                            if let Some(metrics) = &metrics {
+                                metrics.executors_busy.dec();
+                                metrics.tasks_total.inc();
+                                if let Some(started_at) = started_at {
+                                    metrics
+                                        .execution_duration
+                                        .observe(started_at.elapsed().as_secs_f64());
+                                }
                             }
                             if completion.send(Command::Ready(id)).is_err() {
                                 break;
                             }
                         }
-                        metrics.executors_allocated.dec();
+                        if let Some(metrics) = &metrics {
+                            metrics.executors_allocated.dec();
+                        }
                     });
                 }
                 while !idle.is_empty() && !queue.is_empty() {
                     let (_, entry) = queue.pop().unwrap();
                     entry.cancellation.abort();
-                    self.metrics.queue_length.set(queue.len() as i64);
+                    if let Some(metrics) = &self.metrics {
+                        metrics.queue_length.set(queue.len() as i64);
+                    }
                     let worker = idle.pop_front().unwrap();
                     busy += 1;
                     executors[&worker]
@@ -529,7 +561,9 @@ impl QueuedPool {
                         .unwrap_or_else(|_| unreachable!("live executor"));
                 }
             }
-            self.metrics.executors_target.set(target as i64);
+            if let Some(metrics) = &self.metrics {
+                metrics.executors_target.set(target as i64);
+            }
             if stopped && queue.is_empty() && busy == 0 && !retiring {
                 retiring = true;
                 executors.clear();
