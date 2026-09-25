@@ -603,6 +603,20 @@ async fn case_routes_to_the_selected_typed_branch() {
     );
 }
 
+#[tokio::test]
+#[should_panic(expected = "case selector returned branch")]
+async fn case_rejects_out_of_bounds_index() {
+    let environment = test_environment(Vec::new(), Vec::new());
+    let source = Stream::new(&StreamConfig::new(1, "Input"), environment);
+    let cases = source
+        .case(&(StreamConfig::new(2, "Case").into()), |_: &i32| usize::MAX)
+        .unwrap();
+    let branch = cases.when(&(StreamConfig::new(3, "When").into()));
+    branch.set_consumer(Arc::new(Capture::default()), 4);
+    source.environment().build_runtime_streams().unwrap();
+    source.emit(MessageContext::new(), Payload::new(42)).await;
+}
+
 struct SumJoin;
 
 #[async_trait]
