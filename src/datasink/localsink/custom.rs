@@ -145,7 +145,6 @@ where
     Ok(consumer)
 }
 
-#[async_trait]
 impl<HandlerState, T, R, H> Consumer<T> for CustomEndpointConsumer<HandlerState, T, R, H>
 where
     HandlerState: Send + 'static,

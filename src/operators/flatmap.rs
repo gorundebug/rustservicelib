@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
-
 use crate::runtime::{
-    collector::Collector,
+    collector::{Collect, Collector},
     common::{Consumer, MessageContext, Payload, RuntimeStream},
     config::FlatMapStreamConfig,
     environment::RuntimeResult,
@@ -20,7 +18,7 @@ where
         context: MessageContext,
         stream: &dyn RuntimeStream,
         value: &T,
-        out: &Collector<R>,
+        out: &impl Collect<R>,
     ) -> impl std::future::Future<Output = ()> + Send;
 }
 
@@ -37,19 +35,20 @@ where
         context: MessageContext,
         stream: &dyn RuntimeStream,
         value: &T,
-        out: &Collector<R>,
+        out: &impl Collect<R>,
     ) -> impl std::future::Future<Output = ()> + Send {
         self.as_ref().flat_map(context, stream, value, out)
     }
 }
 
-pub struct FlatMapStream<T, R, F>
+pub struct FlatMapStream<T, R, F, C = Collector<R>>
 where
     T: Send + Sync + 'static,
     R: Send + Sync + 'static,
     F: FlatMapFunction<T, R>,
 {
     output: Stream<R>,
+    collector: C,
     function: F,
     _input: std::marker::PhantomData<fn(T)>,
 }
@@ -68,12 +67,28 @@ where
     ) -> RuntimeResult<Stream<R>> {
         let output = Stream::new(&config.stream, source.environment().clone());
         let operator = Arc::new(Self {
+            collector: output.collector(),
             output: output.clone(),
             function,
             _input: std::marker::PhantomData,
         });
         source.try_set_consumer(operator, output.id())?;
         Ok(output)
+    }
+
+    pub fn from_collector<C>(
+        output: Collector<R, C>,
+        function: F,
+    ) -> FlatMapStream<T, R, F, Collector<R, C>>
+    where
+        C: Collect<R>,
+    {
+        FlatMapStream {
+            output: output.stream().clone(),
+            collector: output,
+            function,
+            _input: std::marker::PhantomData,
+        }
     }
 }
 
@@ -94,19 +109,18 @@ where
     }
 }
 
-#[async_trait]
-impl<T, R, F> Consumer<T> for FlatMapStream<T, R, F>
+impl<T, R, F, C> Consumer<T> for FlatMapStream<T, R, F, C>
 where
     T: Send + Sync + 'static,
     R: Send + Sync + 'static,
     F: FlatMapFunction<T, R> + 'static,
+    C: Collect<R>,
 {
     async fn consume(&self, context: MessageContext, payload: Payload<T>) {
         let (context, span) = self.output.start_span(context, "stream.flatmap");
-        let out = self.output.collector();
         crate::runtime::common::instrument_if_present!(
             self.function
-                .flat_map(context, &self.output, &payload, &out),
+                .flat_map(context, &self.output, &payload, &self.collector),
             span,
         );
     }

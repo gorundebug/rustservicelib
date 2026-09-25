@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
-
 use super::error::ErrorStream;
 use crate::runtime::{
     common::{ConstructionCell, Consumer, MessageContext, Payload, RuntimeStream},
@@ -20,7 +18,7 @@ where
     pipeline: String,
     component: String,
     endpoint_id: i32,
-    sink_consumer: ConstructionCell<Arc<dyn Consumer<T>>>,
+    sink_consumer: ConstructionCell<Arc<dyn crate::runtime::common::ErasedConsumer<T>>>,
     error_stream: Stream<E>,
 }
 
@@ -31,10 +29,17 @@ where
     E: Send + Sync + 'static,
 {
     pub fn make(config: &SinkStreamConfig, source: &Stream<T>) -> RuntimeResult<Arc<Self>> {
-        source
-            .environment()
-            .register_runtime_stream(config.stream.id);
-        let error_stream = ErrorStream::new(&config.stream, source.environment().clone())
+        let sink = Self::new(config, source.environment().clone())?;
+        source.try_set_consumer(Arc::clone(&sink), sink.id())?;
+        Ok(sink)
+    }
+
+    pub fn new(
+        config: &SinkStreamConfig,
+        environment: RuntimeEnvironment,
+    ) -> RuntimeResult<Arc<Self>> {
+        environment.register_runtime_stream(config.stream.id);
+        let error_stream = ErrorStream::new(&config.stream, environment)
             .stream()
             .clone();
         let id = config.stream.id;
@@ -47,7 +52,6 @@ where
             sink_consumer: ConstructionCell::empty(),
             error_stream,
         });
-        source.try_set_consumer(Arc::clone(&sink_stream), sink_stream.id)?;
         Ok(sink_stream)
     }
 }
@@ -65,7 +69,10 @@ where
         &self.error_stream
     }
 
-    pub fn set_sink_consumer(&self, consumer: Arc<dyn Consumer<T>>) -> RuntimeResult<()> {
+    pub fn set_sink_consumer<C: Consumer<T> + 'static>(
+        &self,
+        consumer: Arc<C>,
+    ) -> RuntimeResult<()> {
         self.sink_consumer.replace(consumer);
         Ok(())
     }
@@ -93,7 +100,6 @@ where
     }
 }
 
-#[async_trait]
 impl<T, E> Consumer<T> for SinkStream<T, E>
 where
     T: Send + Sync + 'static,
@@ -118,7 +124,7 @@ where
 {
     result_stream: Stream<R>,
     endpoint_id: i32,
-    sink_consumer: ConstructionCell<Arc<dyn Consumer<T>>>,
+    sink_consumer: ConstructionCell<Arc<dyn crate::runtime::common::ErasedConsumer<T>>>,
     error_stream: Stream<E>,
 }
 
@@ -132,8 +138,17 @@ where
     E: Send + Sync + 'static,
 {
     pub fn make(config: &SinkStreamConfig, source: &Stream<T>) -> RuntimeResult<Arc<Self>> {
-        let result_stream = Stream::new(&config.stream, source.environment().clone());
-        let error_stream = ErrorStream::new(&config.stream, source.environment().clone())
+        let sink = Self::new(config, source.environment().clone())?;
+        source.try_set_consumer(Arc::clone(&sink), sink.result_stream.id())?;
+        Ok(sink)
+    }
+
+    pub fn new(
+        config: &SinkStreamConfig,
+        environment: RuntimeEnvironment,
+    ) -> RuntimeResult<Arc<Self>> {
+        let result_stream = Stream::new(&config.stream, environment.clone());
+        let error_stream = ErrorStream::new(&config.stream, environment)
             .stream()
             .clone();
         let sink_stream = Arc::new(Self {
@@ -142,7 +157,6 @@ where
             sink_consumer: ConstructionCell::empty(),
             error_stream,
         });
-        source.try_set_consumer(Arc::clone(&sink_stream), sink_stream.result_stream.id())?;
         Ok(sink_stream)
     }
 }
@@ -165,7 +179,10 @@ where
         &self.error_stream
     }
 
-    pub fn set_sink_consumer(&self, consumer: Arc<dyn Consumer<T>>) -> RuntimeResult<()> {
+    pub fn set_sink_consumer<C: Consumer<T> + 'static>(
+        &self,
+        consumer: Arc<C>,
+    ) -> RuntimeResult<()> {
         self.sink_consumer.replace(consumer);
         Ok(())
     }
@@ -175,7 +192,6 @@ where
     }
 }
 
-#[async_trait]
 impl<T, R, E> Consumer<T> for SinkStreamWithResult<T, R, E>
 where
     T: Send + Sync + 'static,

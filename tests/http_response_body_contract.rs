@@ -2,8 +2,8 @@ use std::{
     io,
     pin::Pin,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
     task::{Context, Poll},
 };
@@ -68,7 +68,10 @@ async fn partial_read_does_not_drain_large_body() {
     body.close();
     assert_eq!(drops.load(Ordering::SeqCst), 1);
     assert_eq!(bytes_read.load(Ordering::SeqCst), 4096);
-    assert_eq!(body.read(&mut prefix).await.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+    assert_eq!(
+        body.read(&mut prefix).await.unwrap_err().kind(),
+        io::ErrorKind::BrokenPipe
+    );
     drop(body);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }

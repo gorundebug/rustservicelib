@@ -232,7 +232,6 @@ struct ResultCollector {
     ready: Arc<Notify>,
 }
 
-#[async_trait]
 impl Consumer<u32> for ResultCollector {
     async fn consume(&self, _context: MessageContext, value: Payload<u32>) {
         self.values.lock().unwrap().push(*value);

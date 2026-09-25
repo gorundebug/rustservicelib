@@ -8,6 +8,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::runtime::{
+    collector::{Collect, Collector},
     common::{
         CallableSubStream, ConstructionCell, Consumer, ContextKey, MessageContext, Payload,
         SubStreamCollector,
@@ -116,6 +117,13 @@ impl<T: Send + Sync + 'static, R: Send + Sync + 'static> SubStream<T, R> {
     }
 
     pub fn set_source(&self, source: &Stream<R>) -> RuntimeResult<()> {
+        self.set_source_typed(source).map(|_| ())
+    }
+
+    pub fn set_source_typed(
+        &self,
+        source: &Stream<R>,
+    ) -> RuntimeResult<Collector<R, impl Collect<R> + Clone + use<T, R>>> {
         if self.inner.source.get().is_some() {
             return Err(RuntimeError::SourceAlreadySet {
                 stream: self.stream().name(),
@@ -128,7 +136,7 @@ impl<T: Send + Sync + 'static, R: Send + Sync + 'static> SubStream<T, R> {
                 "SubStream result source must be a different stream in the same service".to_owned(),
             ));
         }
-        source.try_set_consumer(
+        let collector = source.try_set_typed_consumer(
             Arc::new(ResultLink {
                 key: self.inner.key.clone(),
             }),
@@ -139,7 +147,8 @@ impl<T: Send + Sync + 'static, R: Send + Sync + 'static> SubStream<T, R> {
             .set(source.clone())
             .map_err(|_| RuntimeError::SourceAlreadySet {
                 stream: self.stream().name(),
-            })
+            })?;
+        Ok(collector)
     }
 
     pub async fn consume(
@@ -186,7 +195,9 @@ impl<T: Send + Sync + 'static, R: Send + Sync + 'static> SubStream<T, R> {
     ) -> RuntimeResult<()> {
         // Like Go's Emit, a direct call returns only after its business code
         // finishes. Cancellation is cooperative; do not drop that code's future.
-        self.stream().emit(dispatch_context, Payload::new(value)).await;
+        self.stream()
+            .emit(dispatch_context, Payload::new(value))
+            .await;
         tokio::select! {
             _ = context.cancelled() => {},
             _ = call.done.cancelled() => {},
@@ -247,7 +258,6 @@ struct ResultLink<R: Send + Sync + 'static> {
     key: ContextKey<Call<R>>,
 }
 
-#[async_trait]
 impl<R: Send + Sync + 'static> Consumer<R> for ResultLink<R> {
     async fn consume(&self, context: MessageContext, payload: Payload<R>) {
         if let Some(call) = context.local_value(&self.key) {

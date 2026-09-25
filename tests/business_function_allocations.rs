@@ -1,13 +1,15 @@
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::Cell,
-    sync::{Arc, atomic::{AtomicBool, Ordering}},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use servicelib::{
-    Collector, MessageContext, Payload,
+    MessageContext, Payload,
     operators::MapFunction,
     runtime::{
         common::{Consumer, RuntimeStream},
@@ -92,7 +94,7 @@ impl MapFunction<u64, u64> for PureMap {
         _context: MessageContext,
         _stream: &dyn RuntimeStream,
         _value: &u64,
-        _out: &Collector<u64>,
+        _out: &impl servicelib::runtime::collector::Collect<u64>,
     ) {
     }
 }
@@ -107,12 +109,11 @@ impl MapFunction<u64, u64> for AllocationProbe {
         context: MessageContext,
         stream: &dyn RuntimeStream,
         value: &u64,
-        out: &Collector<u64>,
+        out: &impl servicelib::runtime::collector::Collect<u64>,
     ) {
         let function = PureMap;
         let direct_context = context.clone();
-        let (future, allocations) =
-            measure(|| function.map(direct_context, stream, value, out));
+        let (future, allocations) = measure(|| function.map(direct_context, stream, value, out));
         assert_eq!(allocations, 0);
         future.await;
 
@@ -124,7 +125,6 @@ impl MapFunction<u64, u64> for AllocationProbe {
     }
 }
 
-#[async_trait]
 impl Consumer<u64> for DynamicConsumer {
     async fn consume(&self, _context: MessageContext, _payload: Payload<u64>) {}
 }
@@ -147,16 +147,18 @@ async fn concrete_and_shared_business_futures_do_not_allocate() {
     ));
     let stream = Stream::<u64>::new(&config, environment.clone());
     let measured = Arc::new(AtomicBool::new(false));
-    let _output = stream.map(&output_config, AllocationProbe(measured.clone())).unwrap();
+    let _output = stream
+        .map(&output_config, AllocationProbe(measured.clone()))
+        .unwrap();
     environment.build_runtime_streams().unwrap();
     stream.emit(MessageContext::new(), Payload::new(1)).await;
     assert!(measured.load(Ordering::SeqCst));
 
-    // Control: the real object-safe Consumer contract still owns one box.
-    let consumer: Arc<dyn Consumer<u64>> = Arc::new(DynamicConsumer);
+    // The public Consumer contract itself no longer introduces a box.
+    let consumer = DynamicConsumer;
     let context = MessageContext::new();
     let payload = Payload::new(1);
     let (future, consumer_allocations) = measure(|| consumer.consume(context, payload));
-    assert_eq!(consumer_allocations, 1);
+    assert_eq!(consumer_allocations, 0);
     future.await;
 }

@@ -1,6 +1,5 @@
 use std::sync::{Arc, Weak};
 
-use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 
 use super::{
@@ -64,7 +63,6 @@ where
     Ok(consumer)
 }
 
-#[async_trait]
 impl<HandlerState, ReqT, ResR, T, R, E, H> Consumer<T>
     for ServerStreamingEndpointConsumer<HandlerState, ReqT, ResR, T, R, E, H>
 where
@@ -173,15 +171,19 @@ where
                                 if response_result.is_err() {
                                     if let Err(error) = &response_result {
                                         crate::runtime::telemetry::record_error_if_present!(
-                                            span.as_ref(), error
+                                            span.as_ref(),
+                                            error
                                         );
-                                        crate::runtime::common::event_if_present!(span.as_ref(), || {
-                                            tracing::event!(
-                                                name: "handle_response.error",
-                                                tracing::Level::ERROR,
-                                                error = %error
-                                            )
-                                        });
+                                        crate::runtime::common::event_if_present!(
+                                            span.as_ref(),
+                                            || {
+                                                tracing::event!(
+                                                    name: "handle_response.error",
+                                                    tracing::Level::ERROR,
+                                                    error = %error
+                                                )
+                                            }
+                                        );
                                     }
                                     break;
                                 }
@@ -200,7 +202,10 @@ where
                             response_result
                         }
                         Err(error) => {
-                            crate::runtime::telemetry::record_error_if_present!(span.as_ref(), &error);
+                            crate::runtime::telemetry::record_error_if_present!(
+                                span.as_ref(),
+                                &error
+                            );
                             if let Some(observation) = observation {
                                 observation.finish(crate::runtime::telemetry::grpc_error_status(
                                     error.as_ref(),

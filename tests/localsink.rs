@@ -85,7 +85,6 @@ impl SinkCallback<i32> for Done {
 
 struct Capture(Mutex<Vec<String>>);
 
-#[async_trait]
 impl Consumer<String> for Capture {
     async fn consume(&self, _context: MessageContext, payload: Payload<String>) {
         self.0.lock().unwrap().push((*payload).clone());

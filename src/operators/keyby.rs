@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
-
 use crate::runtime::{
-    collector::Collector,
+    collector::{Collect, Collector},
     common::{Consumer, MessageContext, Payload, RuntimeStream},
     config::KeyByStreamConfig,
     datastruct::KeyValue,
@@ -23,7 +21,7 @@ where
         context: MessageContext,
         stream: &dyn RuntimeStream,
         value: &T,
-        out: &Collector<KeyValue<K, V>>,
+        out: &impl Collect<KeyValue<K, V>>,
     ) -> impl std::future::Future<Output = ()> + Send;
 }
 
@@ -41,20 +39,22 @@ where
         context: MessageContext,
         stream: &dyn RuntimeStream,
         value: &T,
-        out: &Collector<KeyValue<K, V>>,
+        out: &impl Collect<KeyValue<K, V>>,
     ) -> impl std::future::Future<Output = ()> + Send {
         self.as_ref().key_by(context, stream, value, out)
     }
 }
 
-pub struct KeyByStream<T, K, V, F>
+pub struct KeyByStream<T, K, V, F, C = Collector<KeyValue<K, V>>>
 where
     T: Send + Sync + 'static,
     K: Send + Sync + 'static,
     V: Send + Sync + 'static,
     F: KeyByFunction<T, K, V>,
+    C: Collect<KeyValue<K, V>>,
 {
     output: Stream<KeyValue<K, V>>,
+    collector: C,
     function: F,
     _input: std::marker::PhantomData<fn(T)>,
 }
@@ -80,14 +80,22 @@ where
         );
         let output = Stream::derived(&config.stream, source.environment().clone(), serde);
         source.try_set_consumer(
-            Arc::new(Self {
-                output: output.clone(),
-                function,
-                _input: std::marker::PhantomData,
-            }),
+            Arc::new(Self::from_collector(output.collector(), function)),
             output.id(),
         )?;
         Ok(output)
+    }
+
+    pub fn from_collector<C: Collect<KeyValue<K, V>>>(
+        collector: Collector<KeyValue<K, V>, C>,
+        function: F,
+    ) -> KeyByStream<T, K, V, F, Collector<KeyValue<K, V>, C>> {
+        KeyByStream {
+            output: collector.stream().clone(),
+            collector,
+            function,
+            _input: std::marker::PhantomData,
+        }
     }
 }
 
@@ -109,19 +117,19 @@ where
     }
 }
 
-#[async_trait]
-impl<T, K, V, F> Consumer<T> for KeyByStream<T, K, V, F>
+impl<T, K, V, F, C> Consumer<T> for KeyByStream<T, K, V, F, C>
 where
     T: Send + Sync + 'static,
     K: Send + Sync + 'static,
     V: Send + Sync + 'static,
     F: KeyByFunction<T, K, V> + 'static,
+    C: Collect<KeyValue<K, V>>,
 {
     async fn consume(&self, context: MessageContext, payload: Payload<T>) {
         let (context, span) = self.output.start_span(context, "stream.keyby");
-        let out = self.output.collector();
         crate::runtime::common::instrument_if_present!(
-            self.function.key_by(context, &self.output, &payload, &out),
+            self.function
+                .key_by(context, &self.output, &payload, &self.collector),
             span,
         );
     }

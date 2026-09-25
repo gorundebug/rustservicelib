@@ -583,7 +583,10 @@ impl MessageContext {
                     {
                         return None;
                     }
-                    value.to_str().ok().map(|value| (name.to_owned(), value.to_owned()))
+                    value
+                        .to_str()
+                        .ok()
+                        .map(|value| (name.to_owned(), value.to_owned()))
                 }
                 tonic::metadata::KeyAndValueRef::Binary(_, _) => None,
             })
@@ -681,11 +684,17 @@ mod tests {
         ]);
         let untraced = MessageContext::new().with_metadata_untraced(metadata.clone());
         assert_eq!(
-            untraced.metadata().get(TRACE_SAMPLING_HEADER).map(String::as_str),
+            untraced
+                .metadata()
+                .get(TRACE_SAMPLING_HEADER)
+                .map(String::as_str),
             Some("1")
         );
         assert_eq!(
-            untraced.metadata().get("x-business-header").map(String::as_str),
+            untraced
+                .metadata()
+                .get("x-business-header")
+                .map(String::as_str),
             Some("value")
         );
         assert!(!untraced.sampling_enabled());
@@ -743,12 +752,52 @@ pub fn new_stream_id() -> String {
     format!("{timestamp:x}-{sequence:x}")
 }
 
-#[async_trait]
+/// The graph's consumer contract. Concrete links await this future directly;
+/// they do not allocate a box merely to call the next operator.
 pub trait Consumer<T>: Send + Sync
 where
     T: Send + Sync + 'static,
 {
-    async fn consume(&self, context: MessageContext, payload: Payload<T>);
+    fn consume(
+        &self,
+        context: MessageContext,
+        payload: Payload<T>,
+    ) -> impl Future<Output = ()> + Send;
+}
+
+pub(crate) trait ErasedConsumer<T>: Send + Sync
+where
+    T: Send + Sync + 'static,
+{
+    fn consume_erased(
+        &self,
+        context: MessageContext,
+        payload: Payload<T>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+}
+
+impl<T, C> ErasedConsumer<T> for C
+where
+    T: Send + Sync + 'static,
+    C: Consumer<T>,
+{
+    fn consume_erased(
+        &self,
+        context: MessageContext,
+        payload: Payload<T>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(self.consume(context, payload))
+    }
+}
+
+impl<T: Send + Sync + 'static> Consumer<T> for dyn ErasedConsumer<T> + '_ {
+    fn consume(
+        &self,
+        context: MessageContext,
+        payload: Payload<T>,
+    ) -> impl Future<Output = ()> + Send {
+        self.consume_erased(context, payload)
+    }
 }
 
 /// Return true after the last result required by this invocation.
@@ -793,7 +842,6 @@ where
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoopConsumer;
 
-#[async_trait]
 impl<T> Consumer<T> for NoopConsumer
 where
     T: Send + Sync + 'static,

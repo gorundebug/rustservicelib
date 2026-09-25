@@ -6,8 +6,8 @@ use servicelib::{
     MessageContext,
     datasink::http::{Client, Request, ReqwestClient},
 };
-use tokio::sync::Notify;
 use tokio::io::AsyncReadExt;
+use tokio::sync::Notify;
 
 enum Finish {
     Cancel,
@@ -29,9 +29,7 @@ async fn slow_body(finish: Finish) {
                 let body_started = body_started.clone();
                 let release_body = release_body.clone();
                 async move {
-                    let first = futures::stream::once(async {
-                        Ok::<_, Infallible>("first")
-                    });
+                    let first = futures::stream::once(async { Ok::<_, Infallible>("first") });
                     let last = futures::stream::once(async move {
                         body_started.notify_one();
                         release_body.notified().await;
@@ -42,9 +40,7 @@ async fn slow_body(finish: Finish) {
             }
         }),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let context = match finish {
@@ -67,8 +63,11 @@ async fn slow_body(finish: Finish) {
     tokio::time::timeout(Duration::from_secs(3), body_started.notified())
         .await
         .expect("server did not start the response body");
-    let mut response = tokio::time::timeout(Duration::from_secs(1), request).await
-        .expect("headers were withheld until the whole body finished").unwrap().unwrap();
+    let mut response = tokio::time::timeout(Duration::from_secs(1), request)
+        .await
+        .expect("headers were withheld until the whole body finished")
+        .unwrap()
+        .unwrap();
     assert_eq!(response.status, 200);
     if matches!(finish, Finish::HeadersOnly | Finish::PartialRead) {
         if matches!(finish, Finish::PartialRead) {
@@ -100,7 +99,9 @@ async fn slow_body(finish: Finish) {
     request.abort();
     release_body.notify_one();
     server.abort();
-    let result = completed.expect("body read ignored cancellation or deadline").unwrap();
+    let result = completed
+        .expect("body read ignored cancellation or deadline")
+        .unwrap();
     match finish {
         Finish::Cancel => assert_eq!(
             result.unwrap_err().to_string(),
@@ -128,7 +129,11 @@ async fn explicit_body_read_waits_for_the_complete_response_body() {
 }
 
 #[tokio::test]
-async fn headers_are_available_without_reading_the_body() { slow_body(Finish::HeadersOnly).await; }
+async fn headers_are_available_without_reading_the_body() {
+    slow_body(Finish::HeadersOnly).await;
+}
 
 #[tokio::test]
-async fn partial_read_does_not_wait_for_remaining_body() { slow_body(Finish::PartialRead).await; }
+async fn partial_read_does_not_wait_for_remaining_body() {
+    slow_body(Finish::PartialRead).await;
+}

@@ -11,7 +11,6 @@ use servicelib::{
     MessageContext, Payload, SubStream, SubStreamCollector, SubStreamCollectorFunc,
     operators::MapFunction,
     runtime::{
-        collector::Collector,
         common::RuntimeStream,
         config::{
             CallSemantics, MapStreamConfig, RuntimeConfig, RuntimeStreamConfig, StreamConfig,
@@ -56,8 +55,15 @@ fn environment() -> (RuntimeEnvironment, SubStreamConfig, MapStreamConfig) {
 fn graph<F: MapFunction<i32, i32> + 'static>(function: F) -> (SubStream<i32, i32>, Stream<i32>) {
     let (environment, entry_config, output_config) = environment();
     let entry = SubStream::new(&entry_config, environment.clone());
-    let output = entry.stream().map(&output_config, function).unwrap();
-    entry.set_source(&output).unwrap();
+    let output = Stream::new(&output_config.stream, environment.clone());
+    let result = entry.set_source_typed(&output).unwrap();
+    let operator = Arc::new(servicelib::operators::map::MapStream::from_collector(
+        result, function,
+    ));
+    entry
+        .stream()
+        .try_set_typed_consumer(operator, output_config.stream.id)
+        .unwrap();
     environment.build_runtime_streams().unwrap();
     (entry, output)
 }
@@ -70,7 +76,7 @@ impl MapFunction<i32, i32> for Echo {
         context: MessageContext,
         _: &dyn RuntimeStream,
         value: &i32,
-        out: &Collector<i32>,
+        out: &impl servicelib::runtime::collector::Collect<i32>,
     ) {
         tokio::task::yield_now().await;
         out.collect(context, *value).await;
@@ -122,7 +128,7 @@ impl MapFunction<i32, i32> for Multiple {
         context: MessageContext,
         _: &dyn RuntimeStream,
         value: &i32,
-        out: &Collector<i32>,
+        out: &impl servicelib::runtime::collector::Collect<i32>,
     ) {
         for increment in 0..3 {
             out.collect(context.clone(), *value + increment).await;
@@ -158,7 +164,7 @@ impl MapFunction<i32, i32> for Recurse {
         context: MessageContext,
         _: &dyn RuntimeStream,
         value: &i32,
-        out: &Collector<i32>,
+        out: &impl servicelib::runtime::collector::Collect<i32>,
     ) {
         let result = if *value > 0 {
             let capture = Arc::new(Capture::default());
@@ -229,7 +235,7 @@ impl MapFunction<i32, i32> for Hold {
         context: MessageContext,
         _: &dyn RuntimeStream,
         value: &i32,
-        _: &Collector<i32>,
+        _: &impl servicelib::runtime::collector::Collect<i32>,
     ) {
         self.0.lock().unwrap().push((*value, context));
         self.1.notify_one();
@@ -319,7 +325,7 @@ impl MapFunction<i32, i32> for CancellationCleanup {
         context: MessageContext,
         _: &dyn RuntimeStream,
         _: &i32,
-        _: &Collector<i32>,
+        _: &impl servicelib::runtime::collector::Collect<i32>,
     ) {
         self.entered.notify_one();
         context.cancelled().await;
@@ -342,7 +348,9 @@ async fn cancellation_does_not_drop_the_direct_business_call() {
     let mut task = tokio::spawn({
         let context = context.clone();
         async move {
-            entry.consume(context, 1, Arc::new(Capture::default())).await
+            entry
+                .consume(context, 1, Arc::new(Capture::default()))
+                .await
         }
     });
     entered.notified().await;
@@ -354,7 +362,10 @@ async fn cancellation_does_not_drop_the_direct_business_call() {
         "Consume returned before direct business cleanup finished"
     );
     release.notify_one();
-    assert!(matches!(task.await.unwrap(), Err(RuntimeError::ContextCancelled)));
+    assert!(matches!(
+        task.await.unwrap(),
+        Err(RuntimeError::ContextCancelled)
+    ));
     assert_eq!(completed.load(Ordering::SeqCst), 1);
 }
 
@@ -371,35 +382,35 @@ impl SubStreamCollector<i32> for BlockingCollector {
 #[tokio::test]
 async fn cancellation_drains_an_active_direct_collector() {
     for accept in [false, true] {
-    let (entry, _) = graph(Echo);
-    let entered = Arc::new(Notify::new());
-    let release = Arc::new(Notify::new());
-    let completed = Arc::new(AtomicUsize::new(0));
-    let context = MessageContext::new();
-    let task = tokio::spawn({
-        let context = context.clone();
-        let collector = Arc::new(BlockingCollector {
-            entered: entered.clone(),
-            release: release.clone(),
-            completed: completed.clone(),
-            accept,
+        let (entry, _) = graph(Echo);
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let completed = Arc::new(AtomicUsize::new(0));
+        let context = MessageContext::new();
+        let task = tokio::spawn({
+            let context = context.clone();
+            let collector = Arc::new(BlockingCollector {
+                entered: entered.clone(),
+                release: release.clone(),
+                completed: completed.clone(),
+                accept,
+            });
+            async move { entry.consume(context, 1, collector).await }
         });
-        async move { entry.consume(context, 1, collector).await }
-    });
-    entered.notified().await;
-    context.cancel();
-    for _ in 0..3 {
-        tokio::task::yield_now().await;
-    }
-    assert!(!task.is_finished());
-    release.notify_one();
-    let result = task.await.unwrap();
-    if accept {
-        result.expect("a completed collector wins over cancellation");
-    } else {
-        assert!(matches!(result, Err(RuntimeError::ContextCancelled)));
-    }
-    assert_eq!(completed.load(Ordering::SeqCst), 1);
+        entered.notified().await;
+        context.cancel();
+        for _ in 0..3 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!task.is_finished());
+        release.notify_one();
+        let result = task.await.unwrap();
+        if accept {
+            result.expect("a completed collector wins over cancellation");
+        } else {
+            assert!(matches!(result, Err(RuntimeError::ContextCancelled)));
+        }
+        assert_eq!(completed.load(Ordering::SeqCst), 1);
     }
 }
 
@@ -511,9 +522,8 @@ async fn concurrent_results_serialize_one_collector_and_drop_late_values() {
             }
         }));
         let retained = Arc::downgrade(&collector);
-        let call = tokio::spawn(async move {
-            entry.consume(MessageContext::new(), 0, collector).await
-        });
+        let call =
+            tokio::spawn(async move { entry.consume(MessageContext::new(), 0, collector).await });
         entered.notified().await;
         let context = contexts.lock().unwrap()[0].1.clone();
         let mut deliveries = tokio::task::JoinSet::new();
@@ -543,7 +553,7 @@ impl MapFunction<i32, i32> for NestedForkJoin {
         context: MessageContext,
         _: &dyn RuntimeStream,
         _: &i32,
-        out: &Collector<i32>,
+        out: &impl servicelib::runtime::collector::Collect<i32>,
     ) {
         let invoke = |index: i32| {
             let context = context.clone();
@@ -581,7 +591,9 @@ async fn nested_fork_join_accepts_delayed_interleaved_results_on_one_worker() {
             let capture = Arc::new(Capture::default());
             let result = capture.clone();
             let call = tokio::spawn(async move {
-                outer.consume(MessageContext::new().with_stream_id("parent"), 0, result).await
+                outer
+                    .consume(MessageContext::new().with_stream_id("parent"), 0, result)
+                    .await
             });
             while contexts.lock().unwrap().len() < 2 {
                 entered.notified().await;
@@ -593,7 +605,12 @@ async fn nested_fork_join_accepts_delayed_interleaved_results_on_one_worker() {
             for index in order {
                 tokio::time::sleep(Duration::from_millis(1)).await;
                 sequence[index] += 1;
-                output.emit(jobs[index].1.clone(), Payload::new((index as i32 + 1) * 100 + sequence[index])).await;
+                output
+                    .emit(
+                        jobs[index].1.clone(),
+                        Payload::new((index as i32 + 1) * 100 + sequence[index]),
+                    )
+                    .await;
             }
             call.await.unwrap().unwrap();
             assert_eq!(*capture.0.lock().unwrap(), vec![606]);

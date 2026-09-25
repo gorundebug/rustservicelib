@@ -141,7 +141,10 @@ where
             .begin_owned(context, sender.clone())
             .await?;
         sender.set_span(pending.span.clone());
-        let (mut lifecycle, mut result) = self.endpoint_consumer.consume_owned(lifecycle, &pending, request).await;
+        let (mut lifecycle, mut result) = self
+            .endpoint_consumer
+            .consume_owned(lifecycle, &pending, request)
+            .await;
         if result.is_ok() {
             lifecycle = self.endpoint_consumer.eof_owned(lifecycle, &pending).await;
         }
@@ -151,15 +154,12 @@ where
                 match sender.receive(pending.context.read().await.clone()).await {
                     Ok(value) => {
                         if let Some(span) = pending.span.as_ref() {
-                            crate::runtime::common::event_if_enabled!(
-                                span,
-                                || tracing::event!(
-                                    name: "result_received",
-                                    parent: span,
-                                    tracing::Level::INFO,
-                                    {}
-                                )
-                            );
+                            crate::runtime::common::event_if_enabled!(span, || tracing::event!(
+                                name: "result_received",
+                                parent: span,
+                                tracing::Level::INFO,
+                                {}
+                            ));
                         }
                         Some(value)
                     }

@@ -12,7 +12,6 @@ use servicelib::{
     },
     operators::{InputStream, MapFunction},
     runtime::{
-        collector::Collector,
         common::{Consumer, RuntimeStream},
         config::{
             CallSemantics, CustomDataConnectorConfig, CustomEndpointConfig, InputStreamConfig,
@@ -30,7 +29,7 @@ impl DataProducer<i32> for OneValueProducer {
     async fn start(
         &self,
         context: MessageContext,
-        consumer: Arc<dyn Consumer<i32>>,
+        consumer: Arc<impl Consumer<i32> + 'static>,
     ) -> HandlerResult {
         consumer.consume(context, Payload::new(21)).await;
         Ok(())
@@ -47,7 +46,7 @@ impl MapFunction<i32, i32> for Double {
         context: MessageContext,
         _stream: &dyn RuntimeStream,
         value: &i32,
-        out: &Collector<i32>,
+        out: &impl servicelib::runtime::collector::Collect<i32>,
     ) {
         out.emit(context, Payload::new(*value * 2)).await;
     }

@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
-
 use crate::runtime::{
+    collector::{Collect, Collector},
     common::{ConstructionCell, Consumer, MessageContext, Payload},
     config::{InputStreamConfig, RuntimeStreamConfig},
     environment::{RuntimeEnvironment, RuntimeError, RuntimeResult},
@@ -26,7 +25,7 @@ where
 {
     stream: Stream<T>,
     result_source: ConstructionCell<Stream<R>>,
-    result_consumer: ConstructionCell<Arc<dyn Consumer<R>>>,
+    result_consumer: Arc<ConstructionCell<Arc<dyn crate::runtime::common::ErasedConsumer<R>>>>,
     error_stream: Stream<E>,
 }
 
@@ -58,7 +57,7 @@ where
             inner: Arc::new(InputStreamInner {
                 stream: Stream::new(&config.stream, environment),
                 result_source: ConstructionCell::empty(),
-                result_consumer: ConstructionCell::empty(),
+                result_consumer: Arc::new(ConstructionCell::empty()),
                 error_stream,
             }),
         }
@@ -130,7 +129,7 @@ where
         self.inner.result_source.get().cloned()
     }
 
-    pub fn set_result_consumer(&self, consumer: Arc<dyn Consumer<R>>) {
+    pub fn set_result_consumer<C: Consumer<R> + 'static>(&self, consumer: Arc<C>) {
         // Go's SetResultConsumer is a build-time assignment. A generated
         // ResultRouter may be replaced by the concrete transport endpoint
         // while the graph is wired.
@@ -138,9 +137,16 @@ where
     }
 
     pub fn set_source(&self, source: &Stream<R>) -> RuntimeResult<()> {
-        source.try_set_consumer(
+        self.set_source_typed(source).map(|_| ())
+    }
+
+    pub fn set_source_typed(
+        &self,
+        source: &Stream<R>,
+    ) -> RuntimeResult<Collector<R, impl Collect<R> + Clone + use<T, R, E>>> {
+        let collector = source.try_set_typed_consumer(
             Arc::new(ResultLink {
-                input_stream: self.clone(),
+                result_consumer: Arc::clone(&self.inner.result_consumer),
             }),
             self.stream().id(),
         )?;
@@ -148,7 +154,8 @@ where
             crate::runtime::environment::RuntimeError::SourceAlreadySet {
                 stream: self.inner.stream.name(),
             }
-        })
+        })?;
+        Ok(collector)
     }
 
     pub async fn consume(&self, context: MessageContext, value: T) {
@@ -162,31 +169,24 @@ where
             span,
         );
     }
-
-    async fn consume_result(&self, context: MessageContext, payload: Payload<R>) {
-        if let Some(consumer) = self.inner.result_consumer.get() {
-            consumer.consume(context, payload).await;
-        }
-    }
 }
 
-struct ResultLink<T, R, E>
+struct ResultLink<R>
 where
-    T: Send + Sync + 'static,
     R: Send + Sync + 'static,
-    E: Send + Sync + 'static,
 {
-    input_stream: InputStream<T, R, E>,
+    // Retain delivery state, not the input and its complete downstream graph.
+    // This also keeps an in-flight result valid if the public input is dropped.
+    result_consumer: Arc<ConstructionCell<Arc<dyn crate::runtime::common::ErasedConsumer<R>>>>,
 }
 
-#[async_trait]
-impl<T, R, E> Consumer<R> for ResultLink<T, R, E>
+impl<R> Consumer<R> for ResultLink<R>
 where
-    T: Send + Sync + 'static,
     R: Send + Sync + 'static,
-    E: Send + Sync + 'static,
 {
     async fn consume(&self, context: MessageContext, payload: Payload<R>) {
-        self.input_stream.consume_result(context, payload).await;
+        if let Some(consumer) = self.result_consumer.get() {
+            consumer.consume(context, payload).await;
+        }
     }
 }

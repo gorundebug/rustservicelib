@@ -24,8 +24,42 @@ where
     name: String,
     pipeline: String,
     component: String,
-    downstream: ConstructionCell<LinkCollector<T>>,
+    downstream: ConstructionCell<StreamDispatch<T>>,
     serde: Arc<dyn StreamSerde<T>>,
+}
+
+pub(crate) enum StreamDispatch<T: Send + Sync + 'static> {
+    Dynamic(Box<LinkCollector<T>>),
+    Typed {
+        collector: Arc<dyn crate::runtime::common::ErasedConsumer<T>>,
+        is_async: bool,
+    },
+}
+
+impl<T: Send + Sync + 'static> StreamDispatch<T> {
+    pub(crate) fn is_async(&self) -> bool {
+        match self {
+            Self::Dynamic(collector) => collector.is_async(),
+            Self::Typed { is_async, .. } => *is_async,
+        }
+    }
+}
+
+impl<T: Send + Sync + 'static> Collect<T> for StreamDispatch<T> {
+    fn out(
+        &self,
+        context: MessageContext,
+        value: T,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        self.out_payload(context, Payload::new(value))
+    }
+
+    async fn out_payload(&self, context: MessageContext, payload: Payload<T>) {
+        match self {
+            Self::Dynamic(collector) => collector.out_payload(context, payload).await,
+            Self::Typed { collector, .. } => collector.consume(context, payload).await,
+        }
+    }
 }
 
 impl<T> Clone for Stream<T>
@@ -83,7 +117,7 @@ where
         }
     }
 
-    pub(crate) fn derived(
+    pub fn derived(
         config: &StreamConfig,
         environment: RuntimeEnvironment,
         serde: Arc<dyn StreamSerde<T>>,
@@ -153,7 +187,8 @@ where
             .inner
             .environment
             .function_call_async(self.id(), target_id);
-        let collector = LinkCollector::new(
+        let consumer: Arc<dyn crate::runtime::common::ErasedConsumer<T>> = consumer;
+        let collector: LinkCollector<T> = LinkCollector::new(
             consumer,
             semantics,
             &self.inner.environment,
@@ -164,17 +199,55 @@ where
         )?;
         self.inner
             .downstream
-            .set(collector)
+            .set(StreamDispatch::Dynamic(Box::new(collector)))
             .map_err(|_| RuntimeError::ConsumerAlreadySet {
                 stream: self.name(),
             })
     }
 
-    pub(crate) fn collector(&self) -> Collector<T> {
+    pub fn collector(&self) -> Collector<T> {
         Collector::from_stream(self.clone())
     }
 
-    pub(crate) fn link_collector(&self) -> Option<&LinkCollector<T>> {
+    /// Connect once during graph construction and return an allocation-free
+    /// dispatch view. All existing clones keep a working dynamic entry point.
+    pub fn try_set_typed_consumer<N>(
+        &self,
+        consumer: Arc<N>,
+        target_id: i32,
+    ) -> RuntimeResult<Collector<T, impl Collect<T> + Clone + use<T, N>>>
+    where
+        N: Consumer<T> + 'static,
+    {
+        if self.inner.downstream.get().is_some() {
+            return Err(RuntimeError::ConsumerAlreadySet {
+                stream: self.name(),
+            });
+        }
+        let environment = &self.inner.environment;
+        let collector = Arc::new(LinkCollector::new(
+            consumer,
+            environment.call_semantics(self.id(), target_id),
+            environment,
+            self.id(),
+            target_id,
+            self.name(),
+            environment.function_call_async(self.id(), target_id),
+        )?);
+        let dispatch = StreamDispatch::Typed {
+            collector: collector.clone(),
+            is_async: collector.is_async(),
+        };
+        self.inner
+            .downstream
+            .set(dispatch)
+            .map_err(|_| RuntimeError::ConsumerAlreadySet {
+                stream: self.name(),
+            })?;
+        Ok(Collector::from_output(self.clone(), collector))
+    }
+
+    pub(crate) fn link_collector(&self) -> Option<&StreamDispatch<T>> {
         self.inner.downstream.get()
     }
 
@@ -225,5 +298,22 @@ where
             &self.inner.pipeline,
             &self.inner.component,
         )
+    }
+}
+
+impl<T: Send + Sync + 'static> Collect<T> for Stream<T> {
+    fn out(
+        &self,
+        context: MessageContext,
+        value: T,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        self.emit(context, Payload::new(value))
+    }
+    fn out_payload(
+        &self,
+        context: MessageContext,
+        payload: Payload<T>,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        self.emit(context, payload)
     }
 }

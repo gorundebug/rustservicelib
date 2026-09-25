@@ -72,7 +72,6 @@ fn runtime_config(
 
 struct Capture(mpsc::UnboundedSender<(String, String)>);
 
-#[async_trait]
 impl Consumer<String> for Capture {
     async fn consume(&self, context: MessageContext, payload: Payload<String>) {
         self.0
@@ -111,7 +110,6 @@ struct HoldingPipeline {
     results: Stream<()>,
 }
 
-#[async_trait]
 impl Consumer<String> for HoldingPipeline {
     async fn consume(&self, context: MessageContext, _payload: Payload<String>) {
         self.started.notify_one();

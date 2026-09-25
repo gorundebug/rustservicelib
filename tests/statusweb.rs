@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use servicelib::{
     MessageContext, Payload,
@@ -175,7 +174,6 @@ async fn service_app_serves_the_complete_status_surface() {
 
 struct Ignore;
 
-#[async_trait]
 impl<T> Consumer<T> for Ignore
 where
     T: Send + Sync + 'static,

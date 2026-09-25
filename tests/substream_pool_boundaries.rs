@@ -1,5 +1,8 @@
 use std::{
-    sync::{Arc, atomic::{AtomicUsize, Ordering}},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -7,9 +10,11 @@ use servicelib::{
     MessageContext, Payload, SubStream, SubStreamCollectorFunc,
     operators::MapFunction,
     runtime::{
-        collector::Collector,
         common::RuntimeStream,
-        config::{CallSemantics, MapStreamConfig, PoolConfig, RuntimeConfig, RuntimeStreamConfig, StreamConfig, SubStreamConfig},
+        config::{
+            CallSemantics, MapStreamConfig, PoolConfig, RuntimeConfig, RuntimeStreamConfig,
+            StreamConfig, SubStreamConfig,
+        },
         environment::{RuntimeEnvironment, RuntimeError},
         pool::{BoxTask, DelayPool, PriorityTaskPool, TaskPool},
         stream::Stream,
@@ -30,7 +35,10 @@ impl Scheduler {
         match self {
             Self::Fifo(pool) => pool.add_task(context, task).await.unwrap(),
             Self::Priority(pool) => pool.add_task(context, 0, task).await.unwrap(),
-            Self::Delay(pool) => pool.delay(context, Duration::from_millis(1), task).await.unwrap(),
+            Self::Delay(pool) => pool
+                .delay(context, Duration::from_millis(1), task)
+                .await
+                .unwrap(),
         }
     }
 
@@ -46,12 +54,25 @@ impl Scheduler {
 struct Deferred(mpsc::UnboundedSender<MessageContext>);
 
 impl MapFunction<i32, i32> for Deferred {
-    async fn map(&self, context: MessageContext, _: &dyn RuntimeStream, _: &i32, _: &Collector<i32>) {
+    async fn map(
+        &self,
+        context: MessageContext,
+        _: &dyn RuntimeStream,
+        _: &i32,
+        _: &impl servicelib::runtime::collector::Collect<i32>,
+    ) {
         self.0.send(context).unwrap();
     }
 }
 
-fn graph(kind: usize) -> (Scheduler, SubStream<i32, i32>, Stream<i32>, mpsc::UnboundedReceiver<MessageContext>) {
+fn graph(
+    kind: usize,
+) -> (
+    Scheduler,
+    SubStream<i32, i32>,
+    Stream<i32>,
+    mpsc::UnboundedReceiver<MessageContext>,
+) {
     let mut entry_config = StreamConfig::new(1, "Entry");
     entry_config.id_service = 1;
     entry_config.id_source = 2;
@@ -61,13 +82,25 @@ fn graph(kind: usize) -> (Scheduler, SubStream<i32, i32>, Stream<i32>, mpsc::Unb
     let entry_config = SubStreamConfig::from(entry_config);
     let result_config = MapStreamConfig::from(result_config);
     let environment = RuntimeEnvironment::default();
-    environment.publish_runtime_config(Arc::new(RuntimeConfig::from_parts(
-        CallSemantics::FunctionCall,
-        [],
-        [RuntimeStreamConfig::from(entry_config.clone()), RuntimeStreamConfig::from(result_config.clone())],
-        [PoolConfig { name: "worker".into(), executors_count: 1, queue_capacity: 0 }],
-        [], [], [],
-    ).unwrap()));
+    environment.publish_runtime_config(Arc::new(
+        RuntimeConfig::from_parts(
+            CallSemantics::FunctionCall,
+            [],
+            [
+                RuntimeStreamConfig::from(entry_config.clone()),
+                RuntimeStreamConfig::from(result_config.clone()),
+            ],
+            [PoolConfig {
+                name: "worker".into(),
+                executors_count: 1,
+                queue_capacity: 0,
+            }],
+            [],
+            [],
+            [],
+        )
+        .unwrap(),
+    ));
     let scheduler = match kind {
         0 => {
             let pool = TaskPool::new("worker", environment.clone()).unwrap();
@@ -83,7 +116,10 @@ fn graph(kind: usize) -> (Scheduler, SubStream<i32, i32>, Stream<i32>, mpsc::Unb
     };
     let (sender, receiver) = mpsc::unbounded_channel();
     let entry = SubStream::new(&entry_config, environment.clone());
-    let output = entry.stream().map(&result_config, Deferred(sender)).unwrap();
+    let output = entry
+        .stream()
+        .map(&result_config, Deferred(sender))
+        .unwrap();
     entry.set_source(&output).unwrap();
     environment.build_runtime_streams().unwrap();
     (scheduler, entry, output, receiver)

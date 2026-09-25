@@ -2,7 +2,6 @@ use servicelib::{
     MessageContext, Payload, Stream,
     operators::MapFunction,
     runtime::{
-        collector::Collector,
         common::RuntimeStream,
         config::{CallSemantics, RuntimeConfig, RuntimeStreamConfig, StreamConfig},
         environment::RuntimeEnvironment,
@@ -24,7 +23,7 @@ impl MapFunction<u32, u32> for Count {
         _context: MessageContext,
         _stream: &dyn RuntimeStream,
         _value: &u32,
-        _out: &Collector<u32>,
+        _out: &impl servicelib::runtime::collector::Collect<u32>,
     ) {
         self.0.fetch_add(1, Ordering::SeqCst);
     }

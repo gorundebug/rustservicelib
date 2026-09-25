@@ -2,7 +2,10 @@ use std::{
     collections::HashMap,
     io,
     pin::Pin,
-    sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     task::{Context, Poll},
     time::Duration,
 };
@@ -11,12 +14,23 @@ use async_trait::async_trait;
 use servicelib::{
     MessageContext, Payload, Stream,
     api::HTTPMethodType,
-    datasink::http::{Client, EndpointHandler, HandlerError, HandlerResult, Request, Requester,
-        Response, ResponseBody, StreamContext, make_endpoint_consumer},
-    runtime::{config::{CallSemantics, HttpDataConnectorConfig, HttpEndpointConfig, RuntimeConfig,
-        SinkStreamConfig, StreamConfig}, environment::RuntimeEnvironment},
+    datasink::http::{
+        Client, EndpointHandler, HandlerError, HandlerResult, Request, Requester, Response,
+        ResponseBody, StreamContext, make_endpoint_consumer,
+    },
+    runtime::{
+        config::{
+            CallSemantics, HttpDataConnectorConfig, HttpEndpointConfig, RuntimeConfig,
+            SinkStreamConfig, StreamConfig,
+        },
+        environment::RuntimeEnvironment,
+    },
 };
-use tokio::{io::{AsyncRead, ReadBuf}, sync::Semaphore, task::JoinHandle};
+use tokio::{
+    io::{AsyncRead, ReadBuf},
+    sync::Semaphore,
+    task::JoinHandle,
+};
 
 #[derive(Clone, Copy)]
 enum Scenario {
@@ -55,10 +69,17 @@ struct Reader {
 }
 
 impl AsyncRead for Reader {
-    fn poll_read(self: Pin<&mut Self>, _: &mut Context<'_>, _: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        _: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         self.observations.polled.add_permits(1);
         if self.fail {
-            Poll::Ready(Err(io::Error::new(io::ErrorKind::ConnectionReset, "response body reset")))
+            Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "response body reset",
+            )))
         } else {
             Poll::Pending
         }
@@ -67,7 +88,9 @@ impl AsyncRead for Reader {
 
 impl Drop for Reader {
     fn drop(&mut self) {
-        self.observations.reader_drops.fetch_add(1, Ordering::SeqCst);
+        self.observations
+            .reader_drops
+            .fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -97,19 +120,33 @@ struct Handler {
 
 #[async_trait]
 impl EndpointHandler<(), u32, u32, String> for Handler {
-    async fn begin_request(&self, context: MessageContext, _: StreamContext<u32, u32, String>)
-        -> Result<(MessageContext, ()), HandlerError> {
+    async fn begin_request(
+        &self,
+        context: MessageContext,
+        _: StreamContext<u32, u32, String>,
+    ) -> Result<(MessageContext, ()), HandlerError> {
         Ok((context, ()))
     }
 
-    async fn consume_message(&self, _: MessageContext, _: StreamContext<u32, u32, String>,
-        _: &mut (), _: Payload<u32>, requester: &mut Requester) -> HandlerResult {
+    async fn consume_message(
+        &self,
+        _: MessageContext,
+        _: StreamContext<u32, u32, String>,
+        _: &mut (),
+        _: Payload<u32>,
+        requester: &mut Requester,
+    ) -> HandlerResult {
         requester.new_request("GET", "http://fixture/body", Vec::new());
         Ok(())
     }
 
-    async fn handle_response(&self, _: MessageContext, _: StreamContext<u32, u32, String>,
-        _: &mut (), mut response: Response) -> HandlerResult {
+    async fn handle_response(
+        &self,
+        _: MessageContext,
+        _: StreamContext<u32, u32, String>,
+        _: &mut (),
+        mut response: Response,
+    ) -> HandlerResult {
         if matches!(self.scenario, Scenario::ReadFailure) {
             response.body.bytes().await?;
             panic!("read failure must propagate");
@@ -124,60 +161,131 @@ impl EndpointHandler<(), u32, u32, String> for Handler {
         }
     }
 
-    async fn end_request(&self, _: MessageContext, _: StreamContext<u32, u32, String>,
-        result: &HandlerResult, _: ()) {
+    async fn end_request(
+        &self,
+        _: MessageContext,
+        _: StreamContext<u32, u32, String>,
+        result: &HandlerResult,
+        _: (),
+    ) {
         *self.observations.error.lock().unwrap() = result.as_ref().err().map(ToString::to_string);
         self.observations.end_count.fetch_add(1, Ordering::SeqCst);
         self.observations.end_entered.add_permits(1);
-        self.observations.end_release.acquire().await.unwrap().forget();
+        self.observations
+            .end_release
+            .acquire()
+            .await
+            .unwrap()
+            .forget();
     }
 }
 
 async fn check(scenario: Scenario) {
     let environment = RuntimeEnvironment::default();
-    let sink_config = SinkStreamConfig { stream: StreamConfig::new(2, "sink"), endpoint_id: 3 };
-    environment.publish_runtime_config(Arc::new(RuntimeConfig::from_parts(
-        CallSemantics::FunctionCall, [],
-        [StreamConfig::new(1, "source").into(), sink_config.clone().into()],
-        [], [], [], [],
-    ).unwrap()));
+    let sink_config = SinkStreamConfig {
+        stream: StreamConfig::new(2, "sink"),
+        endpoint_id: 3,
+    };
+    environment.publish_runtime_config(Arc::new(
+        RuntimeConfig::from_parts(
+            CallSemantics::FunctionCall,
+            [],
+            [
+                StreamConfig::new(1, "source").into(),
+                sink_config.clone().into(),
+            ],
+            [],
+            [],
+            [],
+            [],
+        )
+        .unwrap(),
+    ));
     let source = Stream::new(&StreamConfig::new(1, "source"), environment);
-    let sink = source.sink_with_result::<u32, String>(&sink_config).unwrap();
+    let sink = source
+        .sink_with_result::<u32, String>(&sink_config)
+        .unwrap();
     let observations = Observations::new();
     make_endpoint_consumer(
         &sink,
-        HttpEndpointConfig { id: 3, name: "body".to_owned(), id_data_connector: 4,
-            tracing_enabled: false, http_method_type: HTTPMethodType::GET, path: "/body".to_owned() },
-        HttpDataConnectorConfig { id: 4, name: "fixture".to_owned(), host: "fixture".to_owned(),
-            port: 80, address: "http://fixture".to_owned(), use_dedicated_listener: false },
-        Arc::new(TestClient { observations: observations.clone(), scenario }),
-        Arc::new(Handler { observations: observations.clone(), scenario }),
-    ).unwrap();
+        HttpEndpointConfig {
+            id: 3,
+            name: "body".to_owned(),
+            id_data_connector: 4,
+            tracing_enabled: false,
+            http_method_type: HTTPMethodType::GET,
+            path: "/body".to_owned(),
+        },
+        HttpDataConnectorConfig {
+            id: 4,
+            name: "fixture".to_owned(),
+            host: "fixture".to_owned(),
+            port: 80,
+            address: "http://fixture".to_owned(),
+            use_dedicated_listener: false,
+        },
+        Arc::new(TestClient {
+            observations: observations.clone(),
+            scenario,
+        }),
+        Arc::new(Handler {
+            observations: observations.clone(),
+            scenario,
+        }),
+    )
+    .unwrap();
 
-    let call = tokio::spawn(async move { source.emit(MessageContext::new(), Payload::new(7_u32)).await });
+    let call = tokio::spawn(async move {
+        source
+            .emit(MessageContext::new(), Payload::new(7_u32))
+            .await
+    });
     tokio::time::timeout(Duration::from_secs(2), observations.end_entered.acquire())
-        .await.expect("EndRequest must be reached").unwrap().forget();
+        .await
+        .expect("EndRequest must be reached")
+        .unwrap()
+        .forget();
     assert!(!call.is_finished(), "Consume must still await EndRequest");
     let expected_error = match scenario {
         Scenario::Retain => None,
         Scenario::RetainAndFail => Some("handler rejected response"),
         Scenario::ReadFailure => Some("response body reset"),
     };
-    assert_eq!(observations.error.lock().unwrap().as_deref(), expected_error);
+    assert_eq!(
+        observations.error.lock().unwrap().as_deref(),
+        expected_error
+    );
     let expected_drops = usize::from(matches!(scenario, Scenario::ReadFailure));
-    assert_eq!(observations.reader_drops.load(Ordering::SeqCst), expected_drops);
+    assert_eq!(
+        observations.reader_drops.load(Ordering::SeqCst),
+        expected_drops
+    );
     if !matches!(scenario, Scenario::ReadFailure) {
-        assert!(!observations.reader_task.lock().unwrap().as_ref().unwrap().is_finished());
+        assert!(
+            !observations
+                .reader_task
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .is_finished()
+        );
     }
 
     observations.end_release.add_permits(1);
-    tokio::time::timeout(Duration::from_secs(2), call).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(2), call)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(observations.end_count.load(Ordering::SeqCst), 1);
     assert_eq!(observations.reader_drops.load(Ordering::SeqCst), 1);
     let reader_task = observations.reader_task.lock().unwrap().take();
     if let Some(reader_task) = reader_task {
         let error = tokio::time::timeout(Duration::from_secs(2), reader_task)
-            .await.expect("endpoint closure must wake pending body read").unwrap().unwrap_err();
+            .await
+            .expect("endpoint closure must wake pending body read")
+            .unwrap()
+            .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     }
 }

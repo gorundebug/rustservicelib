@@ -92,7 +92,6 @@ impl ResultContext {
         }
     }
 
-
     pub fn done(&self) {
         if let Some(span) = &self.span {
             crate::runtime::common::event_if_enabled!(
@@ -195,15 +194,14 @@ where
         'sender: 'future,
         Self: 'future,
     {
-        self.as_ref()
-            .consume_message(
-                context,
-                stream,
-                handler_state,
-                value,
-                sender,
-                result_context,
-            )
+        self.as_ref().consume_message(
+            context,
+            stream,
+            handler_state,
+            value,
+            sender,
+            result_context,
+        )
     }
 
     fn handle_response<'owner, 'future>(

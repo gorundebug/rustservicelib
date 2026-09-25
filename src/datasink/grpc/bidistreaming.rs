@@ -176,7 +176,10 @@ where
                 close_pending.span.clone(),
             );
             if let Err(error) = result {
-                crate::runtime::telemetry::record_error_if_present!(close_pending.span.as_ref(), &error);
+                crate::runtime::telemetry::record_error_if_present!(
+                    close_pending.span.as_ref(),
+                    &error
+                );
                 crate::runtime::common::event_if_present!(
                     close_pending.span.as_ref(),
                     || tracing::event!(name: "close_send.error", tracing::Level::ERROR, error = %error)
@@ -227,7 +230,10 @@ where
                         break;
                     }
                     Err(error) => {
-                        crate::runtime::telemetry::record_error_if_present!(pending.span.as_ref(), &error);
+                        crate::runtime::telemetry::record_error_if_present!(
+                            pending.span.as_ref(),
+                            &error
+                        );
                         crate::runtime::common::event_if_present!(pending.span.as_ref(), || {
                             tracing::event!(
                                 name: "recv.error",
@@ -262,7 +268,6 @@ where
     }
 }
 
-#[async_trait]
 impl<HandlerState, ReqT, ResR, T, R, E, H> Consumer<T>
     for BidiStreamingEndpointConsumer<HandlerState, ReqT, ResR, T, R, E, H>
 where

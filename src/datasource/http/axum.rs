@@ -401,7 +401,8 @@ where
         message_id: impl Into<String>,
         callback: ResultCallback<HandlerState, ReqT, ResR, T, R, E>,
     ) {
-        if let Some(callbacks) = self.callbacks
+        if let Some(callbacks) = self
+            .callbacks
             .lock()
             .expect("HTTP result callbacks lock poisoned")
             .as_mut()
@@ -411,7 +412,8 @@ where
     }
 
     fn close(&self) {
-        let callbacks = self.callbacks
+        let callbacks = self
+            .callbacks
             .lock()
             .expect("HTTP result callbacks lock poisoned")
             .take();
@@ -544,7 +546,11 @@ where
     H: EndpointHandler<HandlerState, ReqT, ResR, T, R, E> + 'static,
 {
     make_endpoint_consumer_with_tasks(
-        input_stream, endpoint_config, connector_name, handler, TaskTracker::new(),
+        input_stream,
+        endpoint_config,
+        connector_name,
+        handler,
+        TaskTracker::new(),
     )
 }
 
@@ -709,7 +715,11 @@ where
         )
     }
 
-    async fn serve_http(self: Arc<Self>, request: Request, expected_method: Method) -> Response<Body> {
+    async fn serve_http(
+        self: Arc<Self>,
+        request: Request,
+        expected_method: Method,
+    ) -> Response<Body> {
         if self.request_tasks.is_closed() {
             return Response::builder()
                 .status(StatusCode::SERVICE_UNAVAILABLE)
@@ -723,7 +733,9 @@ where
         // Dropping the response future cancels the context without dropping
         // ConsumeMessage/EndRequest or losing their pending-request cleanup.
         let task = self.request_tasks.spawn(async move {
-            consumer.serve_http_request(request, expected_method, context).await
+            consumer
+                .serve_http_request(request, expected_method, context)
+                .await
         });
         match task.await {
             Ok(response) => response,
@@ -735,7 +747,12 @@ where
         }
     }
 
-    async fn serve_http_request(&self, request: Request, expected_method: Method, context: MessageContext) -> Response<Body> {
+    async fn serve_http_request(
+        &self,
+        request: Request,
+        expected_method: Method,
+        context: MessageContext,
+    ) -> Response<Body> {
         if request.method() != expected_method {
             if self.request_duration.is_enabled() {
                 self.invalid_http_method.inc();
@@ -1109,7 +1126,6 @@ where
     endpoint_consumer: std::sync::Weak<EndpointConsumer<HandlerState, ReqT, ResR, T, R, E, H>>,
 }
 
-#[async_trait]
 impl<HandlerState, ReqT, ResR, T, R, E, H> Consumer<R>
     for ResultConsumer<HandlerState, ReqT, ResR, T, R, E, H>
 where

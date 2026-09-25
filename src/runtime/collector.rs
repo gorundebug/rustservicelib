@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{marker::PhantomData, sync::Arc};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::runtime::{
@@ -12,11 +12,13 @@ use crate::runtime::{
     stream::Stream,
 };
 
-pub(crate) struct LinkCollector<T>
+pub(crate) struct LinkCollector<T, N: ?Sized = dyn crate::runtime::common::ErasedConsumer<T>>
 where
     T: Send + Sync + 'static,
+    N: Consumer<T> + 'static,
 {
-    consumer: Arc<dyn Consumer<T>>,
+    consumer: Arc<N>,
+    value_type: PhantomData<fn(T)>,
     caller: Caller,
     from: String,
     to: String,
@@ -62,13 +64,30 @@ where
         context: MessageContext,
         payload: Payload<T>,
     ) -> impl std::future::Future<Output = ()> + Send;
+
+    fn collect(
+        &self,
+        context: MessageContext,
+        value: T,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        self.out(context, value)
+    }
+
+    fn emit(
+        &self,
+        context: MessageContext,
+        payload: Payload<T>,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        self.out_payload(context, payload)
+    }
 }
 
-pub struct Collector<T>
+pub struct Collector<T, C = Stream<T>>
 where
     T: Send + Sync + 'static,
 {
     stream: Stream<T>,
+    output: C,
 }
 
 impl<T> Collector<T>
@@ -76,37 +95,111 @@ where
     T: Send + Sync + 'static,
 {
     pub(crate) fn from_stream(stream: Stream<T>) -> Self {
-        Self { stream }
-    }
-
-    pub async fn collect(&self, context: MessageContext, value: T) {
-        self.stream.emit(context, Payload::new(value)).await;
-    }
-
-    pub async fn emit(&self, context: MessageContext, payload: Payload<T>) {
-        self.stream.emit(context, payload).await;
+        Self {
+            output: stream.clone(),
+            stream,
+        }
     }
 }
 
-impl<T> Collect<T> for Collector<T>
+impl<T, C> Collector<T, C>
+where
+    T: Send + Sync + 'static,
+    C: Collect<T>,
+{
+    pub(crate) fn from_output(stream: Stream<T>, output: C) -> Self {
+        Self { stream, output }
+    }
+
+    pub fn stream(&self) -> &Stream<T> {
+        &self.stream
+    }
+
+    pub fn is_async(&self) -> bool {
+        self.stream
+            .link_collector()
+            .is_some_and(|link| link.is_async())
+    }
+
+    pub fn collect(
+        &self,
+        context: MessageContext,
+        value: T,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        self.output.out(context, value)
+    }
+
+    pub fn emit(
+        &self,
+        context: MessageContext,
+        payload: Payload<T>,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        self.output.out_payload(context, payload)
+    }
+}
+
+impl<T, C: Clone> Clone for Collector<T, C>
 where
     T: Send + Sync + 'static,
 {
-    async fn out(&self, context: MessageContext, value: T) {
-        self.collect(context, value).await;
-    }
-
-    async fn out_payload(&self, context: MessageContext, payload: Payload<T>) {
-        self.emit(context, payload).await;
+    fn clone(&self) -> Self {
+        Self {
+            stream: self.stream.clone(),
+            output: self.output.clone(),
+        }
     }
 }
 
-impl<T> LinkCollector<T>
+impl<T, C> Collect<T> for Collector<T, C>
 where
     T: Send + Sync + 'static,
+    C: Collect<T>,
+{
+    fn out(
+        &self,
+        context: MessageContext,
+        value: T,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        self.collect(context, value)
+    }
+
+    fn out_payload(
+        &self,
+        context: MessageContext,
+        payload: Payload<T>,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        self.emit(context, payload)
+    }
+}
+
+impl<T, C> Collect<T> for Arc<C>
+where
+    T: Send + Sync + 'static,
+    C: Collect<T> + ?Sized,
+{
+    fn out(
+        &self,
+        context: MessageContext,
+        value: T,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        self.as_ref().out(context, value)
+    }
+    fn out_payload(
+        &self,
+        context: MessageContext,
+        payload: Payload<T>,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        self.as_ref().out_payload(context, payload)
+    }
+}
+
+impl<T, N: ?Sized> LinkCollector<T, N>
+where
+    T: Send + Sync + 'static,
+    N: Consumer<T> + 'static,
 {
     pub fn new(
-        consumer: Arc<dyn Consumer<T>>,
+        consumer: Arc<N>,
         call_semantics: CallSemantics,
         environment: &RuntimeEnvironment,
         source_id: i32,
@@ -166,6 +259,7 @@ where
         );
         Ok(Self {
             consumer,
+            value_type: PhantomData,
             caller,
             from,
             to,
@@ -242,12 +336,17 @@ pub(crate) fn short_type_name<T>() -> String {
         .to_owned()
 }
 
-impl<T> Collect<T> for LinkCollector<T>
+impl<T, N: ?Sized> Collect<T> for LinkCollector<T, N>
 where
     T: Send + Sync + 'static,
+    N: Consumer<T> + 'static,
 {
-    async fn out(&self, context: MessageContext, value: T) {
-        self.out_payload(context, Payload::new(value)).await;
+    fn out(
+        &self,
+        context: MessageContext,
+        value: T,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        self.out_payload(context, Payload::new(value))
     }
 
     async fn out_payload(&self, context: MessageContext, payload: Payload<T>) {
@@ -341,6 +440,22 @@ where
                 }
             }
         }
+    }
+}
+
+// Erasure is performed only when entering through a dynamic Stream handle.
+// Both views share this collector, including its counters and scheduling.
+impl<T, N> Consumer<T> for LinkCollector<T, N>
+where
+    T: Send + Sync + 'static,
+    N: Consumer<T> + 'static,
+{
+    fn consume(
+        &self,
+        context: MessageContext,
+        payload: Payload<T>,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        self.out_payload(context, payload)
     }
 }
 

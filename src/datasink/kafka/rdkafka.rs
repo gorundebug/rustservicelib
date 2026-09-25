@@ -815,7 +815,6 @@ where
     Ok((endpoint.clone(), connector.clone()))
 }
 
-#[async_trait]
 impl<HandlerState, T, R, E, H> Consumer<T>
     for RdkafkaKafkaEndpointConsumer<HandlerState, T, R, E, H>
 where
@@ -857,7 +856,11 @@ where
         let stream_id = crate::runtime::common::scope_if_present!(span.as_ref(), || self
             .handler
             .get_stream_id(&context, &value));
-        crate::runtime::telemetry::record_if_present!(span.as_ref(), "stream_id", stream_id.as_str());
+        crate::runtime::telemetry::record_if_present!(
+            span.as_ref(),
+            "stream_id",
+            stream_id.as_str()
+        );
         let context = context.with_stream_id(stream_id);
         let context = if let Some(span) = span.as_ref() {
             context.with_span_context(span)

@@ -81,7 +81,6 @@ macro_rules! record_error_if_enabled {
     }};
 }
 
-
 macro_rules! record_error_if_present {
     ($span:expr, $error:expr $(,)?) => {{
         if let Some(span) = $span {
@@ -133,7 +132,8 @@ mod attribute_fast_path_tests {
         let keys = AtomicUsize::new(0);
         let values = AtomicUsize::new(0);
         let span = tracing::Span::none();
-        super::record_if_present!(Some(&span),
+        super::record_if_present!(
+            Some(&span),
             {
                 keys.fetch_add(1, Ordering::Relaxed);
                 "stream_id"
@@ -832,7 +832,9 @@ pub(crate) fn grpc_error_status(error: &(dyn std::error::Error + 'static)) -> &'
 impl GrpcCallObservation {
     fn finish(self, status: &str) {
         let status = grpc_status_name(status);
-        let elapsed = self.started_at.map(|started_at| started_at.elapsed().as_secs_f64());
+        let elapsed = self
+            .started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64());
         if status != "OK"
             && let Some(span) = &self.span
         {

@@ -1,19 +1,19 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
-
 use crate::runtime::{
+    collector::{Collect, Collector},
     common::{Consumer, MessageContext, Payload},
     config::MergeStreamConfig,
     environment::RuntimeResult,
     stream::Stream,
 };
 
-pub struct MergeStream<T>
+pub struct MergeStream<T, C = Collector<T>>
 where
     T: Send + Sync + 'static,
 {
     output: Stream<T>,
+    collector: C,
 }
 
 impl<T> MergeStream<T>
@@ -29,12 +29,23 @@ where
             sources[0].get_serde(),
         );
         let operator = Arc::new(Self {
+            collector: output.collector(),
             output: output.clone(),
         });
         for source in sources {
             source.try_set_consumer(Arc::clone(&operator), output.id())?;
         }
         Ok(output)
+    }
+
+    pub fn from_collector<C>(output: Collector<T, C>) -> MergeStream<T, Collector<T, C>>
+    where
+        C: Collect<T>,
+    {
+        MergeStream {
+            output: output.stream().clone(),
+            collector: output,
+        }
     }
 }
 
@@ -54,13 +65,16 @@ where
     }
 }
 
-#[async_trait]
-impl<T> Consumer<T> for MergeStream<T>
+impl<T, C> Consumer<T> for MergeStream<T, C>
 where
     T: Send + Sync + 'static,
+    C: Collect<T>,
 {
     async fn consume(&self, context: MessageContext, payload: Payload<T>) {
         let (context, span) = self.output.start_span(context, "stream.merge");
-        crate::runtime::common::instrument_if_present!(self.output.emit(context, payload), span);
+        crate::runtime::common::instrument_if_present!(
+            self.collector.out_payload(context, payload),
+            span
+        );
     }
 }

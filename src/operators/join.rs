@@ -1,15 +1,14 @@
 use std::{hash::Hash, sync::Arc};
 
-use async_trait::async_trait;
 use futures::FutureExt;
 
 use crate::runtime::{
-    collector::Collector,
+    collector::{Collect, Collector},
     common::{Consumer, MessageContext, Payload, RuntimeStream},
     config::{JoinStreamConfig, JoinType},
     datastruct::KeyValue,
     environment::RuntimeResult,
-    store::{DynValue, HashMapJoinStorage, JoinCallback, JoinStorage, JoinValues},
+    store::{DynValue, HashMapJoinStorage, JoinCallback, JoinValues},
     stream::Stream,
 };
 
@@ -27,7 +26,7 @@ where
         key: K,
         left: Vec<L>,
         right: Vec<R>,
-        out: &Collector<O>,
+        out: &impl Collect<O>,
     ) -> impl std::future::Future<Output = bool> + Send;
 }
 
@@ -48,61 +47,79 @@ where
         key: K,
         left: Vec<L>,
         right: Vec<R>,
-        out: &Collector<O>,
+        out: &impl Collect<O>,
     ) -> impl std::future::Future<Output = bool> + Send {
         self.as_ref().join(context, stream, key, left, right, out)
     }
 }
 
-pub struct JoinStream<K, L, R, O, F>
+pub struct JoinStream<K, L, R, O, F, C = Stream<O>>
 where
     K: Clone + Eq + Hash + Send + Sync + 'static,
     L: Clone + Send + Sync + 'static,
     R: Clone + Send + Sync + 'static,
     O: Send + Sync + 'static,
     F: JoinFunction<K, L, R, O> + 'static,
+    C: Collect<O> + Clone + 'static,
 {
     output: Stream<O>,
-    store: Arc<dyn JoinStorage<K>>,
+    collector: Collector<O, C>,
+    function: Arc<F>,
+    store: Arc<HashMapJoinStorage<K>>,
     callback: JoinCallback<K>,
     _types: std::marker::PhantomData<fn(L, R, F)>,
 }
 
-impl<K, L, R, O, F> JoinStream<K, L, R, O, F>
+impl<K, L, R, O, F, C> JoinStream<K, L, R, O, F, C>
 where
     K: Clone + Eq + Hash + Send + Sync + 'static,
     L: Clone + Send + Sync + 'static,
     R: Clone + Send + Sync + 'static,
     O: Send + Sync + 'static,
     F: JoinFunction<K, L, R, O> + 'static,
+    C: Collect<O> + Clone + 'static,
 {
-    fn make_callback(output: Stream<O>, function: Arc<F>) -> JoinCallback<K> {
+    async fn call_function(
+        output: &Stream<O>,
+        function: &F,
+        out: &Collector<O, C>,
+        context: MessageContext,
+        key: K,
+        values: JoinValues,
+    ) -> bool {
+        let join_type = match output.config().as_ref() {
+            crate::runtime::config::RuntimeStreamConfig::Join(config) => config.join_type,
+            _ => JoinType::Undefined,
+        };
+        let can_call = match join_type {
+            JoinType::Inner => {
+                values.first().is_some_and(|values| !values.is_empty())
+                    && values.get(1).is_some_and(|values| !values.is_empty())
+            }
+            JoinType::Left => values.first().is_some_and(|values| !values.is_empty()),
+            JoinType::Right => values.get(1).is_some_and(|values| !values.is_empty()),
+            JoinType::Outer => true,
+            JoinType::Undefined => false,
+        };
+        if !can_call {
+            return false;
+        }
+        let left = downcast_values::<L>(&values, 0);
+        let right = downcast_values::<R>(&values, 1);
+        function.join(context, output, key, left, right, out).await
+    }
+
+    fn make_callback(
+        output: Stream<O>,
+        collector: Collector<O, C>,
+        function: Arc<F>,
+    ) -> JoinCallback<K> {
         Arc::new(move |context, key, values| {
             let output = output.clone();
+            let collector = collector.clone();
             let function = Arc::clone(&function);
             async move {
-                let join_type = match output.config().as_ref() {
-                    crate::runtime::config::RuntimeStreamConfig::Join(config) => config.join_type,
-                    _ => JoinType::Undefined,
-                };
-                let can_call = match join_type {
-                    JoinType::Inner => {
-                        values.first().is_some_and(|values| !values.is_empty())
-                            && values.get(1).is_some_and(|values| !values.is_empty())
-                    }
-                    JoinType::Left => values.first().is_some_and(|values| !values.is_empty()),
-                    JoinType::Right => values.get(1).is_some_and(|values| !values.is_empty()),
-                    JoinType::Outer => true,
-                    JoinType::Undefined => false,
-                };
-                if !can_call {
-                    return false;
-                }
-                let left = downcast_values::<L>(&values, 0);
-                let right = downcast_values::<R>(&values, 1);
-                let out = output.collector();
-                function
-                    .join(context, &output, key, left, right, &out)
+                Self::call_function(&output, function.as_ref(), &collector, context, key, values)
                     .await
             }
             .boxed()
@@ -112,10 +129,29 @@ where
     async fn consume_value(&self, context: MessageContext, key: K, index: usize, value: DynValue) {
         let (context, span) = self.output.start_span(context, "stream.join");
         crate::runtime::common::instrument_if_present!(
-            self.store
-                .join_value(context, key, index, value, Arc::clone(&self.callback)),
+            self.store.join_value_with(
+                context,
+                key,
+                index,
+                value,
+                Arc::clone(&self.callback),
+                |context, key, values| Self::call_function(
+                    &self.output,
+                    self.function.as_ref(),
+                    &self.collector,
+                    context,
+                    key,
+                    values
+                )
+            ),
             span,
         );
+    }
+
+    pub fn right(self: &Arc<Self>) -> JoinLink<K, L, R, O, F, C> {
+        JoinLink {
+            join_stream: Arc::clone(self),
+        }
     }
 }
 
@@ -135,27 +171,43 @@ where
         right: &Stream<KeyValue<K, R>>,
         function: F,
     ) -> RuntimeResult<Stream<O>> {
-        let stream_id = config.stream.id;
-        let stream_name = config.stream.name.clone();
         let output = Stream::new(&config.stream, left.environment().clone());
+        let join_stream = Self::from_collector(config, output.collector(), function)?;
+        left.try_set_consumer(Arc::clone(&join_stream), output.id())?;
+        right.try_set_consumer(Arc::new(join_stream.right()), output.id())?;
+        Ok(output)
+    }
+
+    pub fn from_collector<C>(
+        config: &JoinStreamConfig,
+        collector: Collector<O, C>,
+        function: F,
+    ) -> RuntimeResult<Arc<JoinStream<K, L, R, O, F, C>>>
+    where
+        C: Collect<O> + Clone + 'static,
+    {
+        let output = collector.stream().clone();
+        let environment = output.environment();
         let hashmap_storage = Arc::new(HashMapJoinStorage::from_stream(
-            left.environment().clone(),
-            stream_id,
+            environment.clone(),
+            config.stream.id,
         ));
-        hashmap_storage.configure_metrics(left.environment(), &stream_name)?;
-        left.environment().register_storage(hashmap_storage.clone());
-        let store: Arc<dyn JoinStorage<K>> = hashmap_storage;
+        hashmap_storage.configure_metrics(environment, &config.stream.name)?;
+        environment.register_storage(hashmap_storage.clone());
         let function = Arc::new(function);
-        let callback = Self::make_callback(output.clone(), Arc::clone(&function));
-        let join_stream = Arc::new(Self {
-            output: output.clone(),
-            store,
+        let callback = JoinStream::<K, L, R, O, F, C>::make_callback(
+            output.clone(),
+            collector.clone(),
+            Arc::clone(&function),
+        );
+        Ok(Arc::new(JoinStream {
+            output,
+            collector,
+            function,
+            store: hashmap_storage,
             callback,
             _types: std::marker::PhantomData,
-        });
-        left.try_set_consumer(Arc::clone(&join_stream), output.id())?;
-        right.try_set_consumer(Arc::new(JoinLink { join_stream }), output.id())?;
-        Ok(output)
+        }))
     }
 }
 
@@ -176,25 +228,26 @@ where
         .collect()
 }
 
-pub struct JoinLink<K, L, R, O, F>
+pub struct JoinLink<K, L, R, O, F, C = Stream<O>>
 where
     K: Clone + Eq + Hash + Send + Sync + 'static,
     L: Clone + Send + Sync + 'static,
     R: Clone + Send + Sync + 'static,
     O: Send + Sync + 'static,
     F: JoinFunction<K, L, R, O> + 'static,
+    C: Collect<O> + Clone + 'static,
 {
-    join_stream: Arc<JoinStream<K, L, R, O, F>>,
+    join_stream: Arc<JoinStream<K, L, R, O, F, C>>,
 }
 
-#[async_trait]
-impl<K, L, R, O, F> Consumer<KeyValue<K, L>> for JoinStream<K, L, R, O, F>
+impl<K, L, R, O, F, C> Consumer<KeyValue<K, L>> for JoinStream<K, L, R, O, F, C>
 where
     K: Clone + Eq + Hash + Send + Sync + 'static,
     L: Clone + Send + Sync + 'static,
     R: Clone + Send + Sync + 'static,
     O: Send + Sync + 'static,
     F: JoinFunction<K, L, R, O> + 'static,
+    C: Collect<O> + Clone + 'static,
 {
     async fn consume(&self, context: MessageContext, payload: Payload<KeyValue<K, L>>) {
         let KeyValue { key, value } = payload.into_value();
@@ -203,14 +256,14 @@ where
     }
 }
 
-#[async_trait]
-impl<K, L, R, O, F> Consumer<KeyValue<K, R>> for JoinLink<K, L, R, O, F>
+impl<K, L, R, O, F, C> Consumer<KeyValue<K, R>> for JoinLink<K, L, R, O, F, C>
 where
     K: Clone + Eq + Hash + Send + Sync + 'static,
     L: Clone + Send + Sync + 'static,
     R: Clone + Send + Sync + 'static,
     O: Send + Sync + 'static,
     F: JoinFunction<K, L, R, O> + 'static,
+    C: Collect<O> + Clone + 'static,
 {
     async fn consume(&self, context: MessageContext, payload: Payload<KeyValue<K, R>>) {
         let KeyValue { key, value } = payload.into_value();

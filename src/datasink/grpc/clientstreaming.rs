@@ -218,9 +218,8 @@ where
                                 error
                             );
                         }
-                        crate::runtime::common::event_if_present!(
-                            pending.span.as_ref(),
-                            || match &handled {
+                        crate::runtime::common::event_if_present!(pending.span.as_ref(), || {
+                            match &handled {
                                 Ok(()) => {
                                     tracing::event!(name: "handle_response", tracing::Level::INFO, {})
                                 }
@@ -230,11 +229,14 @@ where
                                     error = %error
                                 ),
                             }
-                        );
+                        });
                         handled
                     }
                     Err(error) => {
-                        crate::runtime::telemetry::record_error_if_present!(pending.span.as_ref(), &error);
+                        crate::runtime::telemetry::record_error_if_present!(
+                            pending.span.as_ref(),
+                            &error
+                        );
                         crate::runtime::common::event_if_present!(pending.span.as_ref(), || {
                             tracing::event!(
                                 name: "close_and_recv.error",
@@ -262,7 +264,6 @@ where
     }
 }
 
-#[async_trait]
 impl<HandlerState, ReqT, ResR, T, R, E, H> Consumer<T>
     for ClientStreamingEndpointConsumer<HandlerState, ReqT, ResR, T, R, E, H>
 where

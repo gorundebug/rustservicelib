@@ -51,7 +51,7 @@ Generated services build their graph once during startup. Runtime requests then 
 
 | Semantics | Behavior |
 |---|---|
-| `FunctionCall` | Invoke the next consumer directly; optionally dispatch asynchronously |
+| `FunctionCall` | Invoke the next consumer directly; the async flag controls branch ordering, not task spawning |
 | `TaskPool` | Schedule work on a named bounded worker pool |
 | `PriorityTaskPool` | Schedule work on a named pool using request priority |
 | `Parallel` | Dispatch independently through the Tokio runtime |
@@ -81,19 +81,27 @@ Graph construction, consumer resolution, dispatch order, middleware chains, and 
 
 ## Operator business functions
 
-`MapFunction`, `FlatMapFunction`, `FilterFunction`, `ProcessFunction`,
+`Consumer`, `MapFunction`, `FlatMapFunction`, `FilterFunction`, `ProcessFunction`,
 `KeyByFunction`, `DelayFunction`, `JoinFunction`, and `MultiJoinFunction` return
 concrete `Send` futures. Implement their methods with ordinary `async fn`, without
-`#[async_trait]`. Remove the attribute from existing implementations when updating
-this library; endpoint handlers and `Consumer` still use their existing boxed
-async contracts.
+`#[async_trait]`. Remove the attribute from these implementations when updating
+this library. Collector arguments use `&impl Collect<T>` so that the concrete
+downstream consumer remains available to the compiler. Endpoint handlers retain
+their existing boxed async contracts.
 
-Operators retain concrete function types, including shared `Arc<F>` instances.
-The function and its `Arc` adapter do not add boxed futures. The dynamic
-`Consumer` boundary still boxes its future. These operator function traits are
-not `dyn` compatible; use concrete generic function types rather than
-`dyn MapFunction` and similar trait objects. This does not change graph call
-semantics, per-operator state, or shared business-function ownership.
+Operators retain concrete function and downstream consumer types, including
+shared `Arc<F>` instances. Generated connections within a bounded initialization
+part use these concrete types without boxing a future at every operator. Public
+`Stream` handles remain live entrypoints into the same graph, not metadata-only
+objects. Calls through these handles, including connections between initialization
+parts and cyclic links, retain a dynamic, boxed future boundary. The compatibility
+fluent construction path also retains dynamic connections.
+
+Transport handlers, callable SubStream interfaces, and scheduled Join/MultiJoin
+TTL callbacks retain their dynamic boundaries. This is not an allocation-free
+runtime. The native-future traits are not `dyn` compatible; use concrete generic
+types rather than `dyn Consumer` or `dyn MapFunction`. This does not change graph
+call semantics, per-operator state, or shared business-function ownership.
 
 ## Calling A SubStream
 

@@ -1,7 +1,10 @@
 use std::{sync::Arc, time::Duration};
 
 use futures::FutureExt;
-use servicelib::{MessageContext, runtime::store::{HashMapJoinStorage, JoinCallback, JoinStorage}};
+use servicelib::{
+    MessageContext,
+    runtime::store::{HashMapJoinStorage, JoinCallback, JoinStorage},
+};
 
 #[tokio::test]
 async fn completed_join_releases_values_and_callback_before_ttl() {
@@ -15,9 +18,14 @@ async fn completed_join_releases_values_and_callback_before_ttl() {
         async move {
             assert!(!state.is_empty());
             false
-        }.boxed()
+        }
+        .boxed()
     });
-    assert!(store.join_value(MessageContext::new(), 7, 0, payload, pending).await);
+    assert!(
+        store
+            .join_value(MessageContext::new(), 7, 0, payload, pending)
+            .await
+    );
     assert_eq!(store.len().await, 1);
 
     let complete: JoinCallback<u32> = Arc::new(|_context, _key, values| {
@@ -25,10 +33,19 @@ async fn completed_join_releases_values_and_callback_before_ttl() {
             assert_eq!(values[0].len(), 1);
             assert_eq!(values[1].len(), 1);
             true
-        }.boxed()
+        }
+        .boxed()
     });
-    assert!(store.join_value(MessageContext::new(), 7, 1, Arc::new(42_u32), complete).await);
-    assert_eq!(store.len().await, 0, "the completed key must already be absent");
+    assert!(
+        store
+            .join_value(MessageContext::new(), 7, 1, Arc::new(42_u32), complete)
+            .await
+    );
+    assert_eq!(
+        store.len().await,
+        0,
+        "the completed key must already be absent"
+    );
 
     // Cancellation cleanup may run on the next scheduler turn, but must not
     // retain completed request state until the one-hour TTL expires.
@@ -36,7 +53,10 @@ async fn completed_join_releases_values_and_callback_before_ttl() {
         while payload_lifetime.upgrade().is_some() || callback_lifetime.upgrade().is_some() {
             tokio::task::yield_now().await;
         }
-    }).await;
-    assert!(released.is_ok(),
-        "completed Join still retains values or callback through its TTL task");
+    })
+    .await;
+    assert!(
+        released.is_ok(),
+        "completed Join still retains values or callback through its TTL task"
+    );
 }

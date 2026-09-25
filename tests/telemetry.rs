@@ -2,10 +2,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use servicelib::{
-    Collect, MessageContext, Payload, Stream, SubStream, SubStreamCollectorFunc,
+    MessageContext, Payload, Stream, SubStream, SubStreamCollectorFunc,
     operators::MapFunction,
     runtime::{
-        collector::Collector,
         common::RuntimeStream,
         config::{
             CallSemantics, MapStreamConfig, RuntimeConfig, RuntimeStreamConfig, StreamConfig,
@@ -104,7 +103,7 @@ impl MapFunction<u32, u32> for ReturningMap {
         context: MessageContext,
         _stream: &dyn RuntimeStream,
         value: &u32,
-        out: &Collector<u32>,
+        out: &impl servicelib::runtime::collector::Collect<u32>,
     ) {
         tracing::info!(value = *value, "substream body called");
         out.out(context, *value).await;
@@ -239,7 +238,7 @@ impl MapFunction<u32, u32> for LoggingMap {
         _context: MessageContext,
         _stream: &dyn RuntimeStream,
         value: &u32,
-        _out: &Collector<u32>,
+        _out: &impl servicelib::runtime::collector::Collect<u32>,
     ) {
         tracing::info!(value = *value, "map function called");
     }

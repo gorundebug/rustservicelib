@@ -53,8 +53,11 @@ pub trait DataProducer<T>: Send + Sync
 where
     T: Send + Sync + 'static,
 {
-    async fn start(&self, context: MessageContext, consumer: Arc<dyn Consumer<T>>)
-    -> HandlerResult;
+    async fn start(
+        &self,
+        context: MessageContext,
+        consumer: Arc<impl Consumer<T> + 'static>,
+    ) -> HandlerResult;
 
     async fn stop(&self, context: MessageContext);
 }
@@ -564,7 +567,6 @@ where
     }
 }
 
-#[async_trait]
 impl<HandlerState, T, R, E, H> Consumer<T> for CustomEndpointConsumer<HandlerState, T, R, E, H>
 where
     HandlerState: Send + Sync + 'static,
@@ -589,7 +591,6 @@ where
     endpoint_consumer: Arc<CustomEndpointConsumer<HandlerState, T, R, E, H>>,
 }
 
-#[async_trait]
 impl<HandlerState, T, R, E, H> Consumer<R> for ResultConsumer<HandlerState, T, R, E, H>
 where
     HandlerState: Send + Sync + 'static,
@@ -786,7 +787,7 @@ where
 {
     async fn start(&self, context: MessageContext) -> RuntimeResult<()> {
         let producer = Arc::clone(&self.producer);
-        let consumer: Arc<dyn Consumer<T>> = self.endpoint_consumer.clone();
+        let consumer = self.endpoint_consumer.clone();
         let cancellation = self.cancellation.clone();
         *self.producer_task.lock().await = Some(tokio::spawn(async move {
             tokio::select! {

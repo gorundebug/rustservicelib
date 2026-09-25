@@ -6,16 +6,15 @@ use std::{
     },
 };
 
-use async_trait::async_trait;
 use futures::FutureExt;
 
 use crate::runtime::{
-    collector::Collector,
+    collector::{Collect, Collector},
     common::{Consumer, MessageContext, Payload, RuntimeStream},
     config::MultiJoinStreamConfig,
     datastruct::KeyValue,
-    environment::RuntimeResult,
-    store::{DynValue, HashMapJoinStorage, JoinCallback, JoinStorage, JoinValues},
+    environment::{RuntimeEnvironment, RuntimeResult},
+    store::{DynValue, HashMapJoinStorage, JoinCallback, JoinValues},
     stream::Stream,
 };
 
@@ -30,7 +29,7 @@ where
         stream: &dyn RuntimeStream,
         key: K,
         values: JoinValues,
-        out: &Collector<O>,
+        out: &impl Collect<O>,
     ) -> impl std::future::Future<Output = bool> + Send;
 }
 
@@ -48,7 +47,7 @@ where
         stream: &dyn RuntimeStream,
         key: K,
         values: JoinValues,
-        out: &Collector<O>,
+        out: &impl Collect<O>,
     ) -> impl std::future::Future<Output = bool> + Send {
         self.as_ref().multi_join(context, stream, key, values, out)
     }
@@ -78,10 +77,9 @@ where
     F: MultiJoinFunction<K, O> + 'static,
 {
     output: Stream<O>,
-    store: Arc<dyn JoinStorage<K>>,
-    callback: JoinCallback<K>,
+    store: Arc<HashMapJoinStorage<K>>,
+    function: Arc<F>,
     next_index: AtomicUsize,
-    _function: std::marker::PhantomData<fn(F)>,
 }
 
 impl<K, O, F> MultiJoinStream<K, O, F>
@@ -90,28 +88,66 @@ where
     O: Send + Sync + 'static,
     F: MultiJoinFunction<K, O> + 'static,
 {
-    fn make_callback(output: Stream<O>, function: Arc<F>) -> JoinCallback<K> {
+    async fn call_function(
+        output: &Stream<O>,
+        function: &F,
+        out: &impl Collect<O>,
+        context: MessageContext,
+        key: K,
+        values: JoinValues,
+    ) -> bool {
+        if !values.first().is_some_and(|left| !left.is_empty()) {
+            return false;
+        }
+        function.multi_join(context, output, key, values, out).await
+    }
+
+    fn make_callback<C>(
+        output: Stream<O>,
+        collector: Collector<O, C>,
+        function: Arc<F>,
+    ) -> JoinCallback<K>
+    where
+        C: Collect<O> + Clone + 'static,
+    {
         Arc::new(move |context, key, values| {
             let output = output.clone();
+            let collector = collector.clone();
             let function = Arc::clone(&function);
             async move {
-                if !values.first().is_some_and(|left| !left.is_empty()) {
-                    return false;
-                }
-                let out = output.collector();
-                function
-                    .multi_join(context, &output, key, values, &out)
+                Self::call_function(&output, function.as_ref(), &collector, context, key, values)
                     .await
             }
             .boxed()
         })
     }
 
-    async fn consume(&self, context: MessageContext, key: K, index: usize, value: DynValue) {
+    async fn consume_value(
+        &self,
+        context: MessageContext,
+        key: K,
+        index: usize,
+        value: DynValue,
+        callback: JoinCallback<K>,
+        out: &impl Collect<O>,
+    ) {
         let (context, span) = self.output.start_span(context, "stream.join");
         crate::runtime::common::instrument_if_present!(
-            self.store
-                .join_value(context, key, index, value, Arc::clone(&self.callback)),
+            self.store.join_value_with(
+                context,
+                key,
+                index,
+                value,
+                callback,
+                |context, key, values| Self::call_function(
+                    &self.output,
+                    self.function.as_ref(),
+                    out,
+                    context,
+                    key,
+                    values
+                )
+            ),
             span,
         );
     }
@@ -132,34 +168,32 @@ where
     where
         V: Clone + Send + Sync + 'static,
     {
+        let multi_join_stream = Self::new(config, left.environment().clone(), function)?;
+        multi_join_stream.connect_left(left, multi_join_stream.output.collector())?;
+        Ok(multi_join_stream)
+    }
+
+    pub fn new(
+        config: &MultiJoinStreamConfig,
+        environment: RuntimeEnvironment,
+        function: F,
+    ) -> RuntimeResult<Arc<Self>> {
         let stream_id = config.stream.id;
         let stream_name = config.stream.name.clone();
         let hashmap_storage = Arc::new(HashMapJoinStorage::from_stream(
-            left.environment().clone(),
+            environment.clone(),
             stream_id,
         ));
-        hashmap_storage.configure_metrics(left.environment(), &stream_name)?;
-        left.environment().register_storage(hashmap_storage.clone());
-        let store: Arc<dyn JoinStorage<K>> = hashmap_storage;
-        let output = Stream::new(&config.stream, left.environment().clone());
+        hashmap_storage.configure_metrics(&environment, &stream_name)?;
+        environment.register_storage(hashmap_storage.clone());
+        let output = Stream::new(&config.stream, environment);
         let function = Arc::new(function);
-        let callback = Self::make_callback(output.clone(), Arc::clone(&function));
-        let multi_join_stream = Arc::new(Self {
+        Ok(Arc::new(Self {
             output,
-            store,
-            callback,
+            store: hashmap_storage,
+            function,
             next_index: AtomicUsize::new(1),
-            _function: std::marker::PhantomData,
-        });
-        left.try_set_consumer(
-            Arc::new(MultiJoinLinkStream {
-                multi_join_stream: Arc::clone(&multi_join_stream),
-                index: 0,
-                _value: std::marker::PhantomData,
-            }),
-            multi_join_stream.output.id(),
-        )?;
-        Ok(multi_join_stream)
+        }))
     }
 }
 
@@ -177,42 +211,97 @@ where
     where
         V: Clone + Send + Sync + 'static,
     {
+        self.add_with_collector(source, self.output.collector())
+            .map(|_| ())
+    }
+
+    pub fn connect_left<V, C>(
+        self: &Arc<Self>,
+        source: &Stream<KeyValue<K, V>>,
+        collector: Collector<O, C>,
+    ) -> RuntimeResult<
+        Collector<KeyValue<K, V>, impl Collect<KeyValue<K, V>> + Clone + use<K, V, O, F, C>>,
+    >
+    where
+        V: Clone + Send + Sync + 'static,
+        C: Collect<O> + Clone + 'static,
+    {
+        source.try_set_typed_consumer(self.make_link::<V, C>(0, collector), self.output.id())
+    }
+
+    pub fn add_with_collector<V, C>(
+        self: &Arc<Self>,
+        source: &Stream<KeyValue<K, V>>,
+        collector: Collector<O, C>,
+    ) -> RuntimeResult<
+        Collector<KeyValue<K, V>, impl Collect<KeyValue<K, V>> + Clone + use<K, V, O, F, C>>,
+    >
+    where
+        V: Clone + Send + Sync + 'static,
+        C: Collect<O> + Clone + 'static,
+    {
         let index = self.next_index.fetch_add(1, Ordering::Relaxed);
-        source.try_set_consumer(
-            Arc::new(MultiJoinLinkStream {
-                multi_join_stream: Arc::clone(self),
-                index,
-                _value: std::marker::PhantomData,
-            }),
-            self.output.id(),
-        )
+        source.try_set_typed_consumer(self.make_link::<V, C>(index, collector), self.output.id())
+    }
+
+    fn make_link<V, C>(
+        self: &Arc<Self>,
+        index: usize,
+        collector: Collector<O, C>,
+    ) -> Arc<MultiJoinLinkStream<K, V, O, F, C>>
+    where
+        V: Clone + Send + Sync + 'static,
+        C: Collect<O> + Clone + 'static,
+    {
+        let callback = Self::make_callback(
+            self.output.clone(),
+            collector.clone(),
+            Arc::clone(&self.function),
+        );
+        Arc::new(MultiJoinLinkStream {
+            multi_join_stream: Arc::clone(self),
+            index,
+            collector,
+            callback,
+            _value: std::marker::PhantomData,
+        })
     }
 }
 
-pub struct MultiJoinLinkStream<K, V, O, F>
+pub struct MultiJoinLinkStream<K, V, O, F, C = Stream<O>>
 where
     K: Clone + Eq + Hash + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
     O: Send + Sync + 'static,
     F: MultiJoinFunction<K, O> + 'static,
+    C: Collect<O> + Clone + 'static,
 {
     multi_join_stream: Arc<MultiJoinStream<K, O, F>>,
     index: usize,
+    collector: Collector<O, C>,
+    callback: JoinCallback<K>,
     _value: std::marker::PhantomData<fn(V)>,
 }
 
-#[async_trait]
-impl<K, V, O, F> Consumer<KeyValue<K, V>> for MultiJoinLinkStream<K, V, O, F>
+impl<K, V, O, F, C> Consumer<KeyValue<K, V>> for MultiJoinLinkStream<K, V, O, F, C>
 where
     K: Clone + Eq + Hash + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
     O: Send + Sync + 'static,
     F: MultiJoinFunction<K, O> + 'static,
+    C: Collect<O> + Clone + 'static,
 {
     async fn consume(&self, context: MessageContext, payload: Payload<KeyValue<K, V>>) {
         let KeyValue { key, value } = payload.into_value();
         self.multi_join_stream
-            .consume(context, key, self.index, Arc::new(value))
+            .consume_value(
+                context,
+                key,
+                self.index,
+                Arc::new(value),
+                Arc::clone(&self.callback),
+                &self.collector,
+            )
             .await;
     }
 }

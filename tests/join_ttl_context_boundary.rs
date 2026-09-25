@@ -1,8 +1,20 @@
-use std::{sync::{Arc, atomic::{AtomicUsize, Ordering}}, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use futures::FutureExt;
-use servicelib::{MessageContext, runtime::store::{HashMapJoinStorage, JoinCallback, JoinStorage, Storage}};
-use tokio::{sync::mpsc, time::{Instant, advance, timeout}};
+use servicelib::{
+    MessageContext,
+    runtime::store::{HashMapJoinStorage, JoinCallback, JoinStorage, Storage},
+};
+use tokio::{
+    sync::mpsc,
+    time::{Instant, advance, timeout},
+};
 
 #[tokio::test(start_paused = true)]
 async fn renewal_preserves_the_absolute_context_deadline() {
@@ -24,14 +36,25 @@ async fn renewal_preserves_the_absolute_context_deadline() {
                     sender.send(Instant::now()).unwrap();
                 }
                 false
-            }.boxed()
+            }
+            .boxed()
         })
     };
-    assert!(store.join_value(context.clone(), 7, 0, Arc::new(10_u32), callback.clone()).await);
+    assert!(
+        store
+            .join_value(context.clone(), 7, 0, Arc::new(10_u32), callback.clone())
+            .await
+    );
     advance(Duration::from_secs(4)).await;
-    assert!(store.join_value(context, 7, 1, Arc::new(20_u32), callback).await);
-    let expired = timeout(Duration::from_secs(7), receiver.recv()).await
-        .expect("renewal extended the context deadline").unwrap();
+    assert!(
+        store
+            .join_value(context, 7, 1, Arc::new(20_u32), callback)
+            .await
+    );
+    let expired = timeout(Duration::from_secs(7), receiver.recv())
+        .await
+        .expect("renewal extended the context deadline")
+        .unwrap();
     assert_eq!(expired, start + Duration::from_secs(10));
     store.stop(MessageContext::new()).await;
 }
@@ -53,14 +76,28 @@ async fn cancelling_a_context_after_renewal_still_delivers_expiry() {
                     sender.send(()).unwrap();
                 }
                 false
-            }.boxed()
+            }
+            .boxed()
         })
     };
     for index in 0..2 {
-        assert!(store.join_value(context.clone(), 7, index, Arc::new(42_u32), callback.clone()).await);
+        assert!(
+            store
+                .join_value(
+                    context.clone(),
+                    7,
+                    index,
+                    Arc::new(42_u32),
+                    callback.clone()
+                )
+                .await
+        );
     }
     context.cancel();
-    timeout(Duration::from_secs(1), receiver.recv()).await.unwrap().unwrap();
+    timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 3);
     store.stop(MessageContext::new()).await;
 }

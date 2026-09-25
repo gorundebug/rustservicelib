@@ -58,7 +58,10 @@ async fn delay_admission_cancel_stop_race_preserves_exactly_accepted_callbacks()
             usize::from(accepted),
             "round {round}: callback execution must match admission"
         );
-        assert!(weak_payload.upgrade().is_none(), "round {round}: retained payload");
+        assert!(
+            weak_payload.upgrade().is_none(),
+            "round {round}: retained payload"
+        );
         assert!(
             pool.delay(MessageContext::new(), Duration::ZERO, async {})
                 .await

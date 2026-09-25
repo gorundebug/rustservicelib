@@ -1,8 +1,7 @@
 use std::{
     collections::HashMap,
     error::Error,
-    fmt,
-    io,
+    fmt, io,
     pin::Pin,
     sync::{Arc, Mutex, Weak},
     task::{Context, Poll, Waker},
@@ -89,39 +88,51 @@ pub struct ResponseBody {
 
 impl fmt::Debug for ResponseBody {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("ResponseBody")
-            .field("content_length", &self.content_length).finish_non_exhaustive()
+        formatter
+            .debug_struct("ResponseBody")
+            .field("content_length", &self.content_length)
+            .finish_non_exhaustive()
     }
 }
 
 fn close_response_body(state: &Mutex<ResponseBodyState>) {
     let (reader, waker) = {
-        let mut state = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.closed = true;
         (state.reader.take(), state.waker.take())
     };
     drop(reader);
-    if let Some(waker) = waker { waker.wake(); }
+    if let Some(waker) = waker {
+        waker.wake();
+    }
 }
 
 struct ResponseBodyGuard(Arc<Mutex<ResponseBodyState>>);
 
 impl Drop for ResponseBodyGuard {
-    fn drop(&mut self) { close_response_body(&self.0); }
+    fn drop(&mut self) {
+        close_response_body(&self.0);
+    }
 }
 
 impl ResponseBody {
     pub fn new(reader: impl AsyncRead + Send + 'static) -> Self {
         Self {
             state: Arc::new(Mutex::new(ResponseBodyState {
-                reader: Some(Box::pin(reader)), closed: false, waker: None,
+                reader: Some(Box::pin(reader)),
+                closed: false,
+                waker: None,
             })),
             content_length: None,
         }
     }
 
     /// Transport-provided total length, not a reason to read or buffer the body.
-    pub fn content_length(&self) -> Option<usize> { self.content_length }
+    pub fn content_length(&self) -> Option<usize> {
+        self.content_length
+    }
 
     /// Explicitly collect the remaining body, analogous to Go's io.ReadAll.
     pub async fn bytes(&mut self) -> io::Result<Vec<u8>> {
@@ -131,7 +142,9 @@ impl ResponseBody {
     }
 
     /// Release the underlying response without draining unread bytes.
-    pub fn close(&mut self) { close_response_body(&self.state); }
+    pub fn close(&mut self) {
+        close_response_body(&self.state);
+    }
 
     fn close_on_drop(&self) -> ResponseBodyGuard {
         ResponseBodyGuard(Arc::clone(&self.state))
@@ -148,11 +161,23 @@ impl From<Vec<u8>> for ResponseBody {
 }
 
 impl AsyncRead for ResponseBody {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buffer: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
-        if buffer.remaining() == 0 { return Poll::Ready(Ok(())); }
-        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if buffer.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if state.closed {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "HTTP response body is closed")));
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "HTTP response body is closed",
+            )));
         }
         let before = buffer.filled().len();
         let outcome = match state.reader.as_mut() {
@@ -162,9 +187,16 @@ impl AsyncRead for ResponseBody {
         let retired = match &outcome {
             Poll::Ready(result) => {
                 state.waker = None;
-                if result.is_err() || buffer.filled().len() == before { state.reader.take() } else { None }
+                if result.is_err() || buffer.filled().len() == before {
+                    state.reader.take()
+                } else {
+                    None
+                }
             }
-            Poll::Pending => { state.waker = Some(cx.waker().clone()); None }
+            Poll::Pending => {
+                state.waker = Some(cx.waker().clone());
+                None
+            }
         };
         drop(state);
         drop(retired);
@@ -237,15 +269,20 @@ impl Client for ReqwestClient {
                     .map(|value| (name.as_str().to_owned(), value.to_owned()))
             })
             .collect();
-        let content_length = response.content_length().and_then(|size| usize::try_from(size).ok());
-        let chunks = futures::stream::try_unfold((response, context), |(mut response, context)| async move {
-            let chunk = tokio::select! {
-                biased;
-                _ = context.cancelled() => return Err(io::Error::other("HTTP request context cancelled")),
-                chunk = response.chunk() => chunk.map_err(io::Error::other)?,
-            };
-            Ok(chunk.map(|chunk| (chunk, (response, context))))
-        });
+        let content_length = response
+            .content_length()
+            .and_then(|size| usize::try_from(size).ok());
+        let chunks = futures::stream::try_unfold(
+            (response, context),
+            |(mut response, context)| async move {
+                let chunk = tokio::select! {
+                    biased;
+                    _ = context.cancelled() => return Err(io::Error::other("HTTP request context cancelled")),
+                    chunk = response.chunk() => chunk.map_err(io::Error::other)?,
+                };
+                Ok(chunk.map(|chunk| (chunk, (response, context))))
+            },
+        );
         let mut body = ResponseBody::new(StreamReader::new(Box::pin(chunks)));
         body.content_length = content_length;
         Ok(Response {
@@ -368,7 +405,8 @@ where
         'requester: 'future,
         Self: 'future,
     {
-        self.as_ref().consume_message(context, stream, handler_state, value, requester)
+        self.as_ref()
+            .consume_message(context, stream, handler_state, value, requester)
     }
 
     fn handle_response<'owner, 'handler_state, 'future>(
@@ -383,7 +421,8 @@ where
         'handler_state: 'future,
         Self: 'future,
     {
-        self.as_ref().handle_response(context, stream, handler_state, response)
+        self.as_ref()
+            .handle_response(context, stream, handler_state, response)
     }
 
     fn end_request<'owner, 'result, 'future>(
@@ -398,7 +437,8 @@ where
         'result: 'future,
         Self: 'future,
     {
-        self.as_ref().end_request(context, stream, result, handler_state)
+        self.as_ref()
+            .end_request(context, stream, result, handler_state)
     }
 }
 
@@ -510,7 +550,6 @@ where
     Ok(consumer)
 }
 
-#[async_trait]
 impl<HandlerState, T, R, E, H> Consumer<T> for EndpointConsumer<HandlerState, T, R, E, H>
 where
     HandlerState: Send + 'static,
@@ -634,7 +673,11 @@ where
                     Ok(response) => {
                         _response_body_guard = Some(response.body.close_on_drop());
                         if let Some(observation) = observation {
-                            observation.finish(Some(response.status), response.body.content_length(), false);
+                            observation.finish(
+                                Some(response.status),
+                                response.body.content_length(),
+                                false,
+                            );
                         }
                         crate::runtime::common::event_if_present!(span.as_ref(), || {
                             tracing::event!(name: "http_call", tracing::Level::INFO, status_code = response.status);
@@ -649,19 +692,25 @@ where
                             span,
                         );
                         if let Err(error) = &handled {
-                            crate::runtime::telemetry::record_error_if_present!(span.as_ref(), error);
+                            crate::runtime::telemetry::record_error_if_present!(
+                                span.as_ref(),
+                                error
+                            );
                         }
-                        crate::runtime::common::event_if_present!(span.as_ref(), || match &handled {
-                            Ok(()) => {
-                                tracing::event!(name: "handle_response", tracing::Level::INFO, {})
+                        crate::runtime::common::event_if_present!(
+                            span.as_ref(),
+                            || match &handled {
+                                Ok(()) => {
+                                    tracing::event!(name: "handle_response", tracing::Level::INFO, {})
+                                }
+                                Err(error) => tracing::event!(
+                                    name: "handle_response.error",
+                                    tracing::Level::ERROR,
+                                    error = %error,
+                                    "HTTP response handler failed"
+                                ),
                             }
-                            Err(error) => tracing::event!(
-                                name: "handle_response.error",
-                                tracing::Level::ERROR,
-                                error = %error,
-                                "HTTP response handler failed"
-                            ),
-                        });
+                        );
                         handled
                     }
                     Err(error) => {

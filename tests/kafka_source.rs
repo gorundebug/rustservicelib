@@ -13,7 +13,6 @@ use servicelib::{
     },
     operators::{InputStream, MapFunction},
     runtime::{
-        collector::Collector,
         common::RuntimeStream,
         config::{
             CallSemantics, InputStreamConfig, KafkaDataConnectorConfig, KafkaEndpointConfig,
@@ -33,7 +32,7 @@ impl MapFunction<u32, u32> for Double {
         context: MessageContext,
         _stream: &dyn RuntimeStream,
         value: &u32,
-        out: &Collector<u32>,
+        out: &impl servicelib::runtime::collector::Collect<u32>,
     ) {
         out.emit(context, Payload::new(*value * 2)).await;
     }

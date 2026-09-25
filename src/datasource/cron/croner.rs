@@ -36,7 +36,7 @@ struct CronJob {
     timezone: Tz,
     overlap_policy: ScheduleOverlapPolicy,
     missed_run_policy: ScheduleMissedRunPolicy,
-    consumer: Arc<dyn Consumer<ScheduleTrigger>>,
+    consumer: Arc<dyn crate::runtime::common::ErasedConsumer<ScheduleTrigger>>,
     running: Arc<AtomicBool>,
 }
 
@@ -332,7 +332,6 @@ where
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
 }
 
-#[async_trait]
 impl<T, R, E, F> Consumer<ScheduleTrigger> for CronEndpointConsumer<T, R, E, F>
 where
     T: Send + Sync + 'static,
@@ -466,7 +465,6 @@ struct CronResultConsumer {
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
 }
 
-#[async_trait]
 impl<R> Consumer<R> for CronResultConsumer
 where
     R: Send + Sync + 'static,
@@ -523,7 +521,6 @@ mod tests {
 
     struct NoopConsumer;
 
-    #[async_trait]
     impl Consumer<ScheduleTrigger> for NoopConsumer {
         async fn consume(&self, _context: MessageContext, _payload: Payload<ScheduleTrigger>) {}
     }

@@ -54,8 +54,12 @@ where
         request: ReqT,
         sender: Arc<dyn Sender<ResR>>,
     ) -> HandlerResult {
-        let (stream_id, pending, lifecycle) = self.endpoint_consumer.begin_owned(context, sender).await?;
-        let (mut lifecycle, mut result) = self.endpoint_consumer.consume_owned(lifecycle, &pending, request).await;
+        let (stream_id, pending, lifecycle) =
+            self.endpoint_consumer.begin_owned(context, sender).await?;
+        let (mut lifecycle, mut result) = self
+            .endpoint_consumer
+            .consume_owned(lifecycle, &pending, request)
+            .await;
         if result.is_ok() {
             lifecycle = self.endpoint_consumer.eof_owned(lifecycle, &pending).await;
             if self.endpoint_consumer.has_result() {

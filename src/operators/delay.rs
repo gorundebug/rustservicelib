@@ -1,9 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
-use async_trait::async_trait;
-
 use crate::runtime::{
-    collector::Collector,
+    collector::{Collect, Collector},
     common::{Consumer, MessageContext, Payload, RuntimeStream},
     config::DelayStreamConfig,
     environment::{RuntimeError, RuntimeResult},
@@ -27,7 +25,7 @@ where
         _stream: &dyn RuntimeStream,
         _value: &T,
         _error: RuntimeError,
-        _out: &Collector<T>,
+        _out: &impl Collect<T>,
     ) -> impl std::future::Future<Output = ()> + Send {
         async move {
             let _inputs = (_context, _stream, _value, _error, _out);
@@ -57,18 +55,21 @@ where
         _stream: &dyn RuntimeStream,
         _value: &T,
         _error: RuntimeError,
-        _out: &Collector<T>,
+        _out: &impl Collect<T>,
     ) -> impl std::future::Future<Output = ()> + Send {
-        self.as_ref().delay_error(_context, _stream, _value, _error, _out)
+        self.as_ref()
+            .delay_error(_context, _stream, _value, _error, _out)
     }
 }
 
-pub struct DelayStream<T, F>
+pub struct DelayStream<T, F, C = Stream<T>>
 where
     T: Send + Sync + 'static,
     F: DelayFunction<T>,
+    C: Collect<T>,
 {
     output: Stream<T>,
+    collector: Collector<T, C>,
     function: F,
 }
 
@@ -88,12 +89,20 @@ where
             source.environment().clone(),
             source.get_serde(),
         );
-        let operator = Arc::new(Self {
-            output: output.clone(),
-            function,
-        });
+        let operator = Arc::new(Self::from_collector(output.collector(), function));
         source.try_set_consumer(operator, output.id())?;
         Ok(output)
+    }
+
+    pub fn from_collector<C>(collector: Collector<T, C>, function: F) -> DelayStream<T, F, C>
+    where
+        C: Collect<T>,
+    {
+        DelayStream {
+            output: collector.stream().clone(),
+            collector,
+            function,
+        }
     }
 }
 
@@ -109,11 +118,11 @@ where
     }
 }
 
-#[async_trait]
-impl<T, F> Consumer<T> for DelayStream<T, F>
+impl<T, F, C> Consumer<T> for DelayStream<T, F, C>
 where
     T: Send + Sync + 'static,
     F: DelayFunction<T> + 'static,
+    C: Collect<T> + Clone + 'static,
 {
     async fn consume(&self, context: MessageContext, payload: Payload<T>) {
         let (context, span) = self.output.start_span(context, "stream.delay");
@@ -127,10 +136,10 @@ where
                 if duration.is_zero() {
                     // Go deliberately emits a non-positive delay even for an already
                     // cancelled context.
-                    self.output.emit(context, payload).await;
+                    self.collector.emit(context, payload).await;
                     return;
                 }
-                let output = self.output.clone();
+                let output = self.collector.clone();
                 let delayed_context = context.clone();
                 let error_context = context.clone();
                 let (error_payload, payload) = payload.share();
@@ -163,21 +172,23 @@ where
                     .await;
                 if let Err(error) = scheduled {
                     if let Some(event_span) = event_span.as_ref() {
-                        crate::runtime::common::event_if_enabled!(
-                            event_span,
-                            || tracing::event!(
-                                name: "delay.skipped",
-                                parent: event_span,
-                                tracing::Level::WARN,
-                                error = %error,
-                                reason = "delay_pool_rejected",
-                                "delay skipped"
-                            )
-                        );
+                        crate::runtime::common::event_if_enabled!(event_span, || tracing::event!(
+                            name: "delay.skipped",
+                            parent: event_span,
+                            tracing::Level::WARN,
+                            error = %error,
+                            reason = "delay_pool_rejected",
+                            "delay skipped"
+                        ));
                     }
-                    let out = self.output.collector();
                     self.function
-                        .delay_error(error_context, &self.output, &error_payload, error, &out)
+                        .delay_error(
+                            error_context,
+                            &self.output,
+                            &error_payload,
+                            error,
+                            &self.collector,
+                        )
                         .await;
                 }
             },

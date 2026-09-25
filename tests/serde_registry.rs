@@ -163,5 +163,8 @@ async fn concurrent_resolutions_return_the_same_cached_instance() {
     for task in tasks {
         assert!(Arc::ptr_eq(&expected, &task.await.unwrap()));
     }
-    assert!(Arc::ptr_eq(&expected, &environment.get_serde::<String>().unwrap()));
+    assert!(Arc::ptr_eq(
+        &expected,
+        &environment.get_serde::<String>().unwrap()
+    ));
 }

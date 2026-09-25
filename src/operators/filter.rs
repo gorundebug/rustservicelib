@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
-
 use crate::runtime::{
+    collector::{Collect, Collector},
     common::{Consumer, MessageContext, Payload, RuntimeStream},
     config::FilterStreamConfig,
     environment::RuntimeResult,
@@ -13,7 +12,12 @@ pub trait FilterFunction<T>: Send + Sync
 where
     T: Send + Sync + 'static,
 {
-    fn filter(&self, context: MessageContext, stream: &dyn RuntimeStream, value: &T) -> impl std::future::Future<Output = bool> + Send;
+    fn filter(
+        &self,
+        context: MessageContext,
+        stream: &dyn RuntimeStream,
+        value: &T,
+    ) -> impl std::future::Future<Output = bool> + Send;
 }
 
 // Sharing a business function does not share operator configuration or state.
@@ -23,17 +27,23 @@ where
     T: Send + Sync + 'static,
     F: FilterFunction<T> + ?Sized,
 {
-    fn filter(&self, context: MessageContext, stream: &dyn RuntimeStream, value: &T) -> impl std::future::Future<Output = bool> + Send {
+    fn filter(
+        &self,
+        context: MessageContext,
+        stream: &dyn RuntimeStream,
+        value: &T,
+    ) -> impl std::future::Future<Output = bool> + Send {
         self.as_ref().filter(context, stream, value)
     }
 }
 
-pub struct FilterStream<T, F>
+pub struct FilterStream<T, F, C = Collector<T>>
 where
     T: Send + Sync + 'static,
     F: FilterFunction<T>,
 {
     output: Stream<T>,
+    collector: C,
     function: F,
 }
 
@@ -54,11 +64,26 @@ where
             source.get_serde(),
         );
         let operator = Arc::new(Self {
+            collector: output.collector(),
             output: output.clone(),
             function,
         });
         source.try_set_consumer(operator, output.id())?;
         Ok(output)
+    }
+
+    pub fn from_collector<C>(
+        output: Collector<T, C>,
+        function: F,
+    ) -> FilterStream<T, F, Collector<T, C>>
+    where
+        C: Collect<T>,
+    {
+        FilterStream {
+            output: output.stream().clone(),
+            collector: output,
+            function,
+        }
     }
 }
 
@@ -74,11 +99,11 @@ where
     }
 }
 
-#[async_trait]
-impl<T, F> Consumer<T> for FilterStream<T, F>
+impl<T, F, C> Consumer<T> for FilterStream<T, F, C>
 where
     T: Send + Sync + 'static,
     F: FilterFunction<T> + 'static,
+    C: Collect<T>,
 {
     async fn consume(&self, context: MessageContext, payload: Payload<T>) {
         let (context, span) = self.output.start_span(context, "stream.filter");
@@ -89,7 +114,7 @@ where
                     .filter(context.clone(), &self.output, &payload)
                     .await
                 {
-                    self.output.emit(context, payload).await;
+                    self.collector.out_payload(context, payload).await;
                 }
             },
             span,

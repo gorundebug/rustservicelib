@@ -63,7 +63,10 @@ where
         while let Some(request) = requests.next().await {
             match request {
                 Ok(request) => {
-                    (lifecycle, result) = self.endpoint_consumer.consume_owned(lifecycle, &pending, request).await;
+                    (lifecycle, result) = self
+                        .endpoint_consumer
+                        .consume_owned(lifecycle, &pending, request)
+                        .await;
                     if result.is_err() {
                         break;
                     }

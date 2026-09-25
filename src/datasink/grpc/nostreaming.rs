@@ -1,7 +1,5 @@
 use std::sync::{Arc, Weak};
 
-use async_trait::async_trait;
-
 use super::{
     BoxFuture, EndpointHandler, EndpointMetrics, HandlerResult, RequestSender, ResultContext,
     StreamContext, start_output_span,
@@ -61,7 +59,6 @@ where
     Ok(consumer)
 }
 
-#[async_trait]
 impl<HandlerState, ReqT, ResR, T, R, E, H> Consumer<T>
     for NoStreamingEndpointConsumer<HandlerState, ReqT, ResR, T, R, E, H>
 where
@@ -162,22 +159,31 @@ where
                                 span,
                             );
                             if let Err(error) = &handled {
-                                crate::runtime::telemetry::record_error_if_present!(span.as_ref(), error);
+                                crate::runtime::telemetry::record_error_if_present!(
+                                    span.as_ref(),
+                                    error
+                                );
                             }
-                            crate::runtime::common::event_if_present!(span.as_ref(), || match &handled {
-                                Ok(()) =>
-                                    tracing::event!(name: "handle_response", tracing::Level::INFO, {}),
-                                Err(error) => tracing::event!(
-                                    name: "handle_response.error",
-                                    tracing::Level::ERROR,
-                                    error = %error,
-                                    "gRPC response handler failed"
-                                ),
+                            crate::runtime::common::event_if_present!(span.as_ref(), || {
+                                match &handled {
+                                    Ok(()) => {
+                                        tracing::event!(name: "handle_response", tracing::Level::INFO, {})
+                                    }
+                                    Err(error) => tracing::event!(
+                                        name: "handle_response.error",
+                                        tracing::Level::ERROR,
+                                        error = %error,
+                                        "gRPC response handler failed"
+                                    ),
+                                }
                             });
                             handled
                         }
                         Err(error) => {
-                            crate::runtime::telemetry::record_error_if_present!(span.as_ref(), &error);
+                            crate::runtime::telemetry::record_error_if_present!(
+                                span.as_ref(),
+                                &error
+                            );
                             if let Some(observation) = observation {
                                 observation.finish(crate::runtime::telemetry::grpc_error_status(
                                     error.as_ref(),

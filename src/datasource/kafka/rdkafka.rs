@@ -936,8 +936,7 @@ where
             self.input_stream.stream().environment(),
             self.input_stream.endpoint_id(),
         );
-        let span = if tracing_enabled && context.sampling_enabled()
-        {
+        let span = if tracing_enabled && context.sampling_enabled() {
             let (stream_name, pipeline_name, component_name) =
                 self.input_stream.stream().tracing_labels();
             let span = tracing::info_span!(
@@ -1001,7 +1000,11 @@ where
             context.with_stream_id(new_stream_id())
         };
         let stream_id = context.stream_id().unwrap().to_owned();
-        crate::runtime::telemetry::record_if_present!(span.as_ref(), "stream_id", stream_id.as_str());
+        crate::runtime::telemetry::record_if_present!(
+            span.as_ref(),
+            "stream_id",
+            stream_id.as_str()
+        );
         let handler_state = Arc::new(AsyncMutex::new(handler_state));
         let has_result = self.input_stream.result_stream().is_some();
         crate::runtime::telemetry::record_if_present!(span.as_ref(), "has_result", has_result);
@@ -1399,7 +1402,6 @@ where
     endpoint_consumer: Weak<RdkafkaKafkaTypedEndpointConsumer<HandlerState, T, R, E, H>>,
 }
 
-#[async_trait]
 impl<HandlerState, T, R, E, H> Consumer<R> for ResultConsumer<HandlerState, T, R, E, H>
 where
     HandlerState: Send + 'static,

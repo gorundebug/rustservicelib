@@ -75,7 +75,6 @@ impl EndpointHandler<(), u32, u32, String> for Handler {
 
 struct ResultCollector(Arc<Mutex<Vec<u32>>>);
 
-#[async_trait]
 impl Consumer<u32> for ResultCollector {
     async fn consume(&self, _context: MessageContext, payload: Payload<u32>) {
         self.0.lock().unwrap().push(*payload);

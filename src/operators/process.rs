@@ -1,10 +1,8 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
-
 use super::error::ErrorStream;
 use crate::runtime::{
-    collector::Collector,
+    collector::{Collect, Collector},
     common::{Consumer, MessageContext, Payload, RuntimeStream},
     config::ProcessStreamConfig,
     environment::RuntimeResult,
@@ -22,8 +20,8 @@ where
         context: MessageContext,
         stream: &dyn RuntimeStream,
         value: &T,
-        out: &Collector<R>,
-        error: &Collector<E>,
+        out: &impl Collect<R>,
+        error: &impl Collect<E>,
     ) -> impl std::future::Future<Output = ()> + Send;
 }
 
@@ -41,22 +39,25 @@ where
         context: MessageContext,
         stream: &dyn RuntimeStream,
         value: &T,
-        out: &Collector<R>,
-        error: &Collector<E>,
+        out: &impl Collect<R>,
+        error: &impl Collect<E>,
     ) -> impl std::future::Future<Output = ()> + Send {
         self.as_ref().process(context, stream, value, out, error)
     }
 }
 
-pub struct ProcessStream<T, R, E, F>
+pub struct ProcessStream<T, R, E, F, C = Stream<R>, D = Stream<E>>
 where
     T: Send + Sync + 'static,
     R: Send + Sync + 'static,
     E: Send + Sync + 'static,
     F: ProcessFunction<T, R, E>,
+    C: Collect<R>,
+    D: Collect<E>,
 {
     output: Stream<R>,
-    error: Stream<E>,
+    collector: Collector<R, C>,
+    error: Collector<E, D>,
     function: F,
     _input: std::marker::PhantomData<fn(T)>,
 }
@@ -81,15 +82,32 @@ where
             .stream()
             .clone();
         source.try_set_consumer(
-            Arc::new(Self {
-                output: output.clone(),
-                error: error.clone(),
+            Arc::new(Self::from_collectors(
+                output.collector(),
+                error.collector(),
                 function,
-                _input: std::marker::PhantomData,
-            }),
+            )),
             output.id(),
         )?;
         Ok((output, error))
+    }
+
+    pub fn from_collectors<C, D>(
+        collector: Collector<R, C>,
+        error: Collector<E, D>,
+        function: F,
+    ) -> ProcessStream<T, R, E, F, C, D>
+    where
+        C: Collect<R>,
+        D: Collect<E>,
+    {
+        ProcessStream {
+            output: collector.stream().clone(),
+            collector,
+            error,
+            function,
+            _input: std::marker::PhantomData,
+        }
     }
 }
 
@@ -111,21 +129,25 @@ where
     }
 }
 
-#[async_trait]
-impl<T, R, E, F> Consumer<T> for ProcessStream<T, R, E, F>
+impl<T, R, E, F, C, D> Consumer<T> for ProcessStream<T, R, E, F, C, D>
 where
     T: Send + Sync + 'static,
     R: Send + Sync + 'static,
     E: Send + Sync + 'static,
     F: ProcessFunction<T, R, E> + 'static,
+    C: Collect<R>,
+    D: Collect<E>,
 {
     async fn consume(&self, context: MessageContext, payload: Payload<T>) {
         let (context, span) = self.output.start_span(context, "stream.process");
-        let out = self.output.collector();
-        let error = self.error.collector();
         crate::runtime::common::instrument_if_present!(
-            self.function
-                .process(context, &self.output, &payload, &out, &error),
+            self.function.process(
+                context,
+                &self.output,
+                &payload,
+                &self.collector,
+                &self.error
+            ),
             span,
         );
     }

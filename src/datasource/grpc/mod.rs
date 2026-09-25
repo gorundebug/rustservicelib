@@ -80,9 +80,17 @@ where
 {
     type Output = F::Output;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+    fn poll(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
         let this = self.get_mut();
-        let result = this.future.as_mut().expect("completed gRPC operation polled").as_mut().poll(cx);
+        let result = this
+            .future
+            .as_mut()
+            .expect("completed gRPC operation polled")
+            .as_mut()
+            .poll(cx);
         if result.is_ready() {
             this.future = None;
         }
@@ -99,7 +107,9 @@ where
             self.context.cancel();
             // Cancellation is not finalization. Keep result callbacks available
             // until the admitted handler finishes, as in the Go source boundary.
-            tokio::spawn(async move { drop(future.await); });
+            tokio::spawn(async move {
+                drop(future.await);
+            });
         }
     }
 }
@@ -143,7 +153,9 @@ impl Drop for RequestLifecycle {
         if let Some(cleanup) = self.cleanup.take() {
             self.context.cancel();
             self.closing.cancel();
-            tokio::spawn(async move { let _ = cleanup.await; });
+            tokio::spawn(async move {
+                let _ = cleanup.await;
+            });
         }
     }
 }
@@ -203,7 +215,8 @@ where
         message_id: impl Into<String>,
         callback: ResultCallback<HandlerState, T, ResR, R, E>,
     ) {
-        if let Some(callbacks) = self.callbacks
+        if let Some(callbacks) = self
+            .callbacks
             .lock()
             .expect("gRPC source callbacks lock poisoned")
             .as_mut()
@@ -213,7 +226,8 @@ where
     }
 
     fn close(&self) {
-        let callbacks = self.callbacks
+        let callbacks = self
+            .callbacks
             .lock()
             .expect("gRPC source callbacks lock poisoned")
             .take();
@@ -475,7 +489,11 @@ where
         self: &Arc<Self>,
         context: MessageContext,
         sender: Arc<dyn Sender<ResR>>,
-    ) -> HandlerResult<(String, Arc<Pending<HandlerState, T, ResR, R, E>>, RequestLifecycle)> {
+    ) -> HandlerResult<(
+        String,
+        Arc<Pending<HandlerState, T, ResR, R, E>>,
+        RequestLifecycle,
+    )> {
         let context = context.child();
         let consumer = Arc::clone(self);
         CompleteOnDrop {
@@ -488,12 +506,19 @@ where
                     context,
                     closing: pending.closing.clone(),
                     cleanup: Some(Box::pin(async move {
-                        consumer.finish(&cleanup_id, cleanup_pending, Err(Box::new(RequestContextCancelled))).await
+                        consumer
+                            .finish(
+                                &cleanup_id,
+                                cleanup_pending,
+                                Err(Box::new(RequestContextCancelled)),
+                            )
+                            .await
                     })),
                 };
                 Ok((stream_id, pending, lifecycle))
             })),
-        }.await
+        }
+        .await
     }
 
     async fn consume_owned(
@@ -504,7 +529,9 @@ where
     ) -> (RequestLifecycle, HandlerResult) {
         let consumer = Arc::clone(self);
         let pending = Arc::clone(pending);
-        lifecycle.run(async move { consumer.consume(&pending, request).await }).await
+        lifecycle
+            .run(async move { consumer.consume(&pending, request).await })
+            .await
     }
 
     async fn eof_owned(
@@ -514,7 +541,10 @@ where
     ) -> RequestLifecycle {
         let consumer = Arc::clone(self);
         let pending = Arc::clone(pending);
-        lifecycle.run(async move { consumer.eof(&pending).await }).await.0
+        lifecycle
+            .run(async move { consumer.eof(&pending).await })
+            .await
+            .0
     }
 
     async fn finish_owned(
@@ -525,7 +555,9 @@ where
         result: HandlerResult,
     ) -> HandlerResult {
         let consumer = Arc::clone(self);
-        lifecycle.finish(async move { consumer.finish(&stream_id, pending, result).await }).await
+        lifecycle
+            .finish(async move { consumer.finish(&stream_id, pending, result).await })
+            .await
     }
 
     pub(crate) async fn begin(
@@ -598,7 +630,11 @@ where
             context.with_stream_id(new_stream_id())
         };
         let stream_id = context.stream_id().unwrap().to_owned();
-        crate::runtime::telemetry::record_if_present!(span.as_ref(), "stream_id", stream_id.as_str());
+        crate::runtime::telemetry::record_if_present!(
+            span.as_ref(),
+            "stream_id",
+            stream_id.as_str()
+        );
         if self.metrics.request_duration.is_enabled() {
             self.metrics.active_requests.inc();
         }
@@ -835,10 +871,12 @@ where
             }
             guard = pending.lifetime.read() => guard,
         };
-        if pending.closing.is_cancelled() || !self.has_result() || !self
-            .pending
-            .get(&stream_id)
-            .is_some_and(|current| Arc::ptr_eq(&current, &pending))
+        if pending.closing.is_cancelled()
+            || !self.has_result()
+            || !self
+                .pending
+                .get(&stream_id)
+                .is_some_and(|current| Arc::ptr_eq(&current, &pending))
         {
             if self.metrics.request_duration.is_enabled() {
                 self.metrics.late_result.inc();
@@ -912,15 +950,12 @@ where
             }
         }
         if let Some(span) = pending.span.as_ref() {
-            crate::runtime::common::event_if_enabled!(
-                span,
-                || tracing::event!(
-                    name: "result_consumed",
-                    parent: span,
-                    tracing::Level::INFO,
-                    message_id
-                )
-            );
+            crate::runtime::common::event_if_enabled!(span, || tracing::event!(
+                name: "result_consumed",
+                parent: span,
+                tracing::Level::INFO,
+                message_id
+            ));
         }
     }
 }
@@ -958,7 +993,6 @@ where
     endpoint_consumer: Weak<GrpcTypedEndpointConsumer<HandlerState, ReqT, ResR, T, R, E, H>>,
 }
 
-#[async_trait]
 impl<HandlerState, ReqT, ResR, T, R, E, H> Consumer<R>
     for ResultConsumer<HandlerState, ReqT, ResR, T, R, E, H>
 where

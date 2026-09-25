@@ -3,7 +3,6 @@ use std::{
     time::Duration,
 };
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use servicelib::{
     MessageContext, Payload,
@@ -12,7 +11,6 @@ use servicelib::{
         ProcessFunction, downcast_join_values,
     },
     runtime::{
-        collector::Collector,
         common::{Consumer, RuntimeStream},
         config::{
             CallSemantics, Config, InputStreamConfig, JoinStreamConfig, JoinType, LinkConfig,
@@ -80,7 +78,6 @@ impl<T> Default for Capture<T> {
     }
 }
 
-#[async_trait]
 impl<T> Consumer<T> for Capture<T>
 where
     T: Send + Sync + 'static,
@@ -101,7 +98,6 @@ struct OrderedDirectConsumer {
     events: Arc<Mutex<Vec<(&'static str, &'static str)>>>,
 }
 
-#[async_trait]
 impl Consumer<i32> for OrderedDirectConsumer {
     async fn consume(&self, _context: MessageContext, _payload: Payload<i32>) {
         assert_eq!(tokio::task::try_id(), self.caller);
@@ -162,7 +158,12 @@ async fn split_function_call_async_only_reorders_direct_awaited_branches() {
         };
         assert_eq!(
             *events.lock().unwrap(),
-            vec![(early, "enter"), (early, "leave"), (late, "enter"), (late, "leave")],
+            vec![
+                (early, "enter"),
+                (early, "leave"),
+                (late, "enter"),
+                (late, "leave")
+            ],
         );
     }
 }
@@ -172,7 +173,6 @@ struct ConcurrentMergeConsumer {
     values: Mutex<Vec<Arc<i32>>>,
 }
 
-#[async_trait]
 impl Consumer<i32> for ConcurrentMergeConsumer {
     async fn consume(&self, _context: MessageContext, payload: Payload<i32>) {
         self.barrier.wait().await;
@@ -195,7 +195,10 @@ async fn merge_does_not_serialize_independent_direct_calls_or_copy_payloads() {
     });
     let merged = inputs[0]
         .stream()
-        .merge(&StreamConfig::new(3, "Merge").into(), &[inputs[1].stream().clone()])
+        .merge(
+            &StreamConfig::new(3, "Merge").into(),
+            &[inputs[1].stream().clone()],
+        )
         .unwrap();
     let capture = Arc::new(ConcurrentMergeConsumer {
         barrier: tokio::sync::Barrier::new(2),
@@ -231,7 +234,7 @@ impl MapFunction<i32, i32> for Double {
         context: MessageContext,
         _stream: &dyn RuntimeStream,
         value: &i32,
-        out: &Collector<i32>,
+        out: &impl servicelib::runtime::collector::Collect<i32>,
     ) {
         out.emit(context, Payload::new(*value * 2)).await;
     }
@@ -245,7 +248,7 @@ impl KeyByFunction<i32, String, i32> for ToKeyValue {
         context: MessageContext,
         _stream: &dyn RuntimeStream,
         value: &i32,
-        out: &Collector<KeyValue<String, i32>>,
+        out: &impl servicelib::runtime::collector::Collect<KeyValue<String, i32>>,
     ) {
         out.emit(
             context,
@@ -266,8 +269,8 @@ impl ProcessFunction<i32, i32, String> for EvenOrError {
         context: MessageContext,
         _stream: &dyn RuntimeStream,
         value: &i32,
-        out: &Collector<i32>,
-        error: &Collector<String>,
+        out: &impl servicelib::runtime::collector::Collect<i32>,
+        error: &impl servicelib::runtime::collector::Collect<String>,
     ) {
         if *value % 2 == 0 {
             out.collect(context, *value).await;
@@ -397,7 +400,7 @@ impl MapFunction<i32, i32> for CountUntilThree {
         context: MessageContext,
         _stream: &dyn RuntimeStream,
         value: &i32,
-        out: &Collector<i32>,
+        out: &impl servicelib::runtime::collector::Collect<i32>,
     ) {
         if *value < 3 {
             out.emit(context, Payload::new(*value + 1)).await;
@@ -622,7 +625,7 @@ impl JoinFunction<String, i32, i32, i32> for SumJoin {
         _key: String,
         left: Vec<i32>,
         right: Vec<i32>,
-        out: &Collector<i32>,
+        out: &impl servicelib::runtime::collector::Collect<i32>,
     ) -> bool {
         out.emit(
             context,
@@ -684,7 +687,7 @@ impl JoinFunction<String, i32, i32, usize> for EmitOnExpiry {
         _key: String,
         _left: Vec<i32>,
         _right: Vec<i32>,
-        out: &Collector<usize>,
+        out: &impl servicelib::runtime::collector::Collect<usize>,
     ) -> bool {
         let call = {
             let mut calls = self.calls.lock().unwrap();
@@ -746,7 +749,7 @@ impl MultiJoinFunction<String, String> for ThreeWayJoin {
         _stream: &dyn RuntimeStream,
         key: String,
         values: JoinValues,
-        out: &Collector<String>,
+        out: &impl servicelib::runtime::collector::Collect<String>,
     ) -> bool {
         let left = downcast_join_values::<i32>(&values, 0);
         let names = downcast_join_values::<String>(&values, 1);
@@ -845,7 +848,7 @@ async fn one_function_instance_is_shared_by_independently_configured_operators()
             context: MessageContext,
             _stream: &dyn RuntimeStream,
             value: &i32,
-            out: &Collector<i32>,
+            out: &impl servicelib::runtime::collector::Collect<i32>,
         ) {
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             out.collect(context, *value * 2).await;

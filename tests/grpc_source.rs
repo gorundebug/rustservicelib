@@ -28,7 +28,6 @@ struct Pipeline {
     results: Stream<u32>,
 }
 
-#[async_trait]
 impl Consumer<u32> for Pipeline {
     async fn consume(&self, context: MessageContext, payload: Payload<u32>) {
         self.results.emit(context, payload).await;

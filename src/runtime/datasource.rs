@@ -57,7 +57,6 @@ impl PendingRequestTimestamps {
     }
 }
 
-use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::{
@@ -384,7 +383,6 @@ impl<T> ResultRouter<T> {
     }
 }
 
-#[async_trait]
 impl<T> Consumer<T> for ResultRouter<T>
 where
     T: Send + Sync + 'static,

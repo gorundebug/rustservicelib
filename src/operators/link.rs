@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
-
 use crate::runtime::{
+    collector::{Collect, Collector},
     common::{ConstructionCell, Consumer, MessageContext, Payload},
     config::CycleLinkStreamConfig,
     environment::{RuntimeEnvironment, RuntimeError, RuntimeResult},
@@ -42,17 +41,25 @@ where
     }
 
     pub fn set_source(self: &Arc<Self>, source: &Stream<T>) -> RuntimeResult<()> {
+        self.set_source_typed(source).map(|_| ())
+    }
+
+    pub fn set_source_typed(
+        self: &Arc<Self>,
+        source: &Stream<T>,
+    ) -> RuntimeResult<Collector<T, impl Collect<T> + Clone + use<T>>> {
         if self.source.get().is_some() {
             return Err(RuntimeError::SourceAlreadySet {
                 stream: self.stream.name(),
             });
         }
-        source.try_set_consumer(Arc::clone(self), self.stream.id())?;
+        let collector = source.try_set_typed_consumer(Arc::clone(self), self.stream.id())?;
         self.source
             .set(source.clone())
             .map_err(|_| RuntimeError::SourceAlreadySet {
                 stream: self.stream.name(),
-            })
+            })?;
+        Ok(collector)
     }
 
     pub fn source(&self) -> Option<Stream<T>> {
@@ -60,7 +67,6 @@ where
     }
 }
 
-#[async_trait]
 impl<T> Consumer<T> for LinkStream<T>
 where
     T: Send + Sync + 'static,
