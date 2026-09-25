@@ -157,7 +157,7 @@ where
 
 // Multiple endpoint consumers may share a single business handler. Request
 // state and transport ownership remain local to each consumer.
-#[async_trait]
+// Forward the existing boxed future without allocating an async wrapper.
 impl<HandlerState, ReqT, ResR, T, R, E, H> EndpointHandler<HandlerState, ReqT, ResR, T, R, E>
     for Arc<H>
 where
@@ -169,23 +169,32 @@ where
     E: Send + Sync + 'static,
     H: EndpointHandler<HandlerState, ReqT, ResR, T, R, E> + ?Sized,
 {
-    async fn begin_request(
-        &self,
+    fn begin_request<'owner, 'future>(
+        &'owner self,
         context: MessageContext,
         stream: StreamContext<T, R, E>,
-    ) -> HandlerResult<(MessageContext, HandlerState)> {
-        self.as_ref().begin_request(context, stream).await
+    ) -> futures::future::BoxFuture<'future, HandlerResult<(MessageContext, HandlerState)>>
+    where
+        'owner: 'future,
+        Self: 'future,
+    {
+        self.as_ref().begin_request(context, stream)
     }
 
-    async fn consume_message(
-        &self,
+    fn consume_message<'owner, 'sender, 'future>(
+        &'owner self,
         context: MessageContext,
         stream: StreamContext<T, R, E>,
         handler_state: Arc<tokio::sync::Mutex<HandlerState>>,
         value: Payload<T>,
-        sender: &dyn Sender<ReqT>,
+        sender: &'sender dyn Sender<ReqT>,
         result_context: ResultContext,
-    ) -> HandlerResult {
+    ) -> futures::future::BoxFuture<'future, HandlerResult>
+    where
+        'owner: 'future,
+        'sender: 'future,
+        Self: 'future,
+    {
         self.as_ref()
             .consume_message(
                 context,
@@ -195,31 +204,37 @@ where
                 sender,
                 result_context,
             )
-            .await
     }
 
-    async fn handle_response(
-        &self,
+    fn handle_response<'owner, 'future>(
+        &'owner self,
         context: MessageContext,
         stream: StreamContext<T, R, E>,
         handler_state: Arc<tokio::sync::Mutex<HandlerState>>,
         response: ResR,
-    ) -> HandlerResult {
+    ) -> futures::future::BoxFuture<'future, HandlerResult>
+    where
+        'owner: 'future,
+        Self: 'future,
+    {
         self.as_ref()
             .handle_response(context, stream, handler_state, response)
-            .await
     }
 
-    async fn end_request(
-        &self,
+    fn end_request<'owner, 'result, 'future>(
+        &'owner self,
         context: MessageContext,
         stream: StreamContext<T, R, E>,
-        result: &HandlerResult,
+        result: &'result HandlerResult,
         handler_state: Arc<tokio::sync::Mutex<HandlerState>>,
-    ) {
+    ) -> futures::future::BoxFuture<'future, ()>
+    where
+        'owner: 'future,
+        'result: 'future,
+        Self: 'future,
+    {
         self.as_ref()
             .end_request(context, stream, result, handler_state)
-            .await;
     }
 }
 

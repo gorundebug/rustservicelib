@@ -225,7 +225,6 @@ async fn merge_does_not_serialize_independent_direct_calls_or_copy_payloads() {
     assert!(values.iter().any(|value| Arc::ptr_eq(value, &second_owner)));
 }
 
-#[async_trait]
 impl MapFunction<i32, i32> for Double {
     async fn map(
         &self,
@@ -240,7 +239,6 @@ impl MapFunction<i32, i32> for Double {
 
 struct ToKeyValue;
 
-#[async_trait]
 impl KeyByFunction<i32, String, i32> for ToKeyValue {
     async fn key_by(
         &self,
@@ -262,7 +260,6 @@ impl KeyByFunction<i32, String, i32> for ToKeyValue {
 
 struct EvenOrError;
 
-#[async_trait]
 impl ProcessFunction<i32, i32, String> for EvenOrError {
     async fn process(
         &self,
@@ -394,7 +391,6 @@ async fn input_result_source_routes_pipeline_results_back_to_endpoint() {
 
 struct CountUntilThree;
 
-#[async_trait]
 impl MapFunction<i32, i32> for CountUntilThree {
     async fn map(
         &self,
@@ -497,7 +493,6 @@ async fn split_shares_payload_and_dispatches_async_branch_first() {
 
 struct FixedDelay(Duration);
 
-#[async_trait]
 impl DelayFunction<i32> for FixedDelay {
     async fn duration(
         &self,
@@ -619,7 +614,6 @@ async fn case_rejects_out_of_bounds_index() {
 
 struct SumJoin;
 
-#[async_trait]
 impl JoinFunction<String, i32, i32, i32> for SumJoin {
     async fn join(
         &self,
@@ -682,7 +676,6 @@ struct EmitOnExpiry {
     calls: Mutex<usize>,
 }
 
-#[async_trait]
 impl JoinFunction<String, i32, i32, usize> for EmitOnExpiry {
     async fn join(
         &self,
@@ -746,7 +739,6 @@ async fn join_invokes_the_same_callback_when_ttl_expires() {
 
 struct ThreeWayJoin;
 
-#[async_trait]
 impl MultiJoinFunction<String, String> for ThreeWayJoin {
     async fn multi_join(
         &self,
@@ -847,7 +839,6 @@ async fn source_context_preserves_shared_payload_identity() {
 async fn one_function_instance_is_shared_by_independently_configured_operators() {
     struct SharedMap(std::sync::atomic::AtomicUsize);
 
-    #[async_trait]
     impl MapFunction<i32, i32> for SharedMap {
         async fn map(
             &self,

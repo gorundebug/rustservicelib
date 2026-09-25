@@ -23,7 +23,6 @@ impl Drop for Failure {
 
 struct Route { identity: Arc<()>, dropped: Arc<AtomicUsize> }
 
-#[async_trait]
 impl ProcessFunction<i32, i32, Failure> for Route {
     async fn process(&self, context: MessageContext, _: &dyn RuntimeStream, value: &i32,
         out: &Collector<i32>, error: &Collector<Failure>) {

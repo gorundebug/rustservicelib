@@ -333,7 +333,7 @@ where
     );
 }
 
-#[async_trait]
+// Forward the existing boxed future without allocating an async wrapper.
 impl<HandlerState, T, R, E, H> EndpointHandler<HandlerState, T, R, E> for Arc<H>
 where
     HandlerState: Send + 'static,
@@ -342,43 +342,63 @@ where
     E: Send + Sync + 'static,
     H: EndpointHandler<HandlerState, T, R, E> + ?Sized,
 {
-    async fn begin_request(
-        &self,
+    fn begin_request<'owner, 'future>(
+        &'owner self,
         context: MessageContext,
         stream: StreamContext<T, R, E>,
-    ) -> Result<(MessageContext, HandlerState), HandlerError> {
-        self.as_ref().begin_request(context, stream).await
+    ) -> futures::future::BoxFuture<'future, Result<(MessageContext, HandlerState), HandlerError>>
+    where
+        'owner: 'future,
+        Self: 'future,
+    {
+        self.as_ref().begin_request(context, stream)
     }
 
-    async fn consume_message(
-        &self,
+    fn consume_message<'owner, 'handler_state, 'requester, 'future>(
+        &'owner self,
         context: MessageContext,
         stream: StreamContext<T, R, E>,
-        handler_state: &mut HandlerState,
+        handler_state: &'handler_state mut HandlerState,
         value: Payload<T>,
-        requester: &mut Requester,
-    ) -> HandlerResult {
-        self.as_ref().consume_message(context, stream, handler_state, value, requester).await
+        requester: &'requester mut Requester,
+    ) -> futures::future::BoxFuture<'future, HandlerResult>
+    where
+        'owner: 'future,
+        'handler_state: 'future,
+        'requester: 'future,
+        Self: 'future,
+    {
+        self.as_ref().consume_message(context, stream, handler_state, value, requester)
     }
 
-    async fn handle_response(
-        &self,
+    fn handle_response<'owner, 'handler_state, 'future>(
+        &'owner self,
         context: MessageContext,
         stream: StreamContext<T, R, E>,
-        handler_state: &mut HandlerState,
+        handler_state: &'handler_state mut HandlerState,
         response: Response,
-    ) -> HandlerResult {
-        self.as_ref().handle_response(context, stream, handler_state, response).await
+    ) -> futures::future::BoxFuture<'future, HandlerResult>
+    where
+        'owner: 'future,
+        'handler_state: 'future,
+        Self: 'future,
+    {
+        self.as_ref().handle_response(context, stream, handler_state, response)
     }
 
-    async fn end_request(
-        &self,
+    fn end_request<'owner, 'result, 'future>(
+        &'owner self,
         context: MessageContext,
         stream: StreamContext<T, R, E>,
-        result: &HandlerResult,
+        result: &'result HandlerResult,
         handler_state: HandlerState,
-    ) {
-        self.as_ref().end_request(context, stream, result, handler_state).await;
+    ) -> futures::future::BoxFuture<'future, ()>
+    where
+        'owner: 'future,
+        'result: 'future,
+        Self: 'future,
+    {
+        self.as_ref().end_request(context, stream, result, handler_state)
     }
 }
 

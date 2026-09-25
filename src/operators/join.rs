@@ -13,7 +13,6 @@ use crate::runtime::{
     stream::Stream,
 };
 
-#[async_trait]
 pub trait JoinFunction<K, L, R, O>: Send + Sync
 where
     K: Send + Sync + 'static,
@@ -21,7 +20,7 @@ where
     R: Clone + Send + Sync + 'static,
     O: Send + Sync + 'static,
 {
-    async fn join(
+    fn join(
         &self,
         context: MessageContext,
         stream: &dyn RuntimeStream,
@@ -29,11 +28,11 @@ where
         left: Vec<L>,
         right: Vec<R>,
         out: &Collector<O>,
-    ) -> bool;
+    ) -> impl std::future::Future<Output = bool> + Send;
 }
 
 // Sharing a business function does not share operator configuration or state.
-#[async_trait]
+// Forward the concrete future without boxing or adding an async wrapper.
 impl<K, L, R, O, F> JoinFunction<K, L, R, O> for Arc<F>
 where
     K: Send + Sync + 'static,
@@ -42,7 +41,7 @@ where
     O: Send + Sync + 'static,
     F: JoinFunction<K, L, R, O> + ?Sized,
 {
-    async fn join(
+    fn join(
         &self,
         context: MessageContext,
         stream: &dyn RuntimeStream,
@@ -50,10 +49,8 @@ where
         left: Vec<L>,
         right: Vec<R>,
         out: &Collector<O>,
-    ) -> bool {
-        self.as_ref()
-            .join(context, stream, key, left, right, out)
-            .await
+    ) -> impl std::future::Future<Output = bool> + Send {
+        self.as_ref().join(context, stream, key, left, right, out)
     }
 }
 

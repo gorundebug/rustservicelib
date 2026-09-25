@@ -41,7 +41,6 @@ impl DataProducer<i32> for OneValueProducer {
 
 struct Double;
 
-#[async_trait]
 impl MapFunction<i32, i32> for Double {
     async fn map(
         &self,

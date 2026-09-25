@@ -54,7 +54,6 @@ fn provider(id: TypeId, _: &RuntimeEnvironment) -> RuntimeResult<Option<Serializ
 
 struct Keep;
 
-#[async_trait]
 impl FilterFunction<LargeValue> for Keep {
     async fn filter(&self, context: MessageContext, _: &dyn RuntimeStream, value: &LargeValue) -> bool {
         assert_eq!(context.stream_id(), Some("parent"));
@@ -65,7 +64,6 @@ impl FilterFunction<LargeValue> for Keep {
 
 struct Wait;
 
-#[async_trait]
 impl DelayFunction<LargeValue> for Wait {
     async fn duration(&self, _: MessageContext, _: &dyn RuntimeStream, _: &LargeValue) -> Duration {
         Duration::from_millis(1)

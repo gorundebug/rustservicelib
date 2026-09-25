@@ -19,41 +19,38 @@ use crate::runtime::{
     stream::Stream,
 };
 
-#[async_trait]
 pub trait MultiJoinFunction<K, O>: Send + Sync
 where
     K: Send + Sync + 'static,
     O: Send + Sync + 'static,
 {
-    async fn multi_join(
+    fn multi_join(
         &self,
         context: MessageContext,
         stream: &dyn RuntimeStream,
         key: K,
         values: JoinValues,
         out: &Collector<O>,
-    ) -> bool;
+    ) -> impl std::future::Future<Output = bool> + Send;
 }
 
 // Sharing a business function does not share operator configuration or state.
-#[async_trait]
+// Forward the concrete future without boxing or adding an async wrapper.
 impl<K, O, F> MultiJoinFunction<K, O> for Arc<F>
 where
     K: Send + Sync + 'static,
     O: Send + Sync + 'static,
     F: MultiJoinFunction<K, O> + ?Sized,
 {
-    async fn multi_join(
+    fn multi_join(
         &self,
         context: MessageContext,
         stream: &dyn RuntimeStream,
         key: K,
         values: JoinValues,
         out: &Collector<O>,
-    ) -> bool {
-        self.as_ref()
-            .multi_join(context, stream, key, values, out)
-            .await
+    ) -> impl std::future::Future<Output = bool> + Send {
+        self.as_ref().multi_join(context, stream, key, values, out)
     }
 }
 

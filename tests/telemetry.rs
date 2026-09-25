@@ -98,7 +98,6 @@ struct LoggingMap;
 
 struct ReturningMap;
 
-#[async_trait]
 impl MapFunction<u32, u32> for ReturningMap {
     async fn map(
         &self,
@@ -234,7 +233,6 @@ async fn substream_bypasses_disabled_tracing_backend() {
     check_substream_tracing(true, false).await;
 }
 
-#[async_trait]
 impl MapFunction<u32, u32> for LoggingMap {
     async fn map(
         &self,

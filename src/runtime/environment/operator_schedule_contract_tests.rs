@@ -124,7 +124,6 @@ impl Drop for Value {
 
 struct Delay(Duration);
 
-#[async_trait]
 impl DelayFunction<Value> for Delay {
     async fn duration(&self, _context: MessageContext, _stream: &dyn RuntimeStream, _value: &Value) -> Duration {
         self.0

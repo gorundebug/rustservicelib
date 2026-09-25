@@ -27,7 +27,6 @@ use tokio::sync::{Mutex as AsyncMutex, oneshot};
 
 struct Double;
 
-#[async_trait]
 impl MapFunction<u32, u32> for Double {
     async fn map(
         &self,

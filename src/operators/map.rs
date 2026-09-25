@@ -10,37 +10,36 @@ use crate::runtime::{
     stream::Stream,
 };
 
-#[async_trait]
 pub trait MapFunction<T, R>: Send + Sync
 where
     T: Send + Sync + 'static,
     R: Send + Sync + 'static,
 {
-    async fn map(
+    fn map(
         &self,
         context: MessageContext,
         stream: &dyn RuntimeStream,
         value: &T,
         out: &Collector<R>,
-    );
+    ) -> impl std::future::Future<Output = ()> + Send;
 }
 
 // Sharing a business function does not share operator configuration or state.
-#[async_trait]
+// Forward the concrete future without boxing or adding an async wrapper.
 impl<T, R, F> MapFunction<T, R> for Arc<F>
 where
     T: Send + Sync + 'static,
     R: Send + Sync + 'static,
     F: MapFunction<T, R> + ?Sized,
 {
-    async fn map(
+    fn map(
         &self,
         context: MessageContext,
         stream: &dyn RuntimeStream,
         value: &T,
         out: &Collector<R>,
-    ) {
-        self.as_ref().map(context, stream, value, out).await
+    ) -> impl std::future::Future<Output = ()> + Send {
+        self.as_ref().map(context, stream, value, out)
     }
 }
 

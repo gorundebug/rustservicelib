@@ -12,24 +12,23 @@ use crate::runtime::{
     stream::Stream,
 };
 
-#[async_trait]
 pub trait KeyByFunction<T, K, V>: Send + Sync
 where
     T: Send + Sync + 'static,
     K: Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
-    async fn key_by(
+    fn key_by(
         &self,
         context: MessageContext,
         stream: &dyn RuntimeStream,
         value: &T,
         out: &Collector<KeyValue<K, V>>,
-    );
+    ) -> impl std::future::Future<Output = ()> + Send;
 }
 
 // Sharing a business function does not share operator configuration or state.
-#[async_trait]
+// Forward the concrete future without boxing or adding an async wrapper.
 impl<T, K, V, F> KeyByFunction<T, K, V> for Arc<F>
 where
     T: Send + Sync + 'static,
@@ -37,14 +36,14 @@ where
     V: Send + Sync + 'static,
     F: KeyByFunction<T, K, V> + ?Sized,
 {
-    async fn key_by(
+    fn key_by(
         &self,
         context: MessageContext,
         stream: &dyn RuntimeStream,
         value: &T,
         out: &Collector<KeyValue<K, V>>,
-    ) {
-        self.as_ref().key_by(context, stream, value, out).await
+    ) -> impl std::future::Future<Output = ()> + Send {
+        self.as_ref().key_by(context, stream, value, out)
     }
 }
 

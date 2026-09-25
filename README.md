@@ -79,6 +79,22 @@ Graph construction, consumer resolution, dispatch order, middleware chains, and 
 
 ---
 
+## Operator business functions
+
+`MapFunction`, `FlatMapFunction`, `FilterFunction`, `ProcessFunction`,
+`KeyByFunction`, `DelayFunction`, `JoinFunction`, and `MultiJoinFunction` return
+concrete `Send` futures. Implement their methods with ordinary `async fn`, without
+`#[async_trait]`. Remove the attribute from existing implementations when updating
+this library; endpoint handlers and `Consumer` still use their existing boxed
+async contracts.
+
+Operators retain concrete function types, including shared `Arc<F>` instances.
+The function and its `Arc` adapter do not add boxed futures. The dynamic
+`Consumer` boundary still boxes its future. These operator function traits are
+not `dyn` compatible; use concrete generic function types rather than
+`dyn MapFunction` and similar trait objects. This does not change graph call
+semantics, per-operator state, or shared business-function ownership.
+
 ## Calling A SubStream
 
 A SubStream belongs to one service and reuses its existing graph. Its input type

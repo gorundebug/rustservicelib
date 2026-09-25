@@ -64,7 +64,6 @@ fn graph<F: MapFunction<i32, i32> + 'static>(function: F) -> (SubStream<i32, i32
 
 struct Echo;
 
-#[async_trait]
 impl MapFunction<i32, i32> for Echo {
     async fn map(
         &self,
@@ -117,7 +116,6 @@ async fn concurrent_calls_share_graph_not_results() {
 
 struct Multiple;
 
-#[async_trait]
 impl MapFunction<i32, i32> for Multiple {
     async fn map(
         &self,
@@ -154,7 +152,6 @@ async fn collector_controls_completion_and_later_results_are_dropped() {
 
 struct Recurse(Arc<OnceLock<SubStream<i32, i32>>>);
 
-#[async_trait]
 impl MapFunction<i32, i32> for Recurse {
     async fn map(
         &self,
@@ -226,7 +223,6 @@ async fn collector_can_call_the_same_substream() {
 
 struct Hold(Arc<Mutex<Vec<(i32, MessageContext)>>>, Arc<Notify>);
 
-#[async_trait]
 impl MapFunction<i32, i32> for Hold {
     async fn map(
         &self,
@@ -317,7 +313,6 @@ struct CancellationCleanup {
     release: Arc<Notify>,
 }
 
-#[async_trait]
 impl MapFunction<i32, i32> for CancellationCleanup {
     async fn map(
         &self,
@@ -542,7 +537,6 @@ async fn concurrent_results_serialize_one_collector_and_drop_late_values() {
 
 struct NestedForkJoin(SubStream<i32, i32>);
 
-#[async_trait]
 impl MapFunction<i32, i32> for NestedForkJoin {
     async fn map(
         &self,

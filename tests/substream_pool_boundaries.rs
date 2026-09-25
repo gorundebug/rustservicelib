@@ -3,7 +3,6 @@ use std::{
     time::Duration,
 };
 
-use async_trait::async_trait;
 use servicelib::{
     MessageContext, Payload, SubStream, SubStreamCollectorFunc,
     operators::MapFunction,
@@ -46,7 +45,6 @@ impl Scheduler {
 
 struct Deferred(mpsc::UnboundedSender<MessageContext>);
 
-#[async_trait]
 impl MapFunction<i32, i32> for Deferred {
     async fn map(&self, context: MessageContext, _: &dyn RuntimeStream, _: &i32, _: &Collector<i32>) {
         self.0.send(context).unwrap();

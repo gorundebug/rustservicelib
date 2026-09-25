@@ -10,56 +10,56 @@ use crate::runtime::{
     stream::Stream,
 };
 
-#[async_trait]
 pub trait DelayFunction<T>: Send + Sync
 where
     T: Send + Sync + 'static,
 {
-    async fn duration(
+    fn duration(
         &self,
         context: MessageContext,
         stream: &dyn RuntimeStream,
         value: &T,
-    ) -> Duration;
+    ) -> impl std::future::Future<Output = Duration> + Send;
 
-    async fn delay_error(
+    fn delay_error(
         &self,
         _context: MessageContext,
         _stream: &dyn RuntimeStream,
         _value: &T,
         _error: RuntimeError,
         _out: &Collector<T>,
-    ) {
+    ) -> impl std::future::Future<Output = ()> + Send {
+        async move {
+            let _inputs = (_context, _stream, _value, _error, _out);
+        }
     }
 }
 
 // Sharing a business function does not share operator configuration or state.
-#[async_trait]
+// Forward the concrete future without boxing or adding an async wrapper.
 impl<T, F> DelayFunction<T> for Arc<F>
 where
     T: Send + Sync + 'static,
     F: DelayFunction<T> + ?Sized,
 {
-    async fn duration(
+    fn duration(
         &self,
         context: MessageContext,
         stream: &dyn RuntimeStream,
         value: &T,
-    ) -> Duration {
-        self.as_ref().duration(context, stream, value).await
+    ) -> impl std::future::Future<Output = Duration> + Send {
+        self.as_ref().duration(context, stream, value)
     }
 
-    async fn delay_error(
+    fn delay_error(
         &self,
         _context: MessageContext,
         _stream: &dyn RuntimeStream,
         _value: &T,
         _error: RuntimeError,
         _out: &Collector<T>,
-    ) {
-        self.as_ref()
-            .delay_error(_context, _stream, _value, _error, _out)
-            .await
+    ) -> impl std::future::Future<Output = ()> + Send {
+        self.as_ref().delay_error(_context, _stream, _value, _error, _out)
     }
 }
 

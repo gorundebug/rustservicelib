@@ -9,23 +9,22 @@ use crate::runtime::{
     stream::Stream,
 };
 
-#[async_trait]
 pub trait FilterFunction<T>: Send + Sync
 where
     T: Send + Sync + 'static,
 {
-    async fn filter(&self, context: MessageContext, stream: &dyn RuntimeStream, value: &T) -> bool;
+    fn filter(&self, context: MessageContext, stream: &dyn RuntimeStream, value: &T) -> impl std::future::Future<Output = bool> + Send;
 }
 
 // Sharing a business function does not share operator configuration or state.
-#[async_trait]
+// Forward the concrete future without boxing or adding an async wrapper.
 impl<T, F> FilterFunction<T> for Arc<F>
 where
     T: Send + Sync + 'static,
     F: FilterFunction<T> + ?Sized,
 {
-    async fn filter(&self, context: MessageContext, stream: &dyn RuntimeStream, value: &T) -> bool {
-        self.as_ref().filter(context, stream, value).await
+    fn filter(&self, context: MessageContext, stream: &dyn RuntimeStream, value: &T) -> impl std::future::Future<Output = bool> + Send {
+        self.as_ref().filter(context, stream, value)
     }
 }
 

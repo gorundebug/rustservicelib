@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use servicelib::{
     MessageContext, Payload, Stream,
     operators::MapFunction,
@@ -19,7 +18,6 @@ use std::sync::{
 use tracing_subscriber::layer::SubscriberExt;
 
 struct Count(Arc<AtomicUsize>);
-#[async_trait]
 impl MapFunction<u32, u32> for Count {
     async fn map(
         &self,

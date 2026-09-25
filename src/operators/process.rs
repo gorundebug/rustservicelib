@@ -11,25 +11,24 @@ use crate::runtime::{
     stream::Stream,
 };
 
-#[async_trait]
 pub trait ProcessFunction<T, R, E>: Send + Sync
 where
     T: Send + Sync + 'static,
     R: Send + Sync + 'static,
     E: Send + Sync + 'static,
 {
-    async fn process(
+    fn process(
         &self,
         context: MessageContext,
         stream: &dyn RuntimeStream,
         value: &T,
         out: &Collector<R>,
         error: &Collector<E>,
-    );
+    ) -> impl std::future::Future<Output = ()> + Send;
 }
 
 // Sharing a business function does not share operator configuration or state.
-#[async_trait]
+// Forward the concrete future without boxing or adding an async wrapper.
 impl<T, R, E, F> ProcessFunction<T, R, E> for Arc<F>
 where
     T: Send + Sync + 'static,
@@ -37,17 +36,15 @@ where
     E: Send + Sync + 'static,
     F: ProcessFunction<T, R, E> + ?Sized,
 {
-    async fn process(
+    fn process(
         &self,
         context: MessageContext,
         stream: &dyn RuntimeStream,
         value: &T,
         out: &Collector<R>,
         error: &Collector<E>,
-    ) {
-        self.as_ref()
-            .process(context, stream, value, out, error)
-            .await
+    ) -> impl std::future::Future<Output = ()> + Send {
+        self.as_ref().process(context, stream, value, out, error)
     }
 }
 
