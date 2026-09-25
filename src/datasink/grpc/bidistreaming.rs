@@ -1,8 +1,5 @@
 use std::{
-    sync::{
-        Arc, Weak,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Weak},
     time::{Duration, Instant},
 };
 
@@ -85,7 +82,7 @@ where
     sender: StreamingSender<ReqT, ResR>,
     result_context: ResultContext,
     lifetime: RwLock<()>,
-    finished: AtomicBool,
+    finished: tokio_util::sync::CancellationToken,
     started_at: Option<Instant>,
     grpc_started_at: Option<Instant>,
     span: Option<tracing::Span>,
@@ -109,8 +106,9 @@ where
     // network I/O) so concurrent Consume calls for *different* streamIDs
     // never contend on a single shared lock; a Consume for the *same*
     // still-being-created streamID awaits the cell instead, and only ever
-    // observes a fully, atomically constructed Pending.
-    pending: RotatingMap<String, Arc<OnceCell<Arc<Pending<HandlerState, ReqT, ResR>>>>>,
+    // observes the same creation outcome, including failure. Failure must not
+    // restart initialization in an old cell already removed from the map.
+    pending: RotatingMap<String, Arc<OnceCell<Option<Arc<Pending<HandlerState, ReqT, ResR>>>>>>,
     metrics: Arc<EndpointMetrics>,
 }
 
@@ -159,14 +157,19 @@ where
     fn spawn_stream_tasks(
         &self,
         stream_id: String,
-        cell: Arc<OnceCell<Arc<Pending<HandlerState, ReqT, ResR>>>>,
+        cell: Arc<OnceCell<Option<Arc<Pending<HandlerState, ReqT, ResR>>>>>,
         pending: Arc<Pending<HandlerState, ReqT, ResR>>,
     ) {
+        // Peer completion must release the close waiter even when the caller
+        // never invokes Done and its parent context remains alive. Keep this
+        // internal lifecycle signal separate from user completion/tracing.
+        let (receive_finished, receive_completion) = tokio::sync::oneshot::channel::<()>();
         let close_pending = Arc::clone(&pending);
         tokio::spawn(async move {
             tokio::select! {
                 _ = close_pending.result_context.cancelled() => {}
                 _ = close_pending.context.cancelled() => {}
+                _ = receive_completion => {}
             }
             let result = crate::runtime::common::instrument_if_present!(
                 close_pending.sender.call.close_send(),
@@ -237,11 +240,11 @@ where
                     }
                 }
             }
-            let _lifetime = pending.lifetime.write().await;
-            if pending.finished.swap(true, Ordering::AcqRel) {
-                return;
-            }
-            pending_map.pop_if(&stream_id, |current| Arc::ptr_eq(current, &cell));
+            // Receive callbacks stay sequential and may overlap sends. Only
+            // finalization closes admission and waits for active send handlers.
+            pending.finished.cancel();
+            let lifetime = pending.lifetime.write().await;
+            drop(lifetime);
             crate::runtime::common::instrument_if_present!(
                 handler.end_request(
                     pending.context.clone(),
@@ -253,6 +256,8 @@ where
             );
             metrics.request_end(pending.started_at, &result);
             metrics.grpc_client_end(pending.grpc_started_at, &result);
+            pending_map.pop_if(&stream_id, |current| Arc::ptr_eq(current, &cell));
+            let _ = receive_finished.send(());
         });
     }
 }
@@ -287,7 +292,7 @@ where
         let init_cell = Arc::clone(&cell);
         let init_stream_id = stream_id.clone();
         let pending = match cell
-            .get_or_try_init(move || async move {
+            .get_or_init(move || async move {
                 let (context, span) = if stream.stream().environment().tracing_enabled()
                     && context.sampling_enabled()
                 {
@@ -314,7 +319,7 @@ where
                                 "begin_request failed"
                             )
                         });
-                        return Err(error);
+                        return None;
                     }
                 };
                 let request_context = handler_context.clone().with_stream_id(new_stream_id());
@@ -352,7 +357,7 @@ where
                         );
                         self.metrics.request_end(started_at, &result);
                         self.metrics.grpc_client_end(grpc_started_at, &result);
-                        return result.map(|()| unreachable!("gRPC creation error became success"));
+                        return None;
                     }
                 };
                 crate::runtime::common::event_if_present!(
@@ -368,7 +373,7 @@ where
                     },
                     result_context: ResultContext::with_optional_span(span.as_ref()),
                     lifetime: RwLock::new(()),
-                    finished: AtomicBool::new(false),
+                    finished: tokio_util::sync::CancellationToken::new(),
                     started_at,
                     grpc_started_at,
                     span: span.clone(),
@@ -378,12 +383,12 @@ where
                     Arc::clone(&init_cell),
                     Arc::clone(&pending),
                 );
-                Ok(pending)
+                Some(pending)
             })
             .await
         {
-            Ok(pending) => Arc::clone(pending),
-            Err(_) => {
+            Some(pending) => Arc::clone(pending),
+            None => {
                 // Creation failed; drop the reservation so a future Consume
                 // for the same streamID can retry from scratch.
                 self.pending
@@ -392,8 +397,16 @@ where
             }
         };
 
-        let _lifetime = pending.lifetime.read().await;
-        if pending.finished.load(Ordering::Acquire) {
+        let _lifetime = tokio::select! {
+            biased;
+            _ = pending.finished.cancelled() => {
+                self.metrics.reject_closing_request(pending.span.as_ref());
+                return;
+            }
+            lifetime = pending.lifetime.read() => lifetime,
+        };
+        if pending.finished.is_cancelled() {
+            self.metrics.reject_closing_request(pending.span.as_ref());
             return;
         }
         let result = crate::runtime::common::instrument_if_present!(

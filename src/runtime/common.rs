@@ -54,47 +54,7 @@ fn traceparent_is_sampled(value: &str) -> bool {
 /// Await directly when tracing is disabled. This deliberately is a macro, not
 /// an `async fn`: the no-tracing branch must not add another Future/poll layer
 /// to every operator and transport call on the hot path.
-macro_rules! instrument_if_enabled {
-    ($future:expr, $span:ident . clone() $(,)?) => {{
-        let future = $future;
-        let span: &::tracing::Span = &$span;
-        if span.is_disabled() {
-            future.await
-        } else {
-            ::tracing::Instrument::instrument(future, ::tracing::Span::clone(span)).await
-        }
-    }};
-    ($future:expr, $owner:ident . $field:ident . clone() $(,)?) => {{
-        let future = $future;
-        let span: &::tracing::Span = &$owner.$field;
-        if span.is_disabled() {
-            future.await
-        } else {
-            ::tracing::Instrument::instrument(future, ::tracing::Span::clone(span)).await
-        }
-    }};
-    ($future:expr, $span:ident $(,)?) => {{
-        let future = $future;
-        let span: &::tracing::Span = &$span;
-        if span.is_disabled() {
-            future.await
-        } else {
-            ::tracing::Instrument::instrument(future, ::tracing::Span::clone(span)).await
-        }
-    }};
-    ($future:expr, $span:expr $(,)?) => {{
-        let future = $future;
-        let span = $span;
-        if span.is_disabled() {
-            future.await
-        } else {
-            ::tracing::Instrument::instrument(future, span).await
-        }
-    }};
-}
-
-pub(crate) use instrument_if_enabled;
-
+///
 /// Links without tracing do not construct even a disabled span.
 macro_rules! instrument_if_present {
     ($future:expr, $span:ident $(,)?) => {{
@@ -144,19 +104,6 @@ macro_rules! event_if_present {
 pub(crate) use event_if_present;
 
 /// Business callbacks still execute when tracing is disabled, without a span scope.
-macro_rules! scope_if_enabled {
-    ($span:expr, $callback:expr $(,)?) => {{
-        let span: &::tracing::Span = $span;
-        if span.is_disabled() {
-            ($callback)()
-        } else {
-            span.in_scope($callback)
-        }
-    }};
-}
-
-pub(crate) use scope_if_enabled;
-
 macro_rules! scope_if_present {
     ($span:expr, $callback:expr $(,)?) => {{
         let callback = $callback;

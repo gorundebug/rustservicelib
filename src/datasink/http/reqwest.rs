@@ -1,11 +1,17 @@
 use std::{
     collections::HashMap,
     error::Error,
-    sync::{Arc, Weak},
+    fmt,
+    io,
+    pin::Pin,
+    sync::{Arc, Mutex, Weak},
+    task::{Context, Poll, Waker},
     time::Duration,
 };
 
 use async_trait::async_trait;
+use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
+use tokio_util::io::StreamReader;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::{
@@ -68,10 +74,108 @@ impl Requester {
     }
 }
 
-#[derive(Clone, Debug)]
+struct ResponseBodyState {
+    reader: Option<Pin<Box<dyn AsyncRead + Send>>>,
+    closed: bool,
+    waker: Option<Waker>,
+}
+
+/// A single-owner streaming response body. Reading is optional. The endpoint
+/// closes it after EndRequest, including bodies retained by user handlers.
+pub struct ResponseBody {
+    state: Arc<Mutex<ResponseBodyState>>,
+    content_length: Option<usize>,
+}
+
+impl fmt::Debug for ResponseBody {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("ResponseBody")
+            .field("content_length", &self.content_length).finish_non_exhaustive()
+    }
+}
+
+fn close_response_body(state: &Mutex<ResponseBodyState>) {
+    let (reader, waker) = {
+        let mut state = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.closed = true;
+        (state.reader.take(), state.waker.take())
+    };
+    drop(reader);
+    if let Some(waker) = waker { waker.wake(); }
+}
+
+struct ResponseBodyGuard(Arc<Mutex<ResponseBodyState>>);
+
+impl Drop for ResponseBodyGuard {
+    fn drop(&mut self) { close_response_body(&self.0); }
+}
+
+impl ResponseBody {
+    pub fn new(reader: impl AsyncRead + Send + 'static) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ResponseBodyState {
+                reader: Some(Box::pin(reader)), closed: false, waker: None,
+            })),
+            content_length: None,
+        }
+    }
+
+    /// Transport-provided total length, not a reason to read or buffer the body.
+    pub fn content_length(&self) -> Option<usize> { self.content_length }
+
+    /// Explicitly collect the remaining body, analogous to Go's io.ReadAll.
+    pub async fn bytes(&mut self) -> io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        self.read_to_end(&mut bytes).await?;
+        Ok(bytes)
+    }
+
+    /// Release the underlying response without draining unread bytes.
+    pub fn close(&mut self) { close_response_body(&self.state); }
+
+    fn close_on_drop(&self) -> ResponseBodyGuard {
+        ResponseBodyGuard(Arc::clone(&self.state))
+    }
+}
+
+impl From<Vec<u8>> for ResponseBody {
+    fn from(bytes: Vec<u8>) -> Self {
+        let size = bytes.len();
+        let mut body = Self::new(io::Cursor::new(bytes));
+        body.content_length = Some(size);
+        body
+    }
+}
+
+impl AsyncRead for ResponseBody {
+    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buffer: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        if buffer.remaining() == 0 { return Poll::Ready(Ok(())); }
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.closed {
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "HTTP response body is closed")));
+        }
+        let before = buffer.filled().len();
+        let outcome = match state.reader.as_mut() {
+            Some(reader) => reader.as_mut().poll_read(cx, buffer),
+            None => return Poll::Ready(Ok(())),
+        };
+        let retired = match &outcome {
+            Poll::Ready(result) => {
+                state.waker = None;
+                if result.is_err() || buffer.filled().len() == before { state.reader.take() } else { None }
+            }
+            Poll::Pending => { state.waker = Some(cx.waker().clone()); None }
+        };
+        drop(state);
+        drop(retired);
+        outcome
+    }
+}
+
+#[derive(Debug)]
 pub struct Response {
     pub status: u16,
-    pub body: Vec<u8>,
+    pub body: ResponseBody,
     pub headers: HashMap<String, String>,
 }
 
@@ -133,7 +237,17 @@ impl Client for ReqwestClient {
                     .map(|value| (name.as_str().to_owned(), value.to_owned()))
             })
             .collect();
-        let body = response.bytes().await?.into();
+        let content_length = response.content_length().and_then(|size| usize::try_from(size).ok());
+        let chunks = futures::stream::try_unfold((response, context), |(mut response, context)| async move {
+            let chunk = tokio::select! {
+                biased;
+                _ = context.cancelled() => return Err(io::Error::other("HTTP request context cancelled")),
+                chunk = response.chunk() => chunk.map_err(io::Error::other)?,
+            };
+            Ok(chunk.map(|chunk| (chunk, (response, context))))
+        });
+        let mut body = ResponseBody::new(StreamReader::new(Box::pin(chunks)));
+        body.content_length = content_length;
         Ok(Response {
             status,
             body,
@@ -217,6 +331,55 @@ where
         result: &HandlerResult,
         handler_state: HandlerState,
     );
+}
+
+#[async_trait]
+impl<HandlerState, T, R, E, H> EndpointHandler<HandlerState, T, R, E> for Arc<H>
+where
+    HandlerState: Send + 'static,
+    T: Send + Sync + 'static,
+    R: Send + Sync + 'static,
+    E: Send + Sync + 'static,
+    H: EndpointHandler<HandlerState, T, R, E> + ?Sized,
+{
+    async fn begin_request(
+        &self,
+        context: MessageContext,
+        stream: StreamContext<T, R, E>,
+    ) -> Result<(MessageContext, HandlerState), HandlerError> {
+        self.as_ref().begin_request(context, stream).await
+    }
+
+    async fn consume_message(
+        &self,
+        context: MessageContext,
+        stream: StreamContext<T, R, E>,
+        handler_state: &mut HandlerState,
+        value: Payload<T>,
+        requester: &mut Requester,
+    ) -> HandlerResult {
+        self.as_ref().consume_message(context, stream, handler_state, value, requester).await
+    }
+
+    async fn handle_response(
+        &self,
+        context: MessageContext,
+        stream: StreamContext<T, R, E>,
+        handler_state: &mut HandlerState,
+        response: Response,
+    ) -> HandlerResult {
+        self.as_ref().handle_response(context, stream, handler_state, response).await
+    }
+
+    async fn end_request(
+        &self,
+        context: MessageContext,
+        stream: StreamContext<T, R, E>,
+        result: &HandlerResult,
+        handler_state: HandlerState,
+    ) {
+        self.as_ref().end_request(context, stream, result, handler_state).await;
+    }
 }
 
 pub struct EndpointConsumer<HandlerState, T, R, E, H>
@@ -435,6 +598,9 @@ where
         } else {
             Err("HTTP request was not built because ConsumeMessage failed".into())
         };
+        // Like Go's deferred Body.Close, keep this guard through EndRequest.
+        // It also closes a body that the handler moved into external state.
+        let mut _response_body_guard = None;
         match request {
             Ok(request) => {
                 let observation = self
@@ -446,8 +612,9 @@ where
                     span,
                 ) {
                     Ok(response) => {
+                        _response_body_guard = Some(response.body.close_on_drop());
                         if let Some(observation) = observation {
-                            observation.finish(Some(response.status), Some(response.body.len()), false);
+                            observation.finish(Some(response.status), response.body.content_length(), false);
                         }
                         crate::runtime::common::event_if_present!(span.as_ref(), || {
                             tracing::event!(name: "http_call", tracing::Level::INFO, status_code = response.status);

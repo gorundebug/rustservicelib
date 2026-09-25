@@ -53,10 +53,10 @@ impl EndpointHandler<(), u32, u32, String> for Handler {
         context: MessageContext,
         stream: StreamContext<u32, u32, String>,
         _handler_state: &mut (),
-        response: Response,
+        mut response: Response,
     ) -> HandlerResult {
         self.events.lock().unwrap().push("response");
-        let value = String::from_utf8(response.body)?.parse::<u32>()?;
+        let value = String::from_utf8(response.body.bytes().await?)?.parse::<u32>()?;
         stream.collect(context, value).await;
         Ok(())
     }

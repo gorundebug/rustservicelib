@@ -55,15 +55,15 @@ where
         S: Stream<Item = HandlerResult<ReqT>> + Send + Unpin,
     {
         let sender = Arc::new(super::nostreaming::UnarySender::new());
-        let (stream_id, pending) = self
+        let (stream_id, pending, mut lifecycle) = self
             .endpoint_consumer
-            .begin(context, sender.clone())
+            .begin_owned(context, sender.clone())
             .await?;
         let mut result = Ok(());
         while let Some(request) = requests.next().await {
             match request {
                 Ok(request) => {
-                    result = self.endpoint_consumer.consume(&pending, request).await;
+                    (lifecycle, result) = self.endpoint_consumer.consume_owned(lifecycle, &pending, request).await;
                     if result.is_err() {
                         break;
                     }
@@ -75,7 +75,7 @@ where
             }
         }
         if result.is_ok() {
-            self.endpoint_consumer.eof(&pending).await;
+            lifecycle = self.endpoint_consumer.eof_owned(lifecycle, &pending).await;
         }
         let response = if result.is_ok() && self.endpoint_consumer.has_result() {
             match sender.receive(pending.context.read().await.clone()).await {
@@ -90,7 +90,7 @@ where
         };
         result = self
             .endpoint_consumer
-            .finish(&stream_id, pending, result)
+            .finish_owned(lifecycle, stream_id, pending, result)
             .await;
         result?;
         Ok(response.or_else(|| sender.take()).unwrap_or_default())

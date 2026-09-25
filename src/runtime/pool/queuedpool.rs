@@ -465,10 +465,10 @@ impl QueuedPool {
             tokio::select! {
                 biased;
                 Some(Ok(id)) = cancellations.next(), if !cancellations.is_empty() => {
-                    if queue.promote(id) {
-                        if let Some(metrics) = &self.metrics {
-                            metrics.task_cancelled.inc();
-                        }
+                    if queue.promote(id)
+                        && let Some(metrics) = &self.metrics
+                    {
+                        metrics.task_cancelled.inc();
                     }
                 }
                 command = receiver.recv(), if receiving => match command {

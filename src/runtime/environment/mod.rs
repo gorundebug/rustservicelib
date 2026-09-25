@@ -13,6 +13,7 @@ pub mod metrics;
 pub mod tracing;
 
 use async_trait::async_trait;
+use futures::FutureExt;
 use thiserror::Error;
 
 use self::{
@@ -172,7 +173,21 @@ impl RuntimeEnvironment {
         self.parallel_tasks
             .lock()
             .expect("parallel task registry lock poisoned")
-            .push(tokio::spawn(future));
+            .push(tokio::spawn(async move {
+                if let Err(panic) = std::panic::AssertUnwindSafe(future).catch_unwind().await {
+                    let message = if let Some(message) = panic.downcast_ref::<&str>() {
+                        *message
+                    } else if let Some(message) = panic.downcast_ref::<String>() {
+                        message.as_str()
+                    } else {
+                        "non-string panic payload"
+                    };
+                    ::tracing::error!(panic = message, "panic in parallel graph callback");
+                    // Like an unhandled panic in Go's RunParallel goroutine,
+                    // this must terminate the process, not just a Tokio task.
+                    std::process::exit(2);
+                }
+            }));
     }
 
     pub(crate) async fn drain_parallel(&self) {
@@ -580,3 +595,12 @@ pub trait Lifecycle: Send + Sync {
     async fn start(&self, context: MessageContext) -> RuntimeResult<()>;
     async fn stop(&self, context: MessageContext) -> RuntimeResult<()>;
 }
+
+#[cfg(test)]
+mod parallel_panic_contract_tests;
+
+#[cfg(test)]
+mod parallel_lifetime_contract_tests;
+
+#[cfg(test)]
+mod operator_schedule_contract_tests;

@@ -64,6 +64,90 @@ impl std::fmt::Display for RequestContextCancelled {
 
 impl Error for RequestContextCancelled {}
 
+// Poll normally on the caller's task. Only an abandoned, already-started
+// operation is transferred to Tokio so its handler and finalizer can finish.
+struct CompleteOnDrop<F: Future + Send + 'static>
+where
+    F::Output: Send + 'static,
+{
+    future: Option<Pin<Box<F>>>,
+    context: MessageContext,
+}
+
+impl<F: Future + Send + 'static> Future for CompleteOnDrop<F>
+where
+    F::Output: Send + 'static,
+{
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        let result = this.future.as_mut().expect("completed gRPC operation polled").as_mut().poll(cx);
+        if result.is_ready() {
+            this.future = None;
+        }
+        result
+    }
+}
+
+impl<F: Future + Send + 'static> Drop for CompleteOnDrop<F>
+where
+    F::Output: Send + 'static,
+{
+    fn drop(&mut self) {
+        if let Some(future) = self.future.take() {
+            self.context.cancel();
+            // Cancellation is not finalization. Keep result callbacks available
+            // until the admitted handler finishes, as in the Go source boundary.
+            tokio::spawn(async move { drop(future.await); });
+        }
+    }
+}
+
+struct RequestLifecycle {
+    cleanup: Option<BoxFuture<HandlerResult>>,
+    context: MessageContext,
+    closing: CancellationToken,
+}
+
+impl RequestLifecycle {
+    fn run<F>(self, future: F) -> CompleteOnDrop<impl Future<Output = (Self, F::Output)> + Send>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        CompleteOnDrop {
+            context: self.context.clone(),
+            future: Some(Box::pin(async move {
+                let output = future.await;
+                (self, output)
+            })),
+        }
+    }
+
+    fn finish<F>(mut self, future: F) -> CompleteOnDrop<F>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.cleanup = None;
+        CompleteOnDrop {
+            context: self.context.clone(),
+            future: Some(Box::pin(future)),
+        }
+    }
+}
+
+impl Drop for RequestLifecycle {
+    fn drop(&mut self) {
+        if let Some(cleanup) = self.cleanup.take() {
+            self.context.cancel();
+            self.closing.cancel();
+            tokio::spawn(async move { let _ = cleanup.await; });
+        }
+    }
+}
+
 #[async_trait]
 pub trait Sender<ResR>: Send + Sync
 where
@@ -92,7 +176,8 @@ where
     R: Send + Sync + 'static,
     E: Send + Sync + 'static,
 {
-    callbacks: Mutex<CallbackStore<ResultCallback<HandlerState, T, ResR, R, E>>>,
+    // None marks a finished request; late registration cannot revive it.
+    callbacks: Mutex<Option<CallbackStore<ResultCallback<HandlerState, T, ResR, R, E>>>>,
     done: CancellationToken,
     span: Option<tracing::Span>,
 }
@@ -107,7 +192,7 @@ where
 {
     fn new(span: Option<tracing::Span>) -> Self {
         Self {
-            callbacks: Mutex::new(CallbackStore::new()),
+            callbacks: Mutex::new(Some(CallbackStore::new())),
             done: CancellationToken::new(),
             span,
         }
@@ -118,10 +203,22 @@ where
         message_id: impl Into<String>,
         callback: ResultCallback<HandlerState, T, ResR, R, E>,
     ) {
-        self.callbacks
+        if let Some(callbacks) = self.callbacks
             .lock()
             .expect("gRPC source callbacks lock poisoned")
-            .insert(message_id.into(), callback);
+            .as_mut()
+        {
+            callbacks.insert(message_id.into(), callback);
+        }
+    }
+
+    fn close(&self) {
+        let callbacks = self.callbacks
+            .lock()
+            .expect("gRPC source callbacks lock poisoned")
+            .take();
+        // Destroy user captures outside the callback-store lock.
+        drop(callbacks);
     }
 
     pub fn done(&self) {
@@ -202,6 +299,7 @@ where
     sender: Arc<dyn Sender<ResR>>,
     result_context: Arc<ResultContext<HandlerState, T, ResR, R, E>>,
     lifetime: RwLock<()>,
+    closing: CancellationToken,
     started_at: Option<Instant>,
     span: Option<tracing::Span>,
 }
@@ -358,12 +456,10 @@ where
                 endpoint_consumer: Arc::downgrade(&endpoint_consumer),
             }));
         }
-        if input_stream.result_stream().is_some() {
-            input_stream
-                .stream()
-                .environment()
-                .register_storage(Arc::new(pending));
-        }
+        input_stream
+            .stream()
+            .environment()
+            .register_storage(Arc::new(pending));
         input_stream
             .stream()
             .environment()
@@ -373,6 +469,63 @@ where
 
     pub(crate) fn has_result(&self) -> bool {
         self.input_stream.result_stream().is_some()
+    }
+
+    async fn begin_owned(
+        self: &Arc<Self>,
+        context: MessageContext,
+        sender: Arc<dyn Sender<ResR>>,
+    ) -> HandlerResult<(String, Arc<Pending<HandlerState, T, ResR, R, E>>, RequestLifecycle)> {
+        let context = context.child();
+        let consumer = Arc::clone(self);
+        CompleteOnDrop {
+            context: context.clone(),
+            future: Some(Box::pin(async move {
+                let (stream_id, pending) = consumer.begin(context.clone(), sender).await?;
+                let cleanup_id = stream_id.clone();
+                let cleanup_pending = Arc::clone(&pending);
+                let lifecycle = RequestLifecycle {
+                    context,
+                    closing: pending.closing.clone(),
+                    cleanup: Some(Box::pin(async move {
+                        consumer.finish(&cleanup_id, cleanup_pending, Err(Box::new(RequestContextCancelled))).await
+                    })),
+                };
+                Ok((stream_id, pending, lifecycle))
+            })),
+        }.await
+    }
+
+    async fn consume_owned(
+        self: &Arc<Self>,
+        lifecycle: RequestLifecycle,
+        pending: &Arc<Pending<HandlerState, T, ResR, R, E>>,
+        request: ReqT,
+    ) -> (RequestLifecycle, HandlerResult) {
+        let consumer = Arc::clone(self);
+        let pending = Arc::clone(pending);
+        lifecycle.run(async move { consumer.consume(&pending, request).await }).await
+    }
+
+    async fn eof_owned(
+        self: &Arc<Self>,
+        lifecycle: RequestLifecycle,
+        pending: &Arc<Pending<HandlerState, T, ResR, R, E>>,
+    ) -> RequestLifecycle {
+        let consumer = Arc::clone(self);
+        let pending = Arc::clone(pending);
+        lifecycle.run(async move { consumer.eof(&pending).await }).await.0
+    }
+
+    async fn finish_owned(
+        self: &Arc<Self>,
+        lifecycle: RequestLifecycle,
+        stream_id: String,
+        pending: Arc<Pending<HandlerState, T, ResR, R, E>>,
+        result: HandlerResult,
+    ) -> HandlerResult {
+        let consumer = Arc::clone(self);
+        lifecycle.finish(async move { consumer.finish(&stream_id, pending, result).await }).await
     }
 
     pub(crate) async fn begin(
@@ -455,6 +608,7 @@ where
             sender,
             result_context: Arc::new(ResultContext::new(span.clone())),
             lifetime: RwLock::new(()),
+            closing: CancellationToken::new(),
             started_at: self
                 .metrics
                 .request_duration
@@ -462,38 +616,50 @@ where
                 .then(Instant::now),
             span,
         });
-        if self.has_result() {
-            if self
-                .pending
-                .set(stream_id.clone(), Arc::clone(&pending))
-                .is_err()
-            {
-                let result: HandlerResult = Err("duplicate gRPC stream ID".into());
-                crate::runtime::telemetry::record_error_if_present!(
-                    pending.span.as_ref(),
-                    "duplicate gRPC stream ID",
+        // Admission is independent of result routing. An RPC without a result
+        // stream still owns its ID until all its request handlers have finished.
+        if self
+            .pending
+            .set(stream_id.clone(), Arc::clone(&pending))
+            .is_err()
+        {
+            let result: HandlerResult = Err("duplicate gRPC stream ID".into());
+            crate::runtime::telemetry::record_error_if_present!(
+                pending.span.as_ref(),
+                "duplicate gRPC stream ID",
+            );
+            crate::runtime::common::event_if_present!(pending.span.as_ref(), || {
+                tracing::event!(
+                    name: "request_rejected",
+                    tracing::Level::ERROR,
+                    error = "duplicate gRPC stream ID",
                 );
-                let _ = crate::runtime::common::instrument_if_present!(
-                    self.handler.end_request(
-                        pending.context.read().await.clone(),
-                        self.stream_context.clone(),
-                        &result,
-                        Arc::clone(&pending.state),
-                    ),
-                    pending.span.clone(),
-                );
-                if let Some(started_at) = pending.started_at {
-                    self.metrics.active_requests.dec();
-                    self.metrics
-                        .request_duration
-                        .observe(started_at.elapsed().as_secs_f64());
-                    self.metrics.request_errors.inc();
-                }
-                return match result {
-                    Err(error) => Err(error),
-                    Ok(()) => unreachable!("duplicate stream ID is always an error"),
-                };
+            });
+            if self.metrics.request_duration.is_enabled() {
+                self.metrics.begin_request_failed.inc();
             }
+            let _ = crate::runtime::common::instrument_if_present!(
+                self.handler.end_request(
+                    pending.context.read().await.clone(),
+                    self.stream_context.clone(),
+                    &result,
+                    Arc::clone(&pending.state),
+                ),
+                pending.span.clone(),
+            );
+            if let Some(started_at) = pending.started_at {
+                self.metrics.active_requests.dec();
+                self.metrics
+                    .request_duration
+                    .observe(started_at.elapsed().as_secs_f64());
+                self.metrics.request_errors.inc();
+            }
+            return match result {
+                Err(error) => Err(error),
+                Ok(()) => unreachable!("duplicate stream ID is always an error"),
+            };
+        }
+        if self.has_result() {
             self.metrics.pending_requests.add(&stream_id);
         }
         Ok((stream_id, pending))
@@ -570,17 +736,10 @@ where
         pending: Arc<Pending<HandlerState, T, ResR, R, E>>,
         mut result: HandlerResult,
     ) -> HandlerResult {
-        let removed = if self.has_result() {
-            let removed = self.pending.pop(stream_id);
-            self.metrics.pending_requests.remove(stream_id);
-            removed
-        } else {
-            None
-        };
-        let _lifetime = match &removed {
-            Some(pending) => Some(pending.lifetime.write().await),
-            None => None,
-        };
+        // Stop new result callbacks before draining the accepted ones. Keep
+        // the ID reserved throughout EndRequest, including reentrant calls.
+        pending.closing.cancel();
+        let _lifetime = pending.lifetime.write().await;
         let wait_cancelled = result
             .as_ref()
             .err()
@@ -613,9 +772,10 @@ where
             ),
             pending.span.clone(),
         );
-        if end_result.is_err() {
-            result = end_result;
-        }
+        // EndRequest owns the final outcome, including recovery to success.
+        // Preserving the previous error here would override the handler's decision.
+        result = end_result;
+        pending.result_context.close();
         if let Some(started_at) = pending.started_at {
             self.metrics.active_requests.dec();
             self.metrics
@@ -631,6 +791,14 @@ where
             crate::runtime::common::event_if_present!(pending.span.as_ref(), || {
                 tracing::error!("gRPC source request failed");
             });
+        }
+        if self
+            .pending
+            .pop_if(stream_id, |current| Arc::ptr_eq(current, &pending))
+            .is_some()
+            && self.has_result()
+        {
+            self.metrics.pending_requests.remove(stream_id);
         }
         result
     }
@@ -653,8 +821,21 @@ where
             );
             return;
         };
-        let _lifetime = pending.lifetime.read().await;
-        if !self
+        let _lifetime = tokio::select! {
+            biased;
+            _ = pending.closing.cancelled() => {
+                if self.metrics.request_duration.is_enabled() {
+                    self.metrics.late_result.inc();
+                }
+                crate::runtime::common::event_if_present!(
+                    pending.span.as_ref(),
+                    || tracing::event!(name: "late_result", tracing::Level::WARN, {})
+                );
+                return;
+            }
+            guard = pending.lifetime.read() => guard,
+        };
+        if pending.closing.is_cancelled() || !self.has_result() || !self
             .pending
             .get(&stream_id)
             .is_some_and(|current| Arc::ptr_eq(&current, &pending))
@@ -682,7 +863,8 @@ where
             .callbacks
             .lock()
             .expect("gRPC source callbacks lock poisoned")
-            .get(&message_id)
+            .as_ref()
+            .and_then(|callbacks| callbacks.get(&message_id))
             .cloned();
         let Some(callback) = callback else {
             if self.metrics.request_duration.is_enabled() {
@@ -713,7 +895,8 @@ where
                 .callbacks
                 .lock()
                 .expect("gRPC source callbacks lock poisoned")
-                .remove(&message_id);
+                .as_mut()
+                .and_then(|callbacks| callbacks.remove(&message_id));
             if removed.is_none() {
                 if self.metrics.request_duration.is_enabled() {
                     self.metrics.duplicate_message_id.inc();

@@ -494,29 +494,63 @@ async fn registered_pools_publish_the_go_metric_contract() {
 }
 
 #[tokio::test]
-async fn task_panic_is_logged_without_permanently_losing_an_executor() {
-    let pool = TaskPool::new("panic-safe", pool_environment(&[("panic-safe", 1)])).unwrap();
-    pool.start().unwrap();
-    pool.add_task(
-        MessageContext::new(),
-        Box::pin(async {
-            panic!("expected task panic");
-        }),
-    )
-    .await
-    .unwrap();
+async fn pool_callback_panic_terminates_process() {
+    const CHILD: &str = "SERVICELIB_RUST_POOL_PANIC_CHILD";
+    const MESSAGE: &str = "pool-panic-contract-original-payload";
+    if let Ok(kind) = std::env::var(CHILD) {
+        // Bound failure cases too: a swallowed panic must not hang this test.
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_secs(5));
+            std::process::exit(99);
+        });
+        let task: servicelib::runtime::pool::BoxTask = Box::pin(async {
+            eprintln!("pool-panic-contract-callback-entered");
+            panic!("{MESSAGE}");
+        });
+        match kind.as_str() {
+            "fifo" => {
+                let pool = TaskPool::new("panic", pool_environment(&[("panic", 1)])).unwrap();
+                pool.start().unwrap();
+                pool.add_task(MessageContext::new(), task).await.unwrap();
+            }
+            "priority" => {
+                let pool = PriorityTaskPool::new("panic", pool_environment(&[("panic", 1)])).unwrap();
+                pool.start().unwrap();
+                pool.add_task(MessageContext::new(), 0, task).await.unwrap();
+            }
+            "delay" => {
+                DelayPool::new().delay(MessageContext::new(), Duration::from_millis(1), task).await.unwrap();
+            }
+            _ => panic!("unknown pool panic probe: {kind}"),
+        }
+        std::future::pending::<()>().await;
+        return;
+    }
 
-    let (sender, mut receiver) = mpsc::unbounded_channel();
-    pool.add_task(
-        MessageContext::new(),
-        Box::pin(async move {
-            sender.send(()).unwrap();
-        }),
-    )
-    .await
-    .unwrap();
-    assert_eq!(receiver.recv().await, Some(()));
-    pool.stop().await;
+    for kind in ["fifo", "priority", "delay"] {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "pool_callback_panic_terminates_process", "--nocapture"])
+            .env(CHILD, kind)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if child.try_wait().unwrap().is_some() { break; }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("{kind}: panic probe did not exit");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let output = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{kind}: {stderr}");
+        assert!(stderr.contains("pool-panic-contract-callback-entered"), "{kind}: {stderr}");
+        assert!(stderr.contains(MESSAGE), "{kind}: {stderr}");
+    }
 }
 
 #[tokio::test]

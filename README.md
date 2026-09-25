@@ -137,6 +137,24 @@ same pool. Rust does not support Temporal connectors.
 
 HTTP and gRPC propagate stream identity, trace context, baggage, and remaining deadlines where the transport supports them. Process-local scheduling metadata, such as priority, stays local.
 
+### HTTP sink response bodies
+
+HTTP sink `handle_response` receives headers without buffering the whole body.
+`Response.body` implements `tokio::io::AsyncRead`: read only the bytes needed,
+inspect just `status`/`headers`, or explicitly collect the remaining bytes:
+
+```rust
+let bytes = response.body.bytes().await?; // response must be mutable
+```
+
+For partial reads, import `tokio::io::AsyncReadExt` and use `read` or `read_exact`.
+`response.body.close()` releases unread data without draining it. Cancellation
+and the request deadline remain effective during reads. The endpoint closes the
+body on completion, after `end_request`, even if a handler retained the body.
+`Consume` still awaits the handler and finalization; streaming adds no detached
+processing. Test clients can construct a buffered body with `bytes.into()` or
+use `ResponseBody::new(reader)` for an arbitrary asynchronous reader.
+
 ### gRPC streaming queues
 
 Each gRPC connector has its own immutable `stream_buffer_capacity`. The default

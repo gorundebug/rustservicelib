@@ -19,6 +19,7 @@ use axum::{
 use tokio::sync::{Mutex as AsyncMutex, RwLock};
 use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::{
@@ -58,6 +59,7 @@ pub struct AxumDataSource {
     started: Mutex<bool>,
     shutdown: Mutex<CancellationToken>,
     server_task: AsyncMutex<Option<JoinHandle<Result<(), String>>>>,
+    request_tasks: TaskTracker,
 }
 
 impl AxumDataSource {
@@ -70,6 +72,7 @@ impl AxumDataSource {
             started: Mutex::new(false),
             shutdown: Mutex::new(CancellationToken::new()),
             server_task: AsyncMutex::new(None),
+            request_tasks: TaskTracker::new(),
         })
     }
 
@@ -108,8 +111,13 @@ impl AxumDataSource {
         {
             return Err(RuntimeError::ResourceAlreadyStarted(self.name.clone()));
         }
-        let endpoint =
-            make_endpoint_consumer(input_stream, endpoint_config.clone(), &self.name, handler)?;
+        let endpoint = make_endpoint_consumer_with_tasks(
+            input_stream,
+            endpoint_config.clone(),
+            &self.name,
+            handler,
+            self.request_tasks.clone(),
+        )?;
         let mut router = self
             .router
             .lock()
@@ -168,6 +176,7 @@ impl Lifecycle for AxumDataSource {
             *started = true;
         }
         let config = self.connector_config()?;
+        self.request_tasks.reopen();
         if !config.use_dedicated_listener {
             return Ok(());
         }
@@ -197,15 +206,26 @@ impl Lifecycle for AxumDataSource {
         Ok(())
     }
 
-    async fn stop(&self, _context: MessageContext) -> RuntimeResult<()> {
+    async fn stop(&self, context: MessageContext) -> RuntimeResult<()> {
+        self.request_tasks.close();
         self.shutdown
             .lock()
             .expect("HTTP datasource shutdown lock poisoned")
             .cancel();
-        if let Some(task) = self.server_task.lock().await.take() {
-            task.await
-                .map_err(|error| RuntimeError::Transport(error.to_string()))?
-                .map_err(RuntimeError::Transport)?;
+        let drain = async {
+            if let Some(task) = self.server_task.lock().await.take() {
+                task.await
+                    .map_err(|error| RuntimeError::Transport(error.to_string()))?
+                    .map_err(RuntimeError::Transport)?;
+            }
+            // A disconnected client no longer owns its transport future, but
+            // its accepted handler still has to finish before graph teardown.
+            self.request_tasks.wait().await;
+            RuntimeResult::Ok(())
+        };
+        tokio::select! {
+            result = drain => result?,
+            _ = context.cancelled() => {},
         }
         *self
             .started
@@ -351,7 +371,8 @@ where
     R: Send + Sync + 'static,
     E: Send + Sync + 'static,
 {
-    callbacks: Mutex<HashMap<String, ResultCallback<HandlerState, ReqT, ResR, T, R, E>>>,
+    // None marks a finished request; late registration must not recreate cycles.
+    callbacks: Mutex<Option<HashMap<String, ResultCallback<HandlerState, ReqT, ResR, T, R, E>>>>,
     done: tokio_util::sync::CancellationToken,
     span: Option<tracing::Span>,
     _types: std::marker::PhantomData<fn(ReqT, ResR)>,
@@ -368,7 +389,7 @@ where
 {
     fn new(span: Option<tracing::Span>) -> Self {
         Self {
-            callbacks: Mutex::new(HashMap::new()),
+            callbacks: Mutex::new(Some(HashMap::new())),
             done: tokio_util::sync::CancellationToken::new(),
             span,
             _types: std::marker::PhantomData,
@@ -380,10 +401,23 @@ where
         message_id: impl Into<String>,
         callback: ResultCallback<HandlerState, ReqT, ResR, T, R, E>,
     ) {
-        self.callbacks
+        if let Some(callbacks) = self.callbacks
             .lock()
             .expect("HTTP result callbacks lock poisoned")
-            .insert(message_id.into(), callback);
+            .as_mut()
+        {
+            callbacks.insert(message_id.into(), callback);
+        }
+    }
+
+    fn close(&self) {
+        let callbacks = self.callbacks
+            .lock()
+            .expect("HTTP result callbacks lock poisoned")
+            .take();
+        // Callback captures may own their ResultContext or run user Drop code.
+        // Release them outside the registry mutex.
+        drop(callbacks);
     }
 
     pub fn done(&self) {
@@ -491,6 +525,7 @@ where
     pending_requests: PendingRequests,
     request_duration: crate::runtime::environment::metrics::Float64Histogram,
     endpoint_name: String,
+    request_tasks: TaskTracker,
 }
 
 pub fn make_endpoint_consumer<HandlerState, ReqT, ResR, T, R, E, H>(
@@ -498,6 +533,27 @@ pub fn make_endpoint_consumer<HandlerState, ReqT, ResR, T, R, E, H>(
     endpoint_config: HttpEndpointConfig,
     connector_name: &str,
     handler: H,
+) -> RuntimeResult<Arc<EndpointConsumer<HandlerState, ReqT, ResR, T, R, E, H>>>
+where
+    HandlerState: Send + 'static,
+    ReqT: Send + Sync + 'static,
+    ResR: Send + Sync + 'static,
+    T: Send + Sync + 'static,
+    R: Send + Sync + 'static,
+    E: Send + Sync + 'static,
+    H: EndpointHandler<HandlerState, ReqT, ResR, T, R, E> + 'static,
+{
+    make_endpoint_consumer_with_tasks(
+        input_stream, endpoint_config, connector_name, handler, TaskTracker::new(),
+    )
+}
+
+fn make_endpoint_consumer_with_tasks<HandlerState, ReqT, ResR, T, R, E, H>(
+    input_stream: InputStream<T, R, E>,
+    endpoint_config: HttpEndpointConfig,
+    connector_name: &str,
+    handler: H,
+    request_tasks: TaskTracker,
 ) -> RuntimeResult<Arc<EndpointConsumer<HandlerState, ReqT, ResR, T, R, E, H>>>
 where
     HandlerState: Send + 'static,
@@ -579,6 +635,7 @@ where
             None,
         )?,
         endpoint_name: endpoint_config.name.clone(),
+        request_tasks,
     });
     if input_stream.result_stream().is_some() {
         input_stream.set_result_consumer(Arc::new(ResultConsumer {
@@ -652,7 +709,33 @@ where
         )
     }
 
-    async fn serve_http(&self, request: Request, expected_method: Method) -> Response<Body> {
+    async fn serve_http(self: Arc<Self>, request: Request, expected_method: Method) -> Response<Body> {
+        if self.request_tasks.is_closed() {
+            return Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(Body::empty())
+                .expect("valid HTTP shutdown response");
+        }
+        let context = MessageContext::new();
+        let _request_cancellation = RequestCancellationGuard(context.clone());
+        let consumer = Arc::clone(&self);
+        // One owned task at the transport boundary, not on graph edges.
+        // Dropping the response future cancels the context without dropping
+        // ConsumeMessage/EndRequest or losing their pending-request cleanup.
+        let task = self.request_tasks.spawn(async move {
+            consumer.serve_http_request(request, expected_method, context).await
+        });
+        match task.await {
+            Ok(response) => response,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(_) => Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::empty())
+                .expect("valid HTTP task cancellation response"),
+        }
+    }
+
+    async fn serve_http_request(&self, request: Request, expected_method: Method, context: MessageContext) -> Response<Body> {
         if request.method() != expected_method {
             if self.request_duration.is_enabled() {
                 self.invalid_http_method.inc();
@@ -698,12 +781,12 @@ where
         let tracing_enabled = environment.tracing_enabled();
         let context = if tracing_enabled {
             crate::runtime::datasource::apply_endpoint_tracing(
-                MessageContext::new().with_metadata(metadata),
+                context.with_metadata(metadata),
                 environment,
                 self.input_stream.endpoint_id(),
             )
         } else {
-            MessageContext::new().with_metadata_untraced(metadata)
+            context.with_metadata_untraced(metadata)
         };
         let span = if tracing_enabled && context.sampling_enabled() {
             let (stream_name, pipeline_name, component_name) =
@@ -803,6 +886,7 @@ where
                     ),
                     span,
                 );
+                result_context.close();
                 if let Some(started_at) = started_at {
                     self.active_requests.dec();
                     self.request_duration
@@ -889,6 +973,7 @@ where
             ),
             span.clone(),
         );
+        result_context.close();
         if let Some(started_at) = started_at {
             self.active_requests.dec();
             self.request_duration
@@ -954,7 +1039,8 @@ where
             .callbacks
             .lock()
             .expect("HTTP result callbacks lock poisoned")
-            .get(&message_id)
+            .as_ref()
+            .and_then(|callbacks| callbacks.get(&message_id))
             .cloned();
         let Some(callback) = callback else {
             if self.request_duration.is_enabled() {
@@ -985,7 +1071,8 @@ where
                 .callbacks
                 .lock()
                 .expect("HTTP result callbacks lock poisoned")
-                .remove(&message_id);
+                .as_mut()
+                .and_then(|callbacks| callbacks.remove(&message_id));
             if removed.is_none() {
                 if self.request_duration.is_enabled() {
                     self.duplicate_message_id.inc();

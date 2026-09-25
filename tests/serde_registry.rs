@@ -148,15 +148,20 @@ async fn streams_cache_failed_provider_stub_per_service_and_type() {
 async fn concurrent_resolutions_return_the_same_cached_instance() {
     let environment = RuntimeEnvironment::default();
     environment.set_serde_provider(json_strings).unwrap();
+    let barrier = Arc::new(std::sync::Barrier::new(32));
     let mut tasks = Vec::new();
     for _ in 0..32 {
         let environment = environment.clone();
-        tasks.push(tokio::spawn(async move {
+        let barrier = barrier.clone();
+        tasks.push(tokio::task::spawn_blocking(move || {
+            barrier.wait();
             environment.get_serde::<String>().unwrap()
         }));
     }
-    let expected = environment.get_serde::<String>().unwrap();
+    // Do not warm the cache on the test thread before releasing the callers.
+    let expected = tasks.remove(0).await.unwrap();
     for task in tasks {
         assert!(Arc::ptr_eq(&expected, &task.await.unwrap()));
     }
+    assert!(Arc::ptr_eq(&expected, &environment.get_serde::<String>().unwrap()));
 }

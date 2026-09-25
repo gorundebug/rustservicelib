@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     hash::Hash,
     sync::{
-        Arc, OnceLock, Weak,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -11,8 +11,9 @@ use std::{
 use async_trait::async_trait;
 use tokio::{
     sync::Mutex,
-    time::{Instant, sleep},
+    time::{Instant, sleep_until},
 };
+use tokio_util::sync::CancellationToken;
 
 use super::{DynValue, JoinCallback, JoinStorage, JoinValues, Storage};
 use crate::runtime::{
@@ -29,10 +30,33 @@ struct Item<K> {
     generation: u64,
     context: MessageContext,
     callback: JoinCallback<K>,
+    expiry: Option<CancellationToken>,
+}
+
+struct Entry<K> {
+    state: Mutex<Item<K>>,
+    // Admission must inspect expiry without waiting for a business callback
+    // holding state. An expired generation can finish independently of its
+    // replacement, as in Go's map lookup before taking Item.lock.
+    deadline: std::sync::Mutex<Option<Instant>>,
+}
+
+impl<K> Entry<K> {
+    fn deadline(&self) -> Option<Instant> {
+        *self.deadline.lock().expect("join deadline lock poisoned")
+    }
+
+    fn set_deadline(&self, deadline: Instant) {
+        *self.deadline.lock().expect("join deadline lock poisoned") = Some(deadline);
+    }
+
+    fn expired(&self) -> bool {
+        self.deadline().is_some_and(|deadline| deadline <= Instant::now())
+    }
 }
 
 struct HashMapJoinStorageInner<K> {
-    items: Mutex<HashMap<K, Arc<Mutex<Item<K>>>>>,
+    items: Mutex<HashMap<K, Arc<Entry<K>>>>,
     config: Arc<dyn Fn() -> (Duration, bool) + Send + Sync>,
     stopped: AtomicBool,
     started: AtomicBool,
@@ -135,39 +159,50 @@ where
     }
 
     fn arm_expiry(
-        store: Weak<HashMapJoinStorageInner<K>>,
+        store: Arc<HashMapJoinStorageInner<K>>,
         key: K,
-        item: Arc<Mutex<Item<K>>>,
+        item: Arc<Entry<K>>,
         generation: u64,
-        ttl: Duration,
-        uses_context_deadline: bool,
+        deadline: Instant,
+        context: MessageContext,
+        cancellation: CancellationToken,
     ) {
         tokio::spawn(async move {
-            let context = { item.lock().await.context.clone() };
-            if uses_context_deadline {
-                context.cancelled().await;
-            } else {
-                sleep(ttl).await;
-            }
+            let mut deadline = deadline;
+            let (callback, callback_context, values) = loop {
+                // An accepted timer is not replaced on renewal. At its next
+                // wake it observes an extended logical deadline, like Go's
+                // AfterFunc. A shorter/zero TTL does not move that wake early.
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return,
+                    _ = async {
+                        if context.deadline().is_some() {
+                            context.cancelled().await;
+                        } else {
+                            sleep_until(deadline).await;
+                        }
+                    } => {},
+                }
 
-            let Some(store) = store.upgrade() else {
-                return;
-            };
-            if store.stopped.load(Ordering::Acquire) {
-                return;
-            }
-
-            let (callback, callback_context, values) = {
-                let mut item_guard = item.lock().await;
+                let mut item_guard = item.state.lock().await;
                 if item_guard.processed || item_guard.generation != generation {
                     return;
                 }
+                if context.deadline().is_none()
+                    && let Some(renewed) = item.deadline()
+                    && renewed > Instant::now()
+                {
+                    deadline = renewed;
+                    continue;
+                }
                 item_guard.processed = true;
-                (
+                item_guard.expiry = None;
+                break (
                     Arc::clone(&item_guard.callback),
                     item_guard.context.clone(),
                     item_guard.values.clone(),
-                )
+                );
             };
             callback(callback_context, key.clone(), values).await;
 
@@ -185,7 +220,7 @@ where
         });
     }
 
-    async fn remove_if_same(&self, key: &K, item: &Arc<Mutex<Item<K>>>) {
+    async fn remove_if_same(&self, key: &K, item: &Arc<Entry<K>>) {
         let mut items = self.inner.items.lock().await;
         if items
             .get(key)
@@ -212,74 +247,94 @@ where
         value: DynValue,
         callback: JoinCallback<K>,
     ) -> bool {
-        if self.inner.stopped.load(Ordering::Acquire) {
-            return false;
-        }
-
-        let (item, created) = {
-            let mut items = self.inner.items.lock().await;
-            match items.get(&key) {
-                Some(item) => (Arc::clone(item), false),
-                None => {
-                    let item = Arc::new(Mutex::new(Item {
-                        values: Vec::new(),
-                        processed: false,
-                        generation: 0,
-                        context: context.clone(),
-                        callback: Arc::clone(&callback),
-                    }));
-                    items.insert(key.clone(), Arc::clone(&item));
-                    if let Some(metrics) = self.inner.metrics.get().and_then(Option::as_ref) {
-                        metrics.count.inc();
-                    }
-                    (item, true)
-                }
-            }
-        };
-
+        // Snapshot invocation settings once, before possible contention, as
+        // Go's JoinValue does. Reloads affect subsequent invocations.
         let (configured_ttl, renew_ttl) = (self.inner.config)();
         let effective_ttl = context
             .deadline()
             .map(|deadline| deadline.saturating_duration_since(Instant::now()))
             .unwrap_or(configured_ttl);
-        let uses_context_deadline = context.deadline().is_some();
+        loop {
+            let item = {
+                let mut items = self.inner.items.lock().await;
+                match items.get(&key) {
+                    Some(item) if !item.expired() => Arc::clone(item),
+                    _ => {
+                        let item = Arc::new(Entry {
+                            state: Mutex::new(Item {
+                                values: Vec::new(),
+                                processed: false,
+                                generation: 0,
+                                context: context.clone(),
+                                callback: Arc::clone(&callback),
+                                expiry: None,
+                            }),
+                            deadline: std::sync::Mutex::new((effective_ttl > Duration::ZERO)
+                                .then(|| Instant::now() + effective_ttl)),
+                        });
+                        let is_new_key = items.insert(key.clone(), Arc::clone(&item)).is_none();
+                        if is_new_key
+                            && let Some(metrics) = self.inner.metrics.get().and_then(Option::as_ref)
+                        {
+                            metrics.count.inc();
+                        }
+                        item
+                    }
+                }
+            };
 
-        let (processed, generation, should_arm) = {
-            let mut item_guard = item.lock().await;
-            if item_guard.processed {
-                return false;
-            }
-            if item_guard.values.len() <= index {
-                item_guard.values.resize_with(index + 1, Vec::new);
-            }
-            item_guard.values[index].push(value);
-            let values = item_guard.values.clone();
-            item_guard.processed = callback(context.clone(), key.clone(), values).await;
-            if created || renew_ttl {
-                item_guard.generation = item_guard.generation.wrapping_add(1);
-                item_guard.context = context.clone();
-                item_guard.callback = Arc::clone(&callback);
-            }
-            (
-                item_guard.processed,
-                item_guard.generation,
-                effective_ttl > Duration::ZERO && (created || renew_ttl),
-            )
-        };
+            let processed = {
+                let mut item_guard = item.state.lock().await;
+                if item_guard.processed || item.expired() {
+                    // The previous callback completed while this value waited
+                    // for the key. Retire only that item, then retry with the
+                    // still-unconsumed value, as Go's JoinValue does.
+                    drop(item_guard);
+                    self.remove_if_same(&key, &item).await;
+                    continue;
+                }
+                let first_value = item_guard.values.is_empty();
+                if item_guard.values.len() <= index {
+                    item_guard.values.resize_with(index + 1, Vec::new);
+                }
+                item_guard.values[index].push(value);
+                if first_value {
+                    item_guard.generation = item_guard.generation.wrapping_add(1);
+                    item_guard.context = context.clone();
+                    item_guard.callback = Arc::clone(&callback);
+                    if effective_ttl > Duration::ZERO {
+                        let cancellation = CancellationToken::new();
+                        item_guard.expiry = Some(cancellation.clone());
+                        // Start the accepted group's clock before user code.
+                        // Expiry still acquires the item lock before delivery.
+                        Self::arm_expiry(
+                            Arc::clone(&self.inner), key.clone(), Arc::clone(&item),
+                            item_guard.generation, item.deadline().expect("positive TTL has a deadline"),
+                            context.clone(), cancellation,
+                        );
+                    }
+                }
+                let values = item_guard.values.clone();
+                item_guard.processed = callback(context.clone(), key.clone(), values).await;
+                if item_guard.processed
+                    && let Some(expiry) = item_guard.expiry.take()
+                {
+                    expiry.cancel();
+                }
+                if !item_guard.processed && renew_ttl {
+                    // This updates admission and any already accepted timer;
+                    // it neither creates a missing timer nor replaces its
+                    // original callback/context ownership.
+                    item.set_deadline(Instant::now() + effective_ttl);
+                }
+                item_guard.processed
+            };
 
-        if processed {
-            self.remove_if_same(&key, &item).await;
-        } else if should_arm {
-            Self::arm_expiry(
-                Arc::downgrade(&self.inner),
-                key,
-                item,
-                generation,
-                effective_ttl,
-                uses_context_deadline,
-            );
+            if processed {
+                self.remove_if_same(&key, &item).await;
+            }
+            return true;
         }
-        true
     }
 
     async fn len(&self) -> usize {
@@ -307,10 +362,179 @@ where
     }
 
     async fn stop(&self, _context: MessageContext) {
+        // Go stops background map maintenance, not JoinValue or the timers
+        // belonging to accepted groups. Keep their values and metrics intact;
+        // completion/expiration remains responsible for removing each item.
         self.inner.stopped.store(true, Ordering::Release);
-        self.inner.items.lock().await.clear();
-        if let Some(metrics) = self.inner.metrics.get().and_then(Option::as_ref) {
-            metrics.count.set(0);
+    }
+}
+
+#[cfg(test)]
+mod dynamic_ttl_contract {
+    use super::*;
+    use futures::FutureExt;
+    use std::sync::atomic::AtomicU64;
+    use tokio::{sync::mpsc, time::timeout};
+
+    async fn check(initial: u64, next: u64, expect_expiry: bool, minimum: u64) {
+        let ttl = Arc::new(AtomicU64::new(initial));
+        let renew = Arc::new(AtomicBool::new(initial > 0));
+        let store = HashMapJoinStorage::<u32>::with_config({
+            let ttl = ttl.clone();
+            let renew = renew.clone();
+            move || (Duration::from_secs(ttl.load(Ordering::SeqCst)), renew.load(Ordering::SeqCst))
+        });
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let callback: JoinCallback<u32> = Arc::new(move |_, _, _| {
+            let sender = sender.clone();
+            async move { sender.send(Instant::now()).unwrap(); false }.boxed()
+        });
+        let started = Instant::now();
+        store.join_value(MessageContext::new(), 7, 0, Arc::new(10_u32), callback.clone()).await;
+        receiver.recv().await.unwrap();
+        ttl.store(next, Ordering::SeqCst);
+        renew.store(true, Ordering::SeqCst);
+        store.join_value(MessageContext::new(), 7, 1, Arc::new(20_u32), callback).await;
+        receiver.recv().await.unwrap();
+        let expired = timeout(Duration::from_secs(if expect_expiry { 30 } else { 3 }), receiver.recv()).await;
+        let complete: JoinCallback<u32> = Arc::new(|_, _, _| async { true }.boxed());
+        store.join_value(MessageContext::new(), 7, 0, Arc::new(30_u32), complete).await;
+        store.stop(MessageContext::new()).await;
+        if expect_expiry {
+            let expired = expired.expect("renewal lost the accepted expiry callback").unwrap();
+            assert!(expired >= started + Duration::from_secs(minimum), "callback moved ahead of accepted timer");
+        } else {
+            assert!(expired.is_err(), "renewal installed a timer absent at initial admission");
         }
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn extending_ttl_postpones_accepted_expiry() { check(10, 20, true, 20).await; }
+
+    #[tokio::test(start_paused = true)]
+    async fn shortening_ttl_keeps_original_timer_boundary() { check(10, 2, true, 10).await; }
+
+    #[tokio::test(start_paused = true)]
+    async fn zero_ttl_does_not_cancel_already_accepted_expiry() { check(10, 0, true, 10).await; }
+
+    #[tokio::test(start_paused = true)]
+    async fn positive_ttl_does_not_create_missing_initial_timer() { check(0, 2, false, 0).await; }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_generation_does_not_block_or_contaminate_new_admission() {
+        let store = HashMapJoinStorage::<u32>::new(Duration::from_secs(3600), false);
+        let entered = Arc::new(tokio::sync::Semaphore::new(0));
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let calls = Arc::new(AtomicU64::new(0));
+        let callback: JoinCallback<u32> = Arc::new({
+            let entered = entered.clone();
+            let release = release.clone();
+            move |_, _, _| {
+                let entered = entered.clone();
+                let release = release.clone();
+                let calls = calls.clone();
+                async move {
+                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        entered.add_permits(1);
+                        release.acquire().await.unwrap().forget();
+                    }
+                    false
+                }.boxed()
+            }
+        });
+        let first = tokio::spawn({
+            let store = store.clone();
+            async move {
+                store.join_value(MessageContext::new().with_timeout_limit(Duration::from_secs(10)),
+                    7, 0, Arc::new(10_u32), callback).await
+            }
+        });
+        entered.acquire().await.unwrap().forget();
+        tokio::time::advance(Duration::from_secs(20)).await;
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let second = tokio::spawn({
+            let store = store.clone();
+            async move {
+                let callback: JoinCallback<u32> = Arc::new(move |_, _, values| {
+                    let sender = sender.clone();
+                    async move {
+                        sender.send(values.iter().map(|slot| slot.iter().map(|value| {
+                            *value.downcast_ref::<u32>().unwrap()
+                        }).collect::<Vec<_>>()).collect::<Vec<_>>()).unwrap();
+                        true
+                    }.boxed()
+                });
+                store.join_value(MessageContext::new(), 7, 0, Arc::new(20_u32), callback).await
+            }
+        });
+        let fresh = timeout(Duration::from_secs(1), receiver.recv()).await;
+        release.add_permits(1);
+        first.await.unwrap();
+        second.await.unwrap();
+        store.stop(MessageContext::new()).await;
+        assert_eq!(fresh.expect("expired callback blocked a new generation").unwrap(), vec![vec![20]]);
+    }
+
+    async fn stale_callback(completes: bool, replacement_completes: bool) {
+        let store = HashMapJoinStorage::<u32>::new(Duration::from_secs(3600), true);
+        let entered = Arc::new(tokio::sync::Semaphore::new(0));
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let calls = Arc::new(AtomicU64::new(0));
+        let callback: JoinCallback<u32> = Arc::new({
+            let entered = entered.clone();
+            let release = release.clone();
+            move |_, _, _| {
+                let entered = entered.clone();
+                let release = release.clone();
+                let calls = calls.clone();
+                async move {
+                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        entered.add_permits(1);
+                        release.acquire().await.unwrap().forget();
+                    }
+                    completes
+                }.boxed()
+            }
+        });
+        let first = tokio::spawn({
+            let store = store.clone();
+            async move {
+                store.join_value(MessageContext::new().with_timeout_limit(Duration::from_secs(10)),
+                    7, 0, Arc::new(10_u32), callback).await
+            }
+        });
+        entered.acquire().await.unwrap().forget();
+        tokio::time::advance(Duration::from_secs(20)).await;
+        let keep: JoinCallback<u32> = Arc::new(move |_, _, values| async move {
+            assert_eq!(values.len(), 1);
+            assert_eq!(values[0].len(), 1);
+            assert_eq!(*values[0][0].downcast_ref::<u32>().unwrap(), 20);
+            replacement_completes
+        }.boxed());
+        store.join_value(MessageContext::new(), 7, 0, Arc::new(20_u32), keep).await;
+        release.add_permits(1);
+        first.await.unwrap();
+        let complete: JoinCallback<u32> = Arc::new(move |_, _, values| async move {
+            let values: Vec<Vec<u32>> = values.iter().map(|slot| slot.iter().map(|value| {
+                *value.downcast_ref::<u32>().unwrap()
+            }).collect()).collect();
+            let expected = if replacement_completes { vec![vec![], vec![30]] } else { vec![vec![20], vec![30]] };
+            assert_eq!(values, expected, "stale callback changed the current generation");
+            true
+        }.boxed());
+        store.join_value(MessageContext::new(), 7, 1, Arc::new(30_u32), complete).await;
+        store.stop(MessageContext::new()).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_completion_preserves_new_generation() { stale_callback(true, false).await; }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_renewal_does_not_resurrect_old_generation() { stale_callback(false, false).await; }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_renewal_cannot_restore_an_already_replaced_generation() { stale_callback(false, true).await; }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_completion_after_replacement_completion_leaves_no_values() { stale_callback(true, true).await; }
 }

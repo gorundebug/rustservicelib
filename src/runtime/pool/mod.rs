@@ -18,6 +18,10 @@ async fn run_task(pool: &str, task: BoxTask) {
             panic = panic_message(panic.as_ref()),
             "panic in pool worker"
         );
+        // Go's pool worker re-panics after logging, terminating the process.
+        // Re-unwinding a Tokio task would only produce a JoinError and leave
+        // the service running after a potentially broken business invariant.
+        std::process::exit(2);
     }
 }
 

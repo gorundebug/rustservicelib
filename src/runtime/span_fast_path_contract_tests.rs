@@ -163,7 +163,7 @@ fn transport_parent_cloning_is_inside_the_span_guard() {
         let compact: String = source.chars().filter(|ch| !ch.is_whitespace()).collect();
         assert!(compact.contains(concat!(
             "if!span.is_disabled(){",
-            "let_=span.set_parent(context.open_telemetry_context().clone());}"
+            "let_=span.set_parent(context.open_telemetry_context().clone());"
         )));
     }
 }
@@ -210,7 +210,7 @@ fn trace_scopes_and_errors_are_lazy_and_do_not_leak_to_parent() {
                 closure_evaluations.fetch_add(1, Ordering::Relaxed);
                 || tracing::event!(name: "request.complete", tracing::Level::INFO, {})
             });
-            crate::runtime::telemetry::record_error_if_enabled!(&span, {
+            crate::runtime::telemetry::record_error_if_present!(Some(&span), {
                 error_evaluations.fetch_add(1, Ordering::Relaxed);
                 CountFormatting(&formatting)
             });
@@ -234,7 +234,7 @@ fn business_callback_runs_once_and_returns_its_value_with_or_without_tracing() {
             } else {
                 tracing::Span::none()
             };
-            let result = super::scope_if_enabled!(&span, || {
+            let result = super::scope_if_present!(Some(&span), || {
                 calls.fetch_add(1, Ordering::Relaxed);
                 42
             });

@@ -59,12 +59,12 @@ where
     where
         S: Stream<Item = HandlerResult<ReqT>> + Send + Unpin,
     {
-        let (stream_id, pending) = self.endpoint_consumer.begin(context, sender).await?;
+        let (stream_id, pending, mut lifecycle) = self.endpoint_consumer.begin_owned(context, sender).await?;
         let mut result = Ok(());
         while let Some(request) = requests.next().await {
             match request {
                 Ok(request) => {
-                    result = self.endpoint_consumer.consume(&pending, request).await;
+                    (lifecycle, result) = self.endpoint_consumer.consume_owned(lifecycle, &pending, request).await;
                     if result.is_err() {
                         break;
                     }
@@ -76,13 +76,13 @@ where
             }
         }
         if result.is_ok() {
-            self.endpoint_consumer.eof(&pending).await;
+            lifecycle = self.endpoint_consumer.eof_owned(lifecycle, &pending).await;
             if self.endpoint_consumer.has_result() {
                 result = self.endpoint_consumer.wait_done(&pending).await;
             }
         }
         self.endpoint_consumer
-            .finish(&stream_id, pending, result)
+            .finish_owned(lifecycle, stream_id, pending, result)
             .await
     }
 }

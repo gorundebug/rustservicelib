@@ -95,6 +95,136 @@ where
 
 struct Double;
 
+struct OrderedDirectConsumer {
+    name: &'static str,
+    caller: Option<tokio::task::Id>,
+    events: Arc<Mutex<Vec<(&'static str, &'static str)>>>,
+}
+
+#[async_trait]
+impl Consumer<i32> for OrderedDirectConsumer {
+    async fn consume(&self, _context: MessageContext, _payload: Payload<i32>) {
+        assert_eq!(tokio::task::try_id(), self.caller);
+        self.events.lock().unwrap().push((self.name, "enter"));
+        tokio::task::yield_now().await;
+        self.events.lock().unwrap().push((self.name, "leave"));
+    }
+}
+
+#[tokio::test]
+async fn split_function_call_async_only_reorders_direct_awaited_branches() {
+    for first_async in [false, true] {
+        let links = vec![
+            LinkConfig {
+                from: 2,
+                to: 3,
+                call_semantics: CallSemantics::FunctionCall,
+                r#async: first_async,
+            },
+            LinkConfig {
+                from: 2,
+                to: 4,
+                call_semantics: CallSemantics::FunctionCall,
+                r#async: !first_async,
+            },
+        ];
+        let environment = test_environment(Vec::new(), links);
+        let input = servicelib::operators::InputStream::<i32, (), ()>::new(
+            &InputStreamConfig {
+                stream: StreamConfig::new(1, "Input"),
+                endpoint_id: 10,
+            },
+            environment.clone(),
+        );
+        let split: [Stream<i32>; 2] = input
+            .stream()
+            .split(&StreamConfig::new(2, "Split").into())
+            .unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        for (index, name) in ["first", "second"].into_iter().enumerate() {
+            split[index].set_consumer(
+                Arc::new(OrderedDirectConsumer {
+                    name,
+                    caller: tokio::task::try_id(),
+                    events: Arc::clone(&events),
+                }),
+                3 + index as i32,
+            );
+        }
+        environment.build_runtime_streams().unwrap();
+
+        input.consume(MessageContext::new(), 42).await;
+
+        let (early, late) = if first_async {
+            ("first", "second")
+        } else {
+            ("second", "first")
+        };
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![(early, "enter"), (early, "leave"), (late, "enter"), (late, "leave")],
+        );
+    }
+}
+
+struct ConcurrentMergeConsumer {
+    barrier: tokio::sync::Barrier,
+    values: Mutex<Vec<Arc<i32>>>,
+}
+
+#[async_trait]
+impl Consumer<i32> for ConcurrentMergeConsumer {
+    async fn consume(&self, _context: MessageContext, payload: Payload<i32>) {
+        self.barrier.wait().await;
+        tokio::task::yield_now().await;
+        self.values.lock().unwrap().push(payload.into_arc());
+    }
+}
+
+#[tokio::test]
+async fn merge_does_not_serialize_independent_direct_calls_or_copy_payloads() {
+    let environment = test_environment(Vec::new(), Vec::new());
+    let inputs = [1, 2].map(|id| {
+        servicelib::operators::InputStream::<i32, (), ()>::new(
+            &InputStreamConfig {
+                stream: StreamConfig::new(id, format!("Input {id}")),
+                endpoint_id: 10 + id,
+            },
+            environment.clone(),
+        )
+    });
+    let merged = inputs[0]
+        .stream()
+        .merge(&StreamConfig::new(3, "Merge").into(), &[inputs[1].stream().clone()])
+        .unwrap();
+    let capture = Arc::new(ConcurrentMergeConsumer {
+        barrier: tokio::sync::Barrier::new(2),
+        values: Mutex::new(Vec::new()),
+    });
+    merged.set_consumer(Arc::clone(&capture), 4);
+    environment.build_runtime_streams().unwrap();
+    let first = Payload::new(11);
+    let second = Payload::new(22);
+    let (first, first_owner) = first.share();
+    let (second, second_owner) = second.share();
+    let first_owner = first_owner.into_arc();
+    let second_owner = second_owner.into_arc();
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(
+            inputs[0].stream().emit(MessageContext::new(), first),
+            inputs[1].stream().emit(MessageContext::new(), second),
+        );
+    })
+    .await
+    .expect("both direct calls must enter the collector before either finishes");
+
+    let values = capture.values.lock().unwrap();
+    assert_eq!(values.len(), 2, "direct calls must await their collectors");
+    assert!(values.iter().any(|value| Arc::ptr_eq(value, &first_owner)));
+    assert!(values.iter().any(|value| Arc::ptr_eq(value, &second_owner)));
+}
+
 #[async_trait]
 impl MapFunction<i32, i32> for Double {
     async fn map(

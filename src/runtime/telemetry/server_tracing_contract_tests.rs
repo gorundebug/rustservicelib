@@ -220,7 +220,7 @@ fn grpc_completion_does_not_leak_events_into_an_unrelated_parent() {
             };
             GrpcCallObservation {
                 metrics: None,
-                started_at: None,
+                started_at: Some(std::time::Instant::now()),
                 span: Some(span),
             }
             .finish("13");

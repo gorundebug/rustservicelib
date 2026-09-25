@@ -81,7 +81,6 @@ macro_rules! record_error_if_enabled {
     }};
 }
 
-pub(crate) use record_error_if_enabled;
 
 macro_rules! record_error_if_present {
     ($span:expr, $error:expr $(,)?) => {{
@@ -97,17 +96,6 @@ pub(crate) use record_error_if_present;
 
 /// Keep attribute-key/value evaluation inside the disabled-span guard. A
 /// function wrapper would evaluate arguments before it can inspect the span.
-macro_rules! record_if_enabled {
-    ($span:expr, $key:expr, $value:expr $(,)?) => {{
-        let span: &::tracing::Span = $span;
-        if !span.is_disabled() {
-            span.record($key, $value);
-        }
-    }};
-}
-
-pub(crate) use record_if_enabled;
-
 macro_rules! record_if_present {
     ($span:expr, $key:expr, $value:expr $(,)?) => {{
         if let Some(span) = $span {
@@ -145,8 +133,7 @@ mod attribute_fast_path_tests {
         let keys = AtomicUsize::new(0);
         let values = AtomicUsize::new(0);
         let span = tracing::Span::none();
-        super::record_if_enabled!(
-            &span,
+        super::record_if_present!(Some(&span),
             {
                 keys.fetch_add(1, Ordering::Relaxed);
                 "stream_id"
@@ -171,11 +158,11 @@ mod attribute_fast_path_tests {
                 stream_id = tracing::field::Empty,
                 has_result = tracing::field::Empty
             );
-            super::record_if_enabled!(&span, "stream_id", {
+            super::record_if_present!(Some(&span), "stream_id", {
                 values.fetch_add(1, Ordering::Relaxed);
                 "request-123"
             });
-            super::record_if_enabled!(&span, "has_result", {
+            super::record_if_present!(Some(&span), "has_result", {
                 values.fetch_add(1, Ordering::Relaxed);
                 false
             });

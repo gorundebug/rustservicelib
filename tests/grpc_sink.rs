@@ -23,7 +23,7 @@ use servicelib::{
         environment::RuntimeEnvironment,
     },
 };
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, Notify};
 
 struct Handler {
     end_count: Arc<AtomicUsize>,
@@ -78,6 +78,136 @@ impl EndpointHandler<(), u32, u32, u32, u32, String> for Handler {
 }
 
 struct ResultCollector(Arc<Mutex<Vec<u32>>>);
+
+struct ClosingHandler {
+    entered: Arc<tokio::sync::Semaphore>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+
+#[async_trait]
+impl EndpointHandler<(), u32, u32, u32, u32, String> for ClosingHandler {
+    async fn begin_request(
+        &self,
+        context: MessageContext,
+        _stream: StreamContext<u32, u32, String>,
+    ) -> HandlerResult<(MessageContext, ())> {
+        Ok((context, ()))
+    }
+
+    async fn consume_message(
+        &self,
+        context: MessageContext,
+        _stream: StreamContext<u32, u32, String>,
+        _state: Arc<AsyncMutex<()>>,
+        value: Payload<u32>,
+        sender: &dyn Sender<u32>,
+        result: ResultContext,
+    ) -> HandlerResult {
+        sender.send(context, *value).await?;
+        result.done();
+        Ok(())
+    }
+
+    async fn handle_response(
+        &self,
+        _context: MessageContext,
+        _stream: StreamContext<u32, u32, String>,
+        _state: Arc<AsyncMutex<()>>,
+        _response: u32,
+    ) -> HandlerResult {
+        Ok(())
+    }
+
+    async fn end_request(
+        &self,
+        _context: MessageContext,
+        _stream: StreamContext<u32, u32, String>,
+        _result: &HandlerResult,
+        _state: Arc<AsyncMutex<()>>,
+    ) {
+        self.entered.add_permits(1);
+        self.release.acquire().await.unwrap().forget();
+    }
+}
+
+struct ImmediatelyFinishedBidi;
+
+#[async_trait]
+impl BidiStreamingCall<u32, u32> for ImmediatelyFinishedBidi {
+    async fn send(&self, _request: u32) -> HandlerResult {
+        Ok(())
+    }
+
+    async fn recv(&self) -> HandlerResult<Option<u32>> {
+        Ok(None)
+    }
+
+    async fn close_send(&self) -> HandlerResult {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn client_streaming_sink_does_not_reopen_same_id_during_end_request() {
+    check_session_reserved_during_end_request(false).await;
+}
+
+#[tokio::test]
+async fn bidi_sink_does_not_reopen_same_id_during_end_request() {
+    check_session_reserved_during_end_request(true).await;
+}
+
+async fn check_session_reserved_during_end_request(bidi: bool) {
+        let method = if bidi {
+            servicelib::api::GrpcMethodType::BidirectionalStreaming
+        } else {
+            servicelib::api::GrpcMethodType::ClientStreaming
+        };
+        let (source, sink, _) = make_sink(RuntimeEnvironment::default(), 1, method);
+        let entered = Arc::new(tokio::sync::Semaphore::new(0));
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let opened = Arc::new(AtomicUsize::new(0));
+        let handler = ClosingHandler {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        };
+        let client_opened = Arc::clone(&opened);
+        if bidi {
+            let client: BidiStreamingClientFunction<u32, u32> = Arc::new(move |_context| {
+                client_opened.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async {
+                    Ok(Arc::new(ImmediatelyFinishedBidi) as Arc<dyn BidiStreamingCall<u32, u32>>)
+                })
+            });
+            make_grpc_bidi_streaming_endpoint_consumer(&sink, handler, client).unwrap();
+        } else {
+            let client: ClientStreamingClientFunction<u32, u32> = Arc::new(move |_context| {
+                client_opened.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async {
+                    Ok(Arc::new(MockClientStreamingCall { sent: Mutex::new(Vec::new()) })
+                        as Arc<dyn ClientStreamingCall<u32, u32>>)
+                })
+            });
+            make_grpc_client_streaming_endpoint_consumer(&sink, handler, client).unwrap();
+        }
+        let context = MessageContext::new().with_stream_id("closing-session");
+        source.emit(context.clone(), Payload::new(1)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), entered.acquire())
+            .await
+            .expect("EndRequest must start")
+            .unwrap()
+            .forget();
+
+        let repeated = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            source.emit(context, Payload::new(2)),
+        )
+        .await;
+        let openings_while_closing = opened.load(Ordering::SeqCst);
+        release.add_permits(2);
+        assert!(repeated.is_ok(), "closing session must reject without blocking: bidi={bidi}");
+        assert_eq!(openings_while_closing, 1, "must not open a second RPC: bidi={bidi}");
+}
 
 type TestSink = Arc<servicelib::operators::SinkStreamWithResult<u32, u32, String>>;
 type TestSinkFixture = (Stream<u32>, TestSink, Arc<Mutex<Vec<u32>>>);
@@ -332,4 +462,245 @@ async fn grpc_bidi_streaming_sink_receives_until_done() {
 
     assert_eq!(calls.load(Ordering::Acquire), 1);
     assert_eq!(&*results.lock().unwrap(), &[10, 20]);
+}
+
+async fn failed_session_creation_is_shared(method: servicelib::api::GrpcMethodType) {
+    use servicelib::api::GrpcMethodType;
+
+    let (source, sink, results) = make_sink(RuntimeEnvironment::default(), 40, method);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let end_count = Arc::new(AtomicUsize::new(0));
+    let release_failure = Arc::new(Notify::new());
+    let handler = Handler {
+        end_count: end_count.clone(),
+    };
+    match method {
+        GrpcMethodType::ClientStreaming => {
+            let client: ClientStreamingClientFunction<u32, u32> = Arc::new({
+                let calls = calls.clone();
+                let release = release_failure.clone();
+                move |_| {
+                    let attempt = calls.fetch_add(1, Ordering::AcqRel);
+                    let release = release.clone();
+                    Box::pin(async move {
+                        if attempt == 0 {
+                            release.notified().await;
+                            return Err("session creation failed".into());
+                        }
+                        Ok(Arc::new(MockClientStreamingCall {
+                            sent: Mutex::new(Vec::new()),
+                        }) as Arc<dyn ClientStreamingCall<u32, u32>>)
+                    })
+                }
+            });
+            make_grpc_client_streaming_endpoint_consumer(&sink, handler, client).unwrap();
+        }
+        GrpcMethodType::BidirectionalStreaming => {
+            let client: BidiStreamingClientFunction<u32, u32> = Arc::new({
+                let calls = calls.clone();
+                let release = release_failure.clone();
+                move |_| {
+                    let attempt = calls.fetch_add(1, Ordering::AcqRel);
+                    let release = release.clone();
+                    Box::pin(async move {
+                        if attempt == 0 {
+                            release.notified().await;
+                            return Err("session creation failed".into());
+                        }
+                        Ok(Arc::new(MockBidiStreamingCall::new())
+                            as Arc<dyn BidiStreamingCall<u32, u32>>)
+                    })
+                }
+            });
+            make_grpc_bidi_streaming_endpoint_consumer(&sink, handler, client).unwrap();
+        }
+        _ => unreachable!("this test covers multi-message sessions"),
+    }
+
+    let context = MessageContext::new().with_stream_id("same-session");
+    let first = source.emit(context.clone(), Payload::new(1));
+    tokio::pin!(first);
+    assert!(futures::poll!(first.as_mut()).is_pending());
+    let second = source.emit(context.clone(), Payload::new(1));
+    tokio::pin!(second);
+    assert!(futures::poll!(second.as_mut()).is_pending());
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+
+    release_failure.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        tokio::join!(first, second);
+    })
+    .await
+    .expect("waiters did not observe failed creation");
+    assert_eq!(calls.load(Ordering::Acquire), 1, "a waiter retried a failed session");
+    assert_eq!(end_count.load(Ordering::Acquire), 1);
+    assert!(results.lock().unwrap().is_empty());
+
+    // A later invocation may create a fresh session with the same ID. It must
+    // remain registered until its own response and EndRequest complete.
+    source.emit(context, Payload::new(2)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while end_count.load(Ordering::Acquire) != 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the replacement session was orphaned");
+    assert_eq!(calls.load(Ordering::Acquire), 2);
+    let expected = if method == GrpcMethodType::ClientStreaming { 2 } else { 20 };
+    assert_eq!(&*results.lock().unwrap(), &[expected]);
+}
+
+#[tokio::test]
+async fn client_streaming_waiters_share_creation_failure_and_later_calls_retry() {
+    failed_session_creation_is_shared(servicelib::api::GrpcMethodType::ClientStreaming).await;
+}
+
+#[tokio::test]
+async fn bidi_waiters_share_creation_failure_and_later_calls_retry() {
+    failed_session_creation_is_shared(servicelib::api::GrpcMethodType::BidirectionalStreaming).await;
+}
+
+struct ResponseBoundaryHandler {
+    seen: Arc<Mutex<Vec<u32>>>,
+    response_release: Arc<tokio::sync::Semaphore>,
+    end_entered: Arc<AtomicUsize>,
+    end_release: Arc<tokio::sync::Semaphore>,
+    fail_response: bool,
+}
+
+#[async_trait]
+impl EndpointHandler<(), u32, u32, u32, u32, String> for ResponseBoundaryHandler {
+    async fn begin_request(
+        &self,
+        context: MessageContext,
+        _stream: StreamContext<u32, u32, String>,
+    ) -> HandlerResult<(MessageContext, ())> {
+        Ok((context, ()))
+    }
+
+    async fn consume_message(
+        &self,
+        context: MessageContext,
+        _stream: StreamContext<u32, u32, String>,
+        _state: Arc<AsyncMutex<()>>,
+        value: Payload<u32>,
+        sender: &dyn Sender<u32>,
+        _result: ResultContext,
+    ) -> HandlerResult {
+        sender.send(context, *value).await
+    }
+
+    async fn handle_response(
+        &self,
+        context: MessageContext,
+        stream: StreamContext<u32, u32, String>,
+        _state: Arc<AsyncMutex<()>>,
+        response: u32,
+    ) -> HandlerResult {
+        self.seen.lock().unwrap().push(response);
+        self.response_release.acquire().await.unwrap().forget();
+        if self.fail_response {
+            return Err("response rejected".into());
+        }
+        stream.collect(context, response).await;
+        Ok(())
+    }
+
+    async fn end_request(
+        &self,
+        _context: MessageContext,
+        _stream: StreamContext<u32, u32, String>,
+        result: &HandlerResult,
+        _state: Arc<AsyncMutex<()>>,
+    ) {
+        assert_eq!(result.is_err(), self.fail_response);
+        if let Err(error) = result {
+            assert_eq!(error.to_string(), "response rejected");
+        }
+        self.end_entered.fetch_add(1, Ordering::SeqCst);
+        self.end_release.acquire().await.unwrap().forget();
+    }
+}
+
+async fn check_response_and_end_boundaries(server_streaming: bool, fail_response: bool) {
+    let method = if server_streaming {
+        servicelib::api::GrpcMethodType::ServerStreaming
+    } else {
+        servicelib::api::GrpcMethodType::NoStreaming
+    };
+    let (source, sink, results) = make_sink(RuntimeEnvironment::default(), 1, method);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let response_release = Arc::new(tokio::sync::Semaphore::new(0));
+    let end_entered = Arc::new(AtomicUsize::new(0));
+    let end_release = Arc::new(tokio::sync::Semaphore::new(0));
+    let handler = ResponseBoundaryHandler {
+        seen: seen.clone(),
+        response_release: response_release.clone(),
+        end_entered: end_entered.clone(),
+        end_release: end_release.clone(),
+        fail_response,
+    };
+    if server_streaming {
+        let client: ServerStreamingClientFunction<u32, u32> = Arc::new(|_, _| {
+            Box::pin(async {
+                Ok(Box::pin(stream::iter([Ok(10_u32), Ok(20_u32)])) as _)
+            })
+        });
+        make_grpc_server_streaming_endpoint_consumer(&sink, handler, client).unwrap();
+    } else {
+        let client: NoStreamingClientFunction<u32, u32> =
+            Arc::new(|_, _| Box::pin(async { Ok(10) }));
+        make_grpc_no_streaming_endpoint_consumer(&sink, handler, client).unwrap();
+    }
+
+    let mut call = Box::pin(source.emit(MessageContext::new(), Payload::new(1)));
+    assert!(futures::poll!(call.as_mut()).is_pending());
+    assert_eq!(&*seen.lock().unwrap(), &[10]);
+    assert!(results.lock().unwrap().is_empty());
+    assert_eq!(end_entered.load(Ordering::SeqCst), 0);
+
+    response_release.add_permits(1);
+    assert!(futures::poll!(call.as_mut()).is_pending());
+    if server_streaming && !fail_response {
+        assert_eq!(&*seen.lock().unwrap(), &[10, 20]);
+        assert_eq!(&*results.lock().unwrap(), &[10]);
+        assert_eq!(end_entered.load(Ordering::SeqCst), 0);
+        response_release.add_permits(1);
+        assert!(futures::poll!(call.as_mut()).is_pending());
+    }
+    assert_eq!(end_entered.load(Ordering::SeqCst), 1);
+    if fail_response {
+        assert_eq!(&*seen.lock().unwrap(), &[10]);
+        assert!(results.lock().unwrap().is_empty());
+    } else {
+        let expected = if server_streaming { vec![10, 20] } else { vec![10] };
+        assert_eq!(*results.lock().unwrap(), expected);
+    }
+
+    end_release.add_permits(1);
+    tokio::time::timeout(std::time::Duration::from_secs(2), call)
+        .await
+        .expect("Consume must finish after EndRequest");
+    assert_eq!(end_entered.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn unary_consume_waits_for_response_and_end_request() {
+    check_response_and_end_boundaries(false, false).await;
+}
+
+#[tokio::test]
+async fn unary_response_error_still_waits_for_end_request() {
+    check_response_and_end_boundaries(false, true).await;
+}
+
+#[tokio::test]
+async fn server_streaming_responses_are_serial_and_consume_waits_for_end_request() {
+    check_response_and_end_boundaries(true, false).await;
+}
+
+#[tokio::test]
+async fn server_streaming_response_error_stops_delivery_and_waits_for_end_request() {
+    check_response_and_end_boundaries(true, true).await;
 }

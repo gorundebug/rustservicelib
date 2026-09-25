@@ -293,6 +293,74 @@ struct BlockingCollector {
     entered: Arc<Notify>,
     release: Arc<Notify>,
     completed: Arc<AtomicUsize>,
+    accept: bool,
+}
+
+#[tokio::test]
+async fn completed_collector_wins_over_cancellation() {
+    let (entry, _) = graph(Echo);
+    let collector = Arc::new(SubStreamCollectorFunc(
+        |context: MessageContext, _: Payload<i32>| async move {
+            context.cancel();
+            true
+        },
+    ));
+    entry
+        .consume(MessageContext::new(), 1, collector)
+        .await
+        .expect("a completed collector must win over cancellation, as in Go");
+}
+
+struct CancellationCleanup {
+    entered: Arc<Notify>,
+    completed: Arc<AtomicUsize>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl MapFunction<i32, i32> for CancellationCleanup {
+    async fn map(
+        &self,
+        context: MessageContext,
+        _: &dyn RuntimeStream,
+        _: &i32,
+        _: &Collector<i32>,
+    ) {
+        self.entered.notify_one();
+        context.cancelled().await;
+        self.release.notified().await;
+        self.completed.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn cancellation_does_not_drop_the_direct_business_call() {
+    let entered = Arc::new(Notify::new());
+    let completed = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(Notify::new());
+    let (entry, _) = graph(CancellationCleanup {
+        entered: entered.clone(),
+        completed: completed.clone(),
+        release: release.clone(),
+    });
+    let context = MessageContext::new();
+    let mut task = tokio::spawn({
+        let context = context.clone();
+        async move {
+            entry.consume(context, 1, Arc::new(Capture::default())).await
+        }
+    });
+    entered.notified().await;
+    context.cancel();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut task)
+            .await
+            .is_err(),
+        "Consume returned before direct business cleanup finished"
+    );
+    release.notify_one();
+    assert!(matches!(task.await.unwrap(), Err(RuntimeError::ContextCancelled)));
+    assert_eq!(completed.load(Ordering::SeqCst), 1);
 }
 
 #[async_trait]
@@ -301,12 +369,13 @@ impl SubStreamCollector<i32> for BlockingCollector {
         self.entered.notify_one();
         self.release.notified().await;
         self.completed.fetch_add(1, Ordering::SeqCst);
-        true
+        self.accept
     }
 }
 
 #[tokio::test]
 async fn cancellation_drains_an_active_direct_collector() {
+    for accept in [false, true] {
     let (entry, _) = graph(Echo);
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
@@ -318,6 +387,7 @@ async fn cancellation_drains_an_active_direct_collector() {
             entered: entered.clone(),
             release: release.clone(),
             completed: completed.clone(),
+            accept,
         });
         async move { entry.consume(context, 1, collector).await }
     });
@@ -328,11 +398,14 @@ async fn cancellation_drains_an_active_direct_collector() {
     }
     assert!(!task.is_finished());
     release.notify_one();
-    assert!(matches!(
-        task.await.unwrap(),
-        Err(RuntimeError::ContextCancelled)
-    ));
+    let result = task.await.unwrap();
+    if accept {
+        result.expect("a completed collector wins over cancellation");
+    } else {
+        assert!(matches!(result, Err(RuntimeError::ContextCancelled)));
+    }
     assert_eq!(completed.load(Ordering::SeqCst), 1);
+    }
 }
 
 #[tokio::test]
@@ -376,4 +449,162 @@ fn validates_body_result_and_service_ownership() {
         RuntimeStreamConfig::from(entry_config).transformation_type(),
         servicelib::api::TransformationType::SubStream
     );
+}
+
+#[tokio::test]
+async fn sibling_collectors_overlap_on_one_worker() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (entry, _) = graph(Echo);
+        let parent = MessageContext::new().with_stream_id("parent");
+        let entered = Arc::new(tokio::sync::Barrier::new(3));
+        let release = tokio_util::sync::CancellationToken::new();
+        let mut tasks = tokio::task::JoinSet::new();
+        for expected in [10, 20] {
+            let entry = entry.clone();
+            let parent = parent.clone();
+            let entered = entered.clone();
+            let release = release.clone();
+            tasks.spawn(async move {
+                let collector = Arc::new(SubStreamCollectorFunc(
+                    move |context: MessageContext, value: Payload<i32>| {
+                        let entered = entered.clone();
+                        let release = release.clone();
+                        async move {
+                            assert_eq!(context.stream_id(), Some("parent"));
+                            assert_eq!(*value, expected);
+                            entered.wait().await;
+                            release.cancelled().await;
+                            true
+                        }
+                    },
+                ));
+                entry.consume(parent, expected, collector).await.unwrap();
+            });
+        }
+        entered.wait().await;
+        assert!(tasks.try_join_next().is_none());
+        release.cancel();
+        while let Some(result) = tasks.join_next().await {
+            result.unwrap();
+        }
+    })
+    .await
+    .expect("independent collectors must not serialize or block the worker");
+}
+
+#[tokio::test]
+async fn concurrent_results_serialize_one_collector_and_drop_late_values() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let contexts = Arc::new(Mutex::new(Vec::new()));
+        let entered = Arc::new(Notify::new());
+        let (entry, output) = graph(Hold(contexts.clone(), entered.clone()));
+        let active = Arc::new(AtomicUsize::new(0));
+        let count = Arc::new(AtomicUsize::new(0));
+        let collector = Arc::new(SubStreamCollectorFunc({
+            let active = active.clone();
+            let count = count.clone();
+            move |_: MessageContext, _: Payload<i32>| {
+                let active = active.clone();
+                let count = count.clone();
+                async move {
+                    assert_eq!(active.fetch_add(1, Ordering::SeqCst), 0);
+                    tokio::task::yield_now().await;
+                    let complete = count.fetch_add(1, Ordering::SeqCst) + 1 == 50;
+                    assert_eq!(active.fetch_sub(1, Ordering::SeqCst), 1);
+                    complete
+                }
+            }
+        }));
+        let retained = Arc::downgrade(&collector);
+        let call = tokio::spawn(async move {
+            entry.consume(MessageContext::new(), 0, collector).await
+        });
+        entered.notified().await;
+        let context = contexts.lock().unwrap()[0].1.clone();
+        let mut deliveries = tokio::task::JoinSet::new();
+        for value in 0..100 {
+            let output = output.clone();
+            let context = context.clone();
+            deliveries.spawn(async move { output.emit(context, Payload::new(value)).await });
+        }
+        call.await.unwrap().unwrap();
+        while let Some(result) = deliveries.join_next().await {
+            result.unwrap();
+        }
+        output.emit(context, Payload::new(101)).await;
+        assert_eq!(count.load(Ordering::SeqCst), 50);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert!(retained.upgrade().is_none());
+    })
+    .await
+    .expect("result delivery must remain cooperative on one worker");
+}
+
+struct NestedForkJoin(SubStream<i32, i32>);
+
+#[async_trait]
+impl MapFunction<i32, i32> for NestedForkJoin {
+    async fn map(
+        &self,
+        context: MessageContext,
+        _: &dyn RuntimeStream,
+        _: &i32,
+        out: &Collector<i32>,
+    ) {
+        let invoke = |index: i32| {
+            let context = context.clone();
+            async move {
+                let values = Arc::new(Mutex::new(Vec::new()));
+                let collector = Arc::new(SubStreamCollectorFunc({
+                    let values = values.clone();
+                    move |context: MessageContext, value: Payload<i32>| {
+                        assert_eq!(context.stream_id(), Some("parent"));
+                        let mut values = values.lock().unwrap();
+                        values.push(*value);
+                        let complete = values.len() == 2;
+                        async move { complete }
+                    }
+                }));
+                self.0.consume(context, index, collector).await.unwrap();
+                let values = values.lock().unwrap();
+                assert_eq!(*values, vec![(index + 1) * 100 + 1, (index + 1) * 100 + 2]);
+                values.iter().sum::<i32>()
+            }
+        };
+        let (first, second) = tokio::join!(invoke(0), invoke(1));
+        out.collect(context, first + second).await;
+    }
+}
+
+#[tokio::test]
+async fn nested_fork_join_accepts_delayed_interleaved_results_on_one_worker() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for order in [[0, 0, 0, 1, 1, 1], [1, 1, 1, 0, 0, 0], [0, 1, 1, 1, 0, 0]] {
+            let contexts = Arc::new(Mutex::new(Vec::new()));
+            let entered = Arc::new(Notify::new());
+            let (inner, output) = graph(Hold(contexts.clone(), entered.clone()));
+            let (outer, _) = graph(NestedForkJoin(inner));
+            let capture = Arc::new(Capture::default());
+            let result = capture.clone();
+            let call = tokio::spawn(async move {
+                outer.consume(MessageContext::new().with_stream_id("parent"), 0, result).await
+            });
+            while contexts.lock().unwrap().len() < 2 {
+                entered.notified().await;
+            }
+            let mut jobs = contexts.lock().unwrap().clone();
+            jobs.sort_by_key(|(index, _)| *index);
+            assert!(!call.is_finished());
+            let mut sequence = [0, 0];
+            for index in order {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                sequence[index] += 1;
+                output.emit(jobs[index].1.clone(), Payload::new((index as i32 + 1) * 100 + sequence[index])).await;
+            }
+            call.await.unwrap().unwrap();
+            assert_eq!(*capture.0.lock().unwrap(), vec![606]);
+        }
+    })
+    .await
+    .expect("nested waiting must allow deferred results to run on one worker");
 }

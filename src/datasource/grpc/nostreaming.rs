@@ -136,14 +136,14 @@ where
 {
     pub async fn handle(&self, context: MessageContext, request: ReqT) -> HandlerResult<ResR> {
         let sender = Arc::new(UnarySender::new());
-        let (stream_id, pending) = self
+        let (stream_id, pending, lifecycle) = self
             .endpoint_consumer
-            .begin(context, sender.clone())
+            .begin_owned(context, sender.clone())
             .await?;
         sender.set_span(pending.span.clone());
-        let mut result = self.endpoint_consumer.consume(&pending, request).await;
+        let (mut lifecycle, mut result) = self.endpoint_consumer.consume_owned(lifecycle, &pending, request).await;
         if result.is_ok() {
-            self.endpoint_consumer.eof(&pending).await;
+            lifecycle = self.endpoint_consumer.eof_owned(lifecycle, &pending).await;
         }
 
         let response = if result.is_ok() {
@@ -176,7 +176,7 @@ where
         };
         result = self
             .endpoint_consumer
-            .finish(&stream_id, pending, result)
+            .finish_owned(lifecycle, stream_id, pending, result)
             .await;
         result?;
         Ok(response.or_else(|| sender.take()).unwrap_or_default())

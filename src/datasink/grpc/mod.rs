@@ -92,9 +92,6 @@ impl ResultContext {
         }
     }
 
-    pub(crate) fn with_span(span: &tracing::Span) -> Self {
-        Self::with_optional_span(Some(span))
-    }
 
     pub fn done(&self) {
         if let Some(span) = &self.span {
@@ -381,6 +378,21 @@ impl EndpointMetrics {
         }
     }
 
+    pub(crate) fn reject_closing_request(&self, span: Option<&tracing::Span>) {
+        const ERROR: &str = "gRPC streaming session is still completing";
+        if self.enabled {
+            self.request_errors.inc();
+        }
+        crate::runtime::telemetry::record_error_if_present!(span, ERROR);
+        crate::runtime::common::event_if_present!(span, || {
+            tracing::event!(
+                name: "consume_message.rejected",
+                tracing::Level::ERROR,
+                error = ERROR,
+            )
+        });
+    }
+
     pub(crate) fn grpc_client_start(&self) -> Option<GrpcClientObservation> {
         self.enabled.then(|| self.grpc_client_metrics.start())
     }
@@ -431,7 +443,7 @@ mod result_tracing_tests {
         tracing::subscriber::with_default(subscriber, || {
             let parent = tracing::info_span!("unrelated.parent");
             let _entered = parent.enter();
-            let result = ResultContext::with_span(&tracing::Span::none());
+            let result = ResultContext::with_optional_span(Some(&tracing::Span::none()));
             assert!(result.span.is_none());
             result.done();
             assert!(result.is_done());
@@ -446,7 +458,7 @@ mod result_tracing_tests {
         tracing::subscriber::with_default(subscriber, || {
             let span = tracing::info_span!("grpc.output.test");
             assert!(!span.is_disabled());
-            let result = ResultContext::with_span(&span);
+            let result = ResultContext::with_optional_span(Some(&span));
             assert!(result.span.is_some());
             result.done();
             assert!(result.is_done());
@@ -465,8 +477,9 @@ mod result_tracing_tests {
             let compact: String = source.chars().filter(|ch| !ch.is_whitespace()).collect();
             assert!(compact.contains(concat!(
                 "ifstream.stream().environment().tracing_enabled()&&context.sampling_enabled(){",
-                "start_output_span(context,stream.as_ref(),self.metrics.rpc_method())",
-                "}else{(context,tracing::Span::none())}"
+                "let(context,span)=start_output_span(context,stream.as_ref(),self.metrics.rpc_method());",
+                "(context,(!span.is_disabled()).then_some(span))",
+                "}else{(context,None)}"
             )));
         }
     }

@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 use async_trait::async_trait;
 use tokio::sync::Mutex as AsyncMutex;
@@ -23,6 +26,7 @@ struct Call<R: Send + Sync + 'static> {
     callback: Mutex<Option<Callback<R>>>,
     gate: AsyncMutex<()>,
     done: CancellationToken,
+    completed: AtomicBool,
 }
 
 impl<R: Send + Sync + 'static> Call<R> {
@@ -54,6 +58,7 @@ impl<R: Send + Sync + 'static> Call<R> {
         }
         // Restore the caller's outer invocation for nested calls from a collector.
         if collector.out(context, payload).await {
+            self.completed.store(true, Ordering::Release);
             self.close();
         }
     }
@@ -154,6 +159,7 @@ impl<T: Send + Sync + 'static, R: Send + Sync + 'static> SubStream<T, R> {
             })),
             gate: AsyncMutex::new(()),
             done: CancellationToken::new(),
+            completed: AtomicBool::new(false),
         });
         let _guard = CallGuard(Arc::clone(&call));
         let dispatch_context = context
@@ -178,32 +184,22 @@ impl<T: Send + Sync + 'static, R: Send + Sync + 'static> SubStream<T, R> {
         value: T,
         call: &Call<R>,
     ) -> RuntimeResult<()> {
-        let dispatch = self.stream().emit(dispatch_context, Payload::new(value));
-        tokio::pin!(dispatch);
+        // Like Go's Emit, a direct call returns only after its business code
+        // finishes. Cancellation is cooperative; do not drop that code's future.
+        self.stream().emit(dispatch_context, Payload::new(value)).await;
         tokio::select! {
-            biased;
-            _ = context.cancelled() => {
-                call.close();
-                // A direct callback may be part of this same future. Keep polling
-                // it while draining rather than dropping it or deadlocking on its gate.
-                let drain = call.gate.lock();
-                tokio::pin!(drain);
-                tokio::select! {
-                    _ = &mut drain => {},
-                    _ = &mut dispatch => { let _gate = drain.await; },
-                }
-                return Err(RuntimeError::ContextCancelled);
-            },
-            _ = &mut dispatch => {},
+            _ = context.cancelled() => {},
+            _ = call.done.cancelled() => {},
         }
-        let result = tokio::select! {
-            biased;
-            _ = context.cancelled() => Err(RuntimeError::ContextCancelled),
-            _ = call.done.cancelled() => Ok(()),
-        };
-        call.close();
+        // A collector that already started may finish successfully while the
+        // caller is cancelled. Drain it before deciding, matching Go's close().
         let _gate = call.gate.lock().await;
-        result
+        call.close();
+        if call.completed.load(Ordering::Acquire) {
+            Ok(())
+        } else {
+            Err(RuntimeError::ContextCancelled)
+        }
     }
 }
 
