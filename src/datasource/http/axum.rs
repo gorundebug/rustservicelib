@@ -729,22 +729,16 @@ where
         let context = MessageContext::new();
         let _request_cancellation = RequestCancellationGuard(context.clone());
         let consumer = Arc::clone(&self);
-        // One owned task at the transport boundary, not on graph edges.
-        // Dropping the response future cancels the context without dropping
-        // ConsumeMessage/EndRequest or losing their pending-request cleanup.
-        let task = self.request_tasks.spawn(async move {
+        // Run on the transport task in the normal case. Cancellation transfers
+        // the owned operation to Tokio without dropping ConsumeMessage or
+        // EndRequest. Its tracker token remains live throughout that transfer.
+        let request_context = context.clone();
+        let operation = self.request_tasks.track_future(async move {
             consumer
                 .serve_http_request(request, expected_method, context)
                 .await
         });
-        match task.await {
-            Ok(response) => response,
-            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
-            Err(_) => Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::empty())
-                .expect("valid HTTP task cancellation response"),
-        }
+        crate::runtime::common::CompleteOnDrop::new(request_context, operation).await
     }
 
     async fn serve_http_request(

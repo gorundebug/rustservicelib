@@ -58,7 +58,9 @@ fn traceparent_is_sampled(value: &str) -> bool {
 /// Links without tracing do not construct even a disabled span.
 macro_rules! instrument_if_present {
     ($future:expr, $span:ident $(,)?) => {{
-        let future = $future;
+        // Keep the future in place; only its pinned reference enters either
+        // branch, including the tracing wrapper.
+        let future = ::core::pin::pin!($future);
         match &$span {
             Some(span) if !span.is_disabled() => {
                 ::tracing::Instrument::instrument(future, ::tracing::Span::clone(span)).await
@@ -67,7 +69,7 @@ macro_rules! instrument_if_present {
         }
     }};
     ($future:expr, $span:expr $(,)?) => {{
-        let future = $future;
+        let future = ::core::pin::pin!($future);
         match $span {
             Some(span) if !span.is_disabled() => {
                 ::tracing::Instrument::instrument(future, span).await
@@ -672,9 +674,266 @@ impl MessageContext {
     }
 }
 
+// Transport work normally stays on the caller's task. If the caller abandons
+// it, cancellation is signalled but the admitted handler retains ownership
+// until its finalizer completes.
+pub(crate) struct CompleteOnDrop<F: std::future::Future + Send + 'static>
+where
+    F::Output: Send + 'static,
+{
+    future: Option<std::pin::Pin<Box<F>>>,
+    context: MessageContext,
+    polling: bool,
+}
+
+impl<F: std::future::Future + Send + 'static> CompleteOnDrop<F>
+where
+    F::Output: Send + 'static,
+{
+    pub(crate) fn new(context: MessageContext, future: F) -> Self {
+        Self {
+            future: Some(Box::pin(future)),
+            context,
+            polling: false,
+        }
+    }
+}
+
+impl<F: std::future::Future + Send + 'static> std::future::Future for CompleteOnDrop<F>
+where
+    F::Output: Send + 'static,
+{
+    type Output = F::Output;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        // A panicked future cannot be resumed, even if its owner is dropped
+        // after the executor has caught the panic.
+        this.polling = true;
+        let result = this
+            .future
+            .as_mut()
+            .expect("completed transport operation polled")
+            .as_mut()
+            .poll(context);
+        this.polling = false;
+        if result.is_ready() {
+            this.future = None;
+        }
+        result
+    }
+}
+
+impl<F: std::future::Future + Send + 'static> Drop for CompleteOnDrop<F>
+where
+    F::Output: Send + 'static,
+{
+    fn drop(&mut self) {
+        if let Some(future) = self.future.take() {
+            self.context.cancel();
+            if !self.polling {
+                tokio::spawn(async move {
+                    drop(future.await);
+                });
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn complete_on_drop_keeps_cleanup_tracked_after_caller_cancellation() {
+        let tracker = tokio_util::task::TaskTracker::new();
+        let context = MessageContext::new();
+        let handler_context = context.clone();
+        let (cancelled, cancellation) = tokio::sync::oneshot::channel();
+        let (release, resume) = tokio::sync::oneshot::channel();
+        let retained = Arc::new(());
+        let weak = Arc::downgrade(&retained);
+        let mut operation = Box::pin(CompleteOnDrop::new(
+            context.clone(),
+            tracker.track_future(async move {
+                handler_context.cancelled().await;
+                cancelled.send(()).unwrap();
+                resume.await.unwrap();
+                drop(retained);
+            }),
+        ));
+        assert!(futures::poll!(operation.as_mut()).is_pending());
+        drop(operation);
+        assert!(context.is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(5), cancellation)
+            .await
+            .unwrap()
+            .unwrap();
+        tracker.close();
+        let mut completed = Box::pin(tracker.wait());
+        assert!(futures::poll!(completed.as_mut()).is_pending());
+        assert!(weak.upgrade().is_some());
+        release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), completed)
+            .await
+            .unwrap();
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn complete_on_drop_does_not_resume_a_panicked_future() {
+        let context = MessageContext::new();
+        let retained = Arc::new(());
+        let weak = Arc::downgrade(&retained);
+        let mut operation = Box::pin(CompleteOnDrop::new(context.clone(), async move {
+            let _retained = retained;
+            panic!("intentional transport handler panic");
+        }));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+            let _ = std::future::Future::poll(operation.as_mut(), &mut context);
+        }));
+        assert!(result.is_err());
+        drop(operation);
+        assert!(context.is_cancelled());
+        assert!(weak.upgrade().is_none());
+    }
+
+    struct InstrumentationProbe {
+        bytes: [u8; 4096],
+        address: std::cell::Cell<usize>,
+        polls: Arc<std::sync::atomic::AtomicUsize>,
+        drops: Arc<std::sync::atomic::AtomicUsize>,
+        expected_span: Option<&'static str>,
+        _pinned: std::marker::PhantomPinned,
+    }
+
+    impl InstrumentationProbe {
+        fn new(
+            polls: Arc<std::sync::atomic::AtomicUsize>,
+            drops: Arc<std::sync::atomic::AtomicUsize>,
+            expected_span: Option<&'static str>,
+        ) -> Self {
+            Self {
+                bytes: [7; 4096],
+                address: std::cell::Cell::new(0),
+                polls,
+                drops,
+                expected_span,
+                _pinned: std::marker::PhantomPinned,
+            }
+        }
+    }
+
+    impl std::future::Future for InstrumentationProbe {
+        type Output = u8;
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            let probe = self.as_ref().get_ref();
+            let address = std::ptr::from_ref(probe) as usize;
+            let previous = probe.address.replace(address);
+            assert!(previous == 0 || previous == address);
+            assert_eq!(
+                tracing::Span::current().metadata().map(|span| span.name()),
+                probe.expected_span
+            );
+            if probe
+                .polls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 0
+            {
+                context.waker().wake_by_ref();
+                std::task::Poll::Pending
+            } else {
+                std::task::Poll::Ready(probe.bytes[0])
+            }
+        }
+    }
+
+    impl Drop for InstrumentationProbe {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn optional_instrumentation_preserves_pinning_span_and_drop() {
+        tracing::subscriber::with_default(tracing_subscriber::registry(), || {
+            for span in [
+                None,
+                Some(tracing::Span::none()),
+                Some(tracing::info_span!("probe")),
+            ] {
+                let expected = span
+                    .as_ref()
+                    .and_then(|span| span.metadata())
+                    .map(|span| span.name());
+                let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let probe = InstrumentationProbe::new(polls.clone(), drops.clone(), expected);
+                let result =
+                    futures::executor::block_on(async { instrument_if_present!(probe, span) });
+                assert_eq!(result, 7);
+                assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 2);
+                assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 1);
+                assert!(tracing::Span::current().is_none());
+            }
+        });
+    }
+
+    #[test]
+    fn optional_instrumentation_expression_releases_suspended_future() {
+        tracing::subscriber::with_default(tracing_subscriber::registry(), || {
+            let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let span = tracing::info_span!("cancelled-probe");
+            {
+                let probe = InstrumentationProbe::new(
+                    polls.clone(),
+                    drops.clone(),
+                    Some("cancelled-probe"),
+                );
+                let mut future =
+                    std::pin::pin!(async { instrument_if_present!(probe, Some(span)) });
+                let mut context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+                assert!(std::future::Future::poll(future.as_mut(), &mut context).is_pending());
+                assert!(tracing::Span::current().is_none());
+            }
+            assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn optional_instrumentation_evaluates_expressions_once() {
+        let future_evaluations = std::cell::Cell::new(0);
+        let span_evaluations = std::cell::Cell::new(0);
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let result = futures::executor::block_on(async {
+            instrument_if_present!(
+                {
+                    future_evaluations.set(future_evaluations.get() + 1);
+                    InstrumentationProbe::new(polls.clone(), drops.clone(), None)
+                },
+                {
+                    span_evaluations.set(span_evaluations.get() + 1);
+                    Some(tracing::Span::none())
+                },
+            )
+        });
+        assert_eq!(result, 7);
+        assert_eq!(future_evaluations.get(), 1);
+        assert_eq!(span_evaluations.get(), 1);
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn untraced_metadata_preserves_headers_without_enabling_sampling() {
@@ -752,8 +1011,8 @@ pub fn new_stream_id() -> String {
     format!("{timestamp:x}-{sequence:x}")
 }
 
-/// The graph's consumer contract. Concrete links await this future directly;
-/// they do not allocate a box merely to call the next operator.
+/// The graph's consumer contract. Implementations retain concrete future types;
+/// graph links bound continuation storage without erasing those types.
 pub trait Consumer<T>: Send + Sync
 where
     T: Send + Sync + 'static,

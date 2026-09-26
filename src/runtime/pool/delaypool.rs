@@ -1,6 +1,5 @@
 use std::{
     future::Future,
-    pin::Pin,
     sync::{
         Arc, OnceLock,
         atomic::{AtomicUsize, Ordering},
@@ -8,15 +7,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use futures::{
-    FutureExt, StreamExt,
-    future::{BoxFuture, Shared},
-    stream::FuturesUnordered,
-};
-use tokio::{
-    sync::{Mutex, mpsc},
-    task::JoinSet,
-};
+use tokio::sync::Mutex;
+use tokio_util::task::TaskTracker;
 
 use crate::runtime::{
     common::MessageContext,
@@ -28,17 +20,13 @@ use crate::runtime::{
 
 struct DelayPoolState {
     stopped: bool,
-    sender: Option<mpsc::UnboundedSender<ScheduledDelay>>,
-    worker: Option<Shared<BoxFuture<'static, ()>>>,
 }
 
-type BoxDelayTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
-
-struct ScheduledDelay {
+struct ScheduledDelay<F> {
     context: MessageContext,
     run_at: tokio::time::Instant,
     expedited_by_deadline: bool,
-    task: BoxDelayTask,
+    task: F,
     metrics: Option<DelayPoolMetrics>,
     active_tasks: Arc<AtomicUsize>,
 }
@@ -50,6 +38,7 @@ struct ScheduledDelay {
 /// uses the latter, exactly like the Go operator.
 pub struct DelayPool {
     state: Mutex<DelayPoolState>,
+    tasks: TaskTracker,
     metrics: OnceLock<Option<DelayPoolMetrics>>,
     active_tasks: Arc<AtomicUsize>,
 }
@@ -57,11 +46,8 @@ pub struct DelayPool {
 impl Default for DelayPool {
     fn default() -> Self {
         Self {
-            state: Mutex::new(DelayPoolState {
-                stopped: false,
-                sender: None,
-                worker: None,
-            }),
+            state: Mutex::new(DelayPoolState { stopped: false }),
+            tasks: TaskTracker::new(),
             metrics: OnceLock::new(),
             active_tasks: Arc::new(AtomicUsize::new(0)),
         }
@@ -132,45 +118,6 @@ impl DelayPool {
         Ok(())
     }
 
-    async fn run(mut receiver: mpsc::UnboundedReceiver<ScheduledDelay>) {
-        // Only readiness futures are polled by this worker. User callbacks run
-        // in independent Tokio tasks, never inline in the timer scheduler.
-        let mut delays = FuturesUnordered::new();
-        let mut callbacks = JoinSet::new();
-        let mut accepting = true;
-        while accepting || !delays.is_empty() || !callbacks.is_empty() {
-            tokio::select! {
-                scheduled = receiver.recv(), if accepting => match scheduled {
-                    Some(scheduled) => delays.push(scheduled.wait_ready()),
-                    None => accepting = false,
-                },
-                Some((scheduled, cancelled)) = delays.next(), if !delays.is_empty() => {
-                    callbacks.spawn(scheduled.execute(cancelled));
-                },
-                _ = callbacks.join_next(), if !callbacks.is_empty() => {}
-            }
-        }
-    }
-
-    fn send_scheduled(
-        sender: &mpsc::UnboundedSender<ScheduledDelay>,
-        scheduled: ScheduledDelay,
-    ) -> RuntimeResult<()> {
-        if let Some(metrics) = &scheduled.metrics {
-            metrics.wait_queue_length.inc();
-        }
-        scheduled.active_tasks.fetch_add(1, Ordering::Relaxed);
-        if let Err(error) = sender.send(scheduled) {
-            let scheduled = error.0;
-            if let Some(metrics) = &scheduled.metrics {
-                metrics.wait_queue_length.dec();
-            }
-            scheduled.active_tasks.fetch_sub(1, Ordering::Relaxed);
-            return Err(RuntimeError::ResourceStopped("delay".to_owned()));
-        }
-        Ok(())
-    }
-
     pub async fn delay<F>(
         &self,
         context: MessageContext,
@@ -198,38 +145,33 @@ impl DelayPool {
         };
         let expedited_by_deadline = requested_at.is_none_or(|requested| run_at < requested);
         let metrics = self.metrics.get().cloned().flatten();
-        let scheduled = ScheduledDelay {
+        let mut scheduled = ScheduledDelay {
             context,
             run_at,
             expedited_by_deadline,
-            task: Box::pin(task),
+            task,
             metrics,
             active_tasks: Arc::clone(&self.active_tasks),
         };
 
-        let mut state = self.state.lock().await;
+        let state = self.state.lock().await;
         if state.stopped {
             return Err(RuntimeError::ResourceStopped("delay".to_owned()));
         }
-        if state.sender.is_none() {
-            let (sender, receiver) = mpsc::unbounded_channel();
-            state.sender = Some(sender);
-            let worker = tokio::spawn(Self::run(receiver));
-            state.worker = Some(
-                async move {
-                    let _ = worker.await;
-                }
-                .boxed()
-                .shared(),
-            );
+        if let Some(metrics) = &scheduled.metrics {
+            metrics.wait_queue_length.inc();
         }
-        Self::send_scheduled(
-            state
-                .sender
-                .as_ref()
-                .expect("delay worker sender initialized"),
-            scheduled,
-        )
+        scheduled.active_tasks.fetch_add(1, Ordering::Relaxed);
+        // Admission and tracker closure share the same lock. One task owns
+        // both the wait and callback, without an intermediate scheduler queue
+        // or another spawn when the timer fires. Completed tasks are not kept.
+        // Pin the complete scheduled operation at the scheduler boundary, so
+        // moving it through the tracker and executor moves only its pointer.
+        self.tasks.spawn(Box::pin(async move {
+            let cancelled = scheduled.wait_ready().await;
+            scheduled.execute(cancelled).await;
+        }));
+        Ok(())
     }
 
     pub async fn stop(&self) {
@@ -237,17 +179,15 @@ impl DelayPool {
     }
 
     pub async fn stop_with_context(&self, context: MessageContext) {
-        let worker = {
+        {
             let mut state = self.state.lock().await;
             state.stopped = true;
-            state.sender.take();
-            state.worker.clone()
-        };
-        let Some(mut worker) = worker else {
-            return;
-        };
+            self.tasks.close();
+        }
+        let tasks = self.tasks.wait();
+        tokio::pin!(tasks);
         let timed_out = tokio::select! {
-            _ = &mut worker => false,
+            _ = &mut tasks => false,
             _ = context.cancelled() => true,
         };
         if timed_out {
@@ -256,25 +196,55 @@ impl DelayPool {
             }
             tracing::warn!("delay pool stopped by timeout");
             // The deadline is diagnostic only. Accepted callbacks may retain
-            // graph observers, so the worker must retire before graph teardown.
-            let _ = worker.await;
+            // graph observers, so they must retire before graph teardown.
+            tasks.await;
         }
     }
 }
 
-impl ScheduledDelay {
-    async fn wait_ready(self) -> (Self, bool) {
+#[cfg(test)]
+mod task_storage_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[tokio::test]
+    async fn scheduled_callback_can_be_send_without_sync_and_suspend() {
+        let pool = DelayPool::new();
+        let completed = Arc::new(AtomicUsize::new(0));
+        let result = completed.clone();
+        // Cell deliberately makes this future !Sync. Admission only requires
+        // Send, including while the timer borrows its scheduled callback.
+        let local = Cell::new(0);
+        pool.delay(MessageContext::new(), Duration::from_millis(1), async move {
+            local.set(1);
+            tokio::task::yield_now().await;
+            local.set(local.get() + 1);
+            result.store(local.get(), Ordering::Release);
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), pool.stop())
+            .await
+            .expect("accepted callback must finish before the pool stops");
+        assert_eq!(completed.load(Ordering::Acquire), 2);
+    }
+}
+
+impl<F> ScheduledDelay<F>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    async fn wait_ready(&mut self) -> bool {
         // Absolute admission-time deadline: backlog in the scheduler must not
         // restart a relative delay when it eventually receives the entry.
-        let cancelled = if self.run_at <= tokio::time::Instant::now() {
+        if self.run_at <= tokio::time::Instant::now() {
             self.expedited_by_deadline || self.context.is_cancelled()
         } else {
             tokio::select! {
                 _ = tokio::time::sleep_until(self.run_at) => self.expedited_by_deadline,
                 _ = self.context.cancelled() => true,
             }
-        };
-        (self, cancelled)
+        }
     }
 
     async fn execute(self, cancelled: bool) {

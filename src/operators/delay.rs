@@ -172,7 +172,12 @@ where
                                     }
                                     return;
                                 }
-                                output.emit(delayed_context, payload).await;
+                                // Keep the waiting callback independent of the size of
+                                // the downstream graph's future. Construct that future
+                                // only after the delay fires and cancellation is checked.
+                                // This is a static future, boxed at the timer boundary,
+                                // not dynamic dispatch on each graph edge.
+                                Box::pin(output.emit(delayed_context, payload)).await;
                             },
                             delayed_span,
                         );

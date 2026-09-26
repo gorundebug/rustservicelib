@@ -64,55 +64,7 @@ impl std::fmt::Display for RequestContextCancelled {
 
 impl Error for RequestContextCancelled {}
 
-// Poll normally on the caller's task. Only an abandoned, already-started
-// operation is transferred to Tokio so its handler and finalizer can finish.
-struct CompleteOnDrop<F: Future + Send + 'static>
-where
-    F::Output: Send + 'static,
-{
-    future: Option<Pin<Box<F>>>,
-    context: MessageContext,
-}
-
-impl<F: Future + Send + 'static> Future for CompleteOnDrop<F>
-where
-    F::Output: Send + 'static,
-{
-    type Output = F::Output;
-
-    fn poll(
-        self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        let this = self.get_mut();
-        let result = this
-            .future
-            .as_mut()
-            .expect("completed gRPC operation polled")
-            .as_mut()
-            .poll(cx);
-        if result.is_ready() {
-            this.future = None;
-        }
-        result
-    }
-}
-
-impl<F: Future + Send + 'static> Drop for CompleteOnDrop<F>
-where
-    F::Output: Send + 'static,
-{
-    fn drop(&mut self) {
-        if let Some(future) = self.future.take() {
-            self.context.cancel();
-            // Cancellation is not finalization. Keep result callbacks available
-            // until the admitted handler finishes, as in the Go source boundary.
-            tokio::spawn(async move {
-                drop(future.await);
-            });
-        }
-    }
-}
+use crate::runtime::common::CompleteOnDrop;
 
 struct RequestLifecycle {
     cleanup: Option<BoxFuture<HandlerResult>>,
@@ -126,13 +78,10 @@ impl RequestLifecycle {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        CompleteOnDrop {
-            context: self.context.clone(),
-            future: Some(Box::pin(async move {
-                let output = future.await;
-                (self, output)
-            })),
-        }
+        CompleteOnDrop::new(self.context.clone(), async move {
+            let output = future.await;
+            (self, output)
+        })
     }
 
     fn finish<F>(mut self, future: F) -> CompleteOnDrop<F>
@@ -141,10 +90,7 @@ impl RequestLifecycle {
         F::Output: Send + 'static,
     {
         self.cleanup = None;
-        CompleteOnDrop {
-            context: self.context.clone(),
-            future: Some(Box::pin(future)),
-        }
+        CompleteOnDrop::new(self.context.clone(), future)
     }
 }
 
@@ -496,28 +442,25 @@ where
     )> {
         let context = context.child();
         let consumer = Arc::clone(self);
-        CompleteOnDrop {
-            context: context.clone(),
-            future: Some(Box::pin(async move {
-                let (stream_id, pending) = consumer.begin(context.clone(), sender).await?;
-                let cleanup_id = stream_id.clone();
-                let cleanup_pending = Arc::clone(&pending);
-                let lifecycle = RequestLifecycle {
-                    context,
-                    closing: pending.closing.clone(),
-                    cleanup: Some(Box::pin(async move {
-                        consumer
-                            .finish(
-                                &cleanup_id,
-                                cleanup_pending,
-                                Err(Box::new(RequestContextCancelled)),
-                            )
-                            .await
-                    })),
-                };
-                Ok((stream_id, pending, lifecycle))
-            })),
-        }
+        CompleteOnDrop::new(context.clone(), async move {
+            let (stream_id, pending) = consumer.begin(context.clone(), sender).await?;
+            let cleanup_id = stream_id.clone();
+            let cleanup_pending = Arc::clone(&pending);
+            let lifecycle = RequestLifecycle {
+                context,
+                closing: pending.closing.clone(),
+                cleanup: Some(Box::pin(async move {
+                    consumer
+                        .finish(
+                            &cleanup_id,
+                            cleanup_pending,
+                            Err(Box::new(RequestContextCancelled)),
+                        )
+                        .await
+                })),
+            };
+            Ok((stream_id, pending, lifecycle))
+        })
         .await
     }
 

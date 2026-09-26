@@ -2,7 +2,7 @@ use std::{marker::PhantomData, sync::Arc};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::runtime::{
-    common::{Consumer, MessageContext, Payload},
+    common::{Consumer, ErasedConsumer, MessageContext, Payload},
     config::CallSemantics,
     environment::{
         CallStatistics, RuntimeEnvironment, RuntimeResult,
@@ -12,10 +12,47 @@ use crate::runtime::{
     stream::Stream,
 };
 
+// Sized consumers retain their concrete future type. The existing erased
+// consumer already returns a pinned box and must not be boxed a second time.
+pub(crate) trait ConsumerCall<T>: Consumer<T>
+where
+    T: Send + Sync + 'static,
+{
+    fn consume_call(
+        &self,
+        context: MessageContext,
+        payload: Payload<T>,
+    ) -> impl std::future::Future<Output = ()> + Send;
+}
+
+impl<T, N> ConsumerCall<T> for N
+where
+    T: Send + Sync + 'static,
+    N: Consumer<T>,
+{
+    fn consume_call(
+        &self,
+        context: MessageContext,
+        payload: Payload<T>,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        Box::pin(self.consume(context, payload))
+    }
+}
+
+impl<T: Send + Sync + 'static> ConsumerCall<T> for dyn ErasedConsumer<T> + '_ {
+    fn consume_call(
+        &self,
+        context: MessageContext,
+        payload: Payload<T>,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        self.consume_erased(context, payload)
+    }
+}
+
 pub(crate) struct LinkCollector<T, N: ?Sized = dyn crate::runtime::common::ErasedConsumer<T>>
 where
     T: Send + Sync + 'static,
-    N: Consumer<T> + 'static,
+    N: ConsumerCall<T> + 'static,
 {
     consumer: Arc<N>,
     value_type: PhantomData<fn(T)>,
@@ -196,7 +233,7 @@ where
 impl<T, N: ?Sized> LinkCollector<T, N>
 where
     T: Send + Sync + 'static,
-    N: Consumer<T> + 'static,
+    N: ConsumerCall<T> + 'static,
 {
     pub fn new(
         consumer: Arc<N>,
@@ -339,7 +376,7 @@ pub(crate) fn short_type_name<T>() -> String {
 impl<T, N: ?Sized> Collect<T> for LinkCollector<T, N>
 where
     T: Send + Sync + 'static,
-    N: Consumer<T> + 'static,
+    N: ConsumerCall<T> + 'static,
 {
     fn out(
         &self,
@@ -357,8 +394,11 @@ where
         match &self.caller {
             Caller::FunctionCall(_) => {
                 let (context, span) = self.start_span(context, None, None);
+                // Keep the concrete consumer type, but do not embed its entire
+                // continuation in every upstream future. This remains a direct
+                // await on the caller's task, not a scheduling boundary.
                 crate::runtime::common::instrument_if_present!(
-                    self.consumer.consume(context, payload),
+                    self.consumer.consume_call(context, payload),
                     span,
                 );
             }

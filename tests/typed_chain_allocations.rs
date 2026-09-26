@@ -151,7 +151,7 @@ fn environment() -> RuntimeEnvironment {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn typed_chain_has_no_per_node_future_allocations() {
+async fn typed_chain_boxes_concrete_continuations_once_per_link_call() {
     const CALLS: usize = 100;
     let environment = environment();
     let root = Stream::<[u32; 2]>::new(&config(1, 0), environment.clone());
@@ -200,12 +200,12 @@ async fn typed_chain_has_no_per_node_future_allocations() {
         "typed chain: future={typed_future_size} public_future={public_future_size} calls={CALLS} typed={typed_allocations:?} public={public_entry_allocations:?}"
     );
     assert_eq!(
-        typed_allocations.calls, 0,
-        "the typed path must not box each operator future"
+        typed_allocations.calls, CALLS * 5,
+        "one concrete continuation per link call: one iterable, two KeyBy, two terminal"
     );
     assert_eq!(
-        public_entry_allocations.calls, CALLS,
-        "only the erased public Stream entry boxes a future"
+        public_entry_allocations.calls, CALLS * 6,
+        "the public Stream entry adds one erased future to the concrete link continuations"
     );
     assert_eq!(total.load(Ordering::Relaxed), (CALLS * 2 + 2) * 3);
     environment.delay_pool().stop().await;
@@ -237,8 +237,64 @@ async fn dynamic_control_counts_each_operator_boundary() {
     let allocations = measurement.finish();
 
     // One iterable call, two KeyBy calls, and two terminal calls per array.
+    // The dynamic path reuses its existing box at each boundary.
     eprintln!("dynamic control: calls={CALLS} allocations={allocations:?}");
     assert_eq!(allocations.calls, CALLS * 5);
     assert_eq!(total.load(Ordering::Relaxed), (CALLS + 1) * 3);
     environment.delay_pool().stop().await;
+}
+
+struct PaddedCapture<const BYTES: usize>(Arc<AtomicUsize>);
+
+impl<const BYTES: usize> Consumer<KeyValue<u32, u32>> for PaddedCapture<BYTES> {
+    async fn consume(&self, _: MessageContext, value: Payload<KeyValue<u32, u32>>) {
+        let mut state = [0_u8; BYTES];
+        std::hint::black_box(&mut state);
+        tokio::task::yield_now().await;
+        std::hint::black_box(&state);
+        self.0.fetch_add(value.value as usize, Ordering::Relaxed);
+    }
+}
+
+async fn padded_chain_sizes<const BYTES: usize>() -> (usize, usize) {
+    let environment = environment();
+    let root = Stream::<[u32; 2]>::new(&config(1, 0), environment.clone());
+    let items = Stream::<u32>::new(&config(2, 1), environment.clone());
+    let keyed = Stream::derived(
+        &config(3, 2),
+        environment.clone(),
+        make_stream_key_value_serde::<u32, u32>(environment.make_serde(), environment.make_serde()),
+    );
+    let total = Arc::new(AtomicUsize::new(0));
+    let terminal = Arc::new(PaddedCapture::<BYTES>(total.clone()));
+    let terminal_size = std::mem::size_of_val(&terminal.consume(
+        MessageContext::new(),
+        Payload::new(KeyValue { key: 1, value: 1 }),
+    ));
+    let output = keyed.try_set_typed_consumer(terminal, 4).unwrap();
+    let output = items
+        .try_set_typed_consumer(Arc::new(KeyByStream::from_collector(output, Key)), 3)
+        .unwrap();
+    let input = root
+        .try_set_typed_consumer(
+            Arc::new(FlatMapIterableStream::<[u32; 2], u32>::from_collector(output)),
+            2,
+        )
+        .unwrap();
+    environment.build_runtime_streams().unwrap();
+    let continuation_size =
+        std::mem::size_of_val(&input.collect(MessageContext::new(), [1, 2]));
+    input.collect(MessageContext::new(), [1, 2]).await;
+    root.emit(MessageContext::new(), Payload::new([1, 2])).await;
+    assert_eq!(total.load(Ordering::Relaxed), 6);
+    environment.delay_pool().stop().await;
+    (terminal_size, continuation_size)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn large_suspended_consumer_does_not_expand_upstream_future() {
+    let (small_terminal, small_chain) = padded_chain_sizes::<0>().await;
+    let (large_terminal, large_chain) = padded_chain_sizes::<65536>().await;
+    assert!(large_terminal >= small_terminal + 65536);
+    assert_eq!(large_chain, small_chain);
 }

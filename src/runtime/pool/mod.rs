@@ -3,7 +3,7 @@ mod prioritytaskpool;
 mod queuedpool;
 mod taskpool;
 
-use std::{any::Any, panic::AssertUnwindSafe};
+use std::{any::Any, future::Future, panic::AssertUnwindSafe};
 
 use futures::FutureExt;
 
@@ -11,7 +11,10 @@ pub use delaypool::DelayPool;
 pub use prioritytaskpool::PriorityTaskPool;
 pub use taskpool::{BoxTask, TaskPool};
 
-async fn run_task(pool: &str, task: BoxTask) {
+async fn run_task<F>(pool: &str, task: F)
+where
+    F: Future<Output = ()> + Send,
+{
     if let Err(panic) = AssertUnwindSafe(task).catch_unwind().await {
         tracing::error!(
             pool,

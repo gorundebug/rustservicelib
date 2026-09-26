@@ -26,6 +26,107 @@ use servicelib::{
 use tokio::sync::Mutex as AsyncMutex;
 use tower::ServiceExt;
 
+struct PanickingHandler;
+
+#[async_trait]
+impl EndpointHandler<(), (), (), u32, u32, String> for PanickingHandler {
+    async fn begin_request(
+        &self,
+        context: MessageContext,
+        _: StreamContext<u32, u32, String>,
+        _: HandlerData,
+    ) -> Result<(MessageContext, ()), HandlerError> {
+        Ok((context, ()))
+    }
+
+    async fn consume_message(
+        &self,
+        _: MessageContext,
+        _: StreamContext<u32, u32, String>,
+        _: Arc<AsyncMutex<()>>,
+        _: HandlerData,
+        _: Arc<ResultContext<(), (), (), u32, u32, String>>,
+    ) -> HandlerResult {
+        panic!("HTTP handler panic probe");
+    }
+
+    async fn get_message_id(
+        &self,
+        _: &MessageContext,
+        _: &StreamContext<u32, u32, String>,
+        _: Arc<AsyncMutex<()>>,
+        value: &u32,
+    ) -> String {
+        value.to_string()
+    }
+
+    async fn end_request(
+        &self,
+        _: MessageContext,
+        _: StreamContext<u32, u32, String>,
+        _: &HandlerResult,
+        _: Arc<AsyncMutex<()>>,
+        _: HandlerData,
+    ) {
+    }
+}
+
+#[tokio::test]
+async fn http_handler_panic_propagates_without_becoming_a_response() {
+    use futures::FutureExt;
+    use std::panic::AssertUnwindSafe;
+
+    let environment = RuntimeEnvironment::default();
+    let input_config = InputStreamConfig {
+        stream: StreamConfig::new(1, "panic input"),
+        endpoint_id: 7,
+    };
+    environment.publish_runtime_config(Arc::new(
+        RuntimeConfig::from_parts(
+            CallSemantics::FunctionCall,
+            [],
+            [RuntimeStreamConfig::from(input_config.clone())],
+            [],
+            [],
+            [],
+            [],
+        )
+        .unwrap(),
+    ));
+    let endpoint_config = HttpEndpointConfig {
+        id: 7,
+        name: "panic endpoint".to_owned(),
+        id_data_connector: 8,
+        tracing_enabled: false,
+        http_method_type: HTTPMethodType::POST,
+        path: "/panic".to_owned(),
+    };
+    let endpoint = make_endpoint_consumer::<(), (), (), u32, u32, String, _>(
+        InputStream::new(&input_config, environment),
+        endpoint_config.clone(),
+        "panic api",
+        PanickingHandler,
+    )
+    .unwrap();
+    let response = AssertUnwindSafe(endpoint.router(&endpoint_config).oneshot(
+        Request::builder()
+            .method("POST")
+            .uri("/panic")
+            .body(Body::empty())
+            .unwrap(),
+    ))
+    .catch_unwind()
+    .await;
+    let panic = match response {
+        Err(panic) => panic,
+        Ok(_) => panic!("HTTP handler panic was converted to a response"),
+    };
+    assert_eq!(
+        panic.downcast_ref::<&str>(),
+        Some(&"HTTP handler panic probe")
+    );
+}
+
 struct Pipeline {
     results: Stream<u32>,
 }

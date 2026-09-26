@@ -35,6 +35,7 @@ use tower::ServiceExt;
 
 struct Probe {
     entered: Semaphore,
+    task_id: Mutex<Option<tokio::task::Id>>,
     context: Mutex<Option<MessageContext>>,
     callbacks: AtomicUsize,
     ended: Semaphore,
@@ -75,6 +76,7 @@ impl EndpointHandler<(), (), (), u32, u32, String> for Handler {
                 })
             }),
         );
+        *self.0.task_id.lock().unwrap() = tokio::task::try_id();
         *self.0.context.lock().unwrap() = Some(context);
         self.0.entered.add_permits(1);
         if data.headers.contains_key("x-complete") {
@@ -152,6 +154,7 @@ fn fixture() -> (Arc<AxumDataSource>, axum::Router, Stream<u32>, Arc<Probe>) {
     input.set_source(&results).unwrap();
     let probe = Arc::new(Probe {
         entered: Semaphore::new(0),
+        task_id: Mutex::new(None),
         context: Mutex::new(None),
         callbacks: AtomicUsize::new(0),
         ended: Semaphore::new(0),
@@ -164,6 +167,24 @@ fn fixture() -> (Arc<AxumDataSource>, axum::Router, Stream<u32>, Arc<Probe>) {
         .unwrap();
     let router = source.router();
     (source, router, results, probe)
+}
+
+#[tokio::test]
+async fn completed_http_request_runs_on_the_callers_task() {
+    let (_source, router, _results, probe) = fixture();
+    let (task_id, response) = tokio::spawn(async move {
+        let task_id = tokio::task::id();
+        let request = Request::post("/request")
+            .header("x-complete", "yes")
+            .body(Body::empty())
+            .unwrap();
+        let response = router.oneshot(request).await.unwrap();
+        (task_id, response)
+    })
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(*probe.task_id.lock().unwrap(), Some(task_id));
 }
 
 #[tokio::test]
