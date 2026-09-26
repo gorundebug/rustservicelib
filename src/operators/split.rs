@@ -224,3 +224,11 @@ where
         );
     }
 }
+
+/// Create the branch handles; typed consumers are connected separately.
+pub fn create<T, const N: usize>(config: &SplitStreamConfig, source: &Stream<T>) -> [Stream<T>; N]
+where
+    T: Send + Sync + 'static,
+{
+    SplitStream::<T, N>::create_links(config, source)
+}

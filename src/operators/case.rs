@@ -287,3 +287,25 @@ where
         );
     }
 }
+
+/// Create the case handle before registering its branches and typed consumers.
+pub fn create<T, F>(
+    config: &CaseStreamConfig,
+    source: &Stream<T>,
+    selector: F,
+) -> TypedCaseStream<T, F>
+where
+    T: Send + Sync + 'static,
+    F: BuildSwitchFunction<T> + 'static,
+{
+    TypedCaseStream::create_links(config, source, selector)
+}
+
+/// Register a branch using the same semantics as the fluent case API.
+pub fn when<T, F>(config: &WhenStreamConfig, source: &TypedCaseStream<T, F>) -> Stream<T>
+where
+    T: Send + Sync + 'static,
+    F: BuildSwitchFunction<T> + 'static,
+{
+    source.when(config)
+}

@@ -265,3 +265,15 @@ impl<R: Send + Sync + 'static> Consumer<R> for ResultLink<R> {
         }
     }
 }
+
+/// Create a callable substream before connecting its body and result source.
+pub fn create<T, R>(
+    config: &SubStreamConfig,
+    environment: RuntimeEnvironment,
+) -> Arc<SubStream<T, R>>
+where
+    T: Send + Sync + 'static,
+    R: Send + Sync + 'static,
+{
+    Arc::new(SubStream::new(config, environment))
+}

@@ -12,6 +12,18 @@ use crate::runtime::{
     stream::Stream,
 };
 
+/// Create the output handle without connecting a consumer.
+/// Both fluent and statically wired graphs resolve the output type's serde here.
+pub fn create<R>(
+    config: &JoinStreamConfig,
+    environment: crate::runtime::environment::RuntimeEnvironment,
+) -> Stream<R>
+where
+    R: Send + Sync + 'static,
+{
+    Stream::new(&config.stream, environment)
+}
+
 pub trait JoinFunction<K, L, R, O>: Send + Sync
 where
     K: Send + Sync + 'static,
@@ -171,7 +183,7 @@ where
         right: &Stream<KeyValue<K, R>>,
         function: F,
     ) -> RuntimeResult<Stream<O>> {
-        let output = Stream::new(&config.stream, left.environment().clone());
+        let output = create(config, left.environment().clone());
         let join_stream = Self::from_collector(config, output.collector(), function)?;
         left.try_set_consumer(Arc::clone(&join_stream), output.id())?;
         right.try_set_consumer(Arc::new(join_stream.right()), output.id())?;

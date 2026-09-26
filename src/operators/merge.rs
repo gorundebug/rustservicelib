@@ -8,6 +8,19 @@ use crate::runtime::{
     stream::Stream,
 };
 
+/// Create the output handle, inheriting the first source's serde.
+/// Consumer connections are installed separately.
+pub fn create<T>(config: &MergeStreamConfig, source: &Stream<T>) -> Stream<T>
+where
+    T: Send + Sync + 'static,
+{
+    Stream::derived(
+        &config.stream,
+        source.environment().clone(),
+        source.get_serde(),
+    )
+}
+
 pub struct MergeStream<T, C = Collector<T>>
 where
     T: Send + Sync + 'static,
@@ -22,12 +35,7 @@ where
 {
     pub fn make(config: &MergeStreamConfig, sources: &[Stream<T>]) -> RuntimeResult<Stream<T>> {
         assert!(!sources.is_empty(), "merge needs at least one source");
-        // Go: stream.GetSerde() — type-preserving, reuse the first source's serde.
-        let output = Stream::derived(
-            &config.stream,
-            sources[0].environment().clone(),
-            sources[0].get_serde(),
-        );
+        let output = create(config, &sources[0]);
         let operator = Arc::new(Self {
             collector: output.collector(),
             output: output.clone(),

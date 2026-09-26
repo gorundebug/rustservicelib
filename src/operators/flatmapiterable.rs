@@ -8,6 +8,18 @@ use crate::runtime::{
     stream::Stream,
 };
 
+/// Create the output handle without connecting a consumer.
+/// Both fluent and statically wired graphs resolve the output type's serde here.
+pub fn create<R>(
+    config: &FlatMapIterableStreamConfig,
+    environment: crate::runtime::environment::RuntimeEnvironment,
+) -> Stream<R>
+where
+    R: Send + Sync + 'static,
+{
+    Stream::new(&config.stream, environment)
+}
+
 pub trait StreamIterable<R>: Clone + Send + Sync {
     type Items: IntoIterator<Item = R>;
 
@@ -75,7 +87,7 @@ where
         config: &FlatMapIterableStreamConfig,
         source: &Stream<T>,
     ) -> RuntimeResult<Stream<R>> {
-        let output = Stream::new(&config.stream, source.environment().clone());
+        let output = create(config, source.environment().clone());
         source.try_set_consumer(
             Arc::new(Self::from_collector(output.collector())),
             output.id(),

@@ -8,6 +8,19 @@ use crate::runtime::{
     stream::Stream,
 };
 
+/// Create the output handle, inheriting the source's serde.
+/// Consumer connections are installed separately.
+pub fn create<T>(config: &FilterStreamConfig, source: &Stream<T>) -> Stream<T>
+where
+    T: Send + Sync + 'static,
+{
+    Stream::derived(
+        &config.stream,
+        source.environment().clone(),
+        source.get_serde(),
+    )
+}
+
 pub trait FilterFunction<T>: Send + Sync
 where
     T: Send + Sync + 'static,
@@ -57,12 +70,7 @@ where
         source: &Stream<T>,
         function: F,
     ) -> RuntimeResult<Stream<T>> {
-        // Go: stream.GetSerde() — type-preserving, reuse the source's serde.
-        let output = Stream::derived(
-            &config.stream,
-            source.environment().clone(),
-            source.get_serde(),
-        );
+        let output = create(config, source);
         let operator = Arc::new(Self {
             collector: output.collector(),
             output: output.clone(),

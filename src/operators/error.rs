@@ -44,3 +44,11 @@ where
         self.stream.emit(context, payload).await;
     }
 }
+
+/// Create the virtual error output of an owning operator.
+pub fn create<E>(owner: &StreamConfig, environment: RuntimeEnvironment) -> Stream<E>
+where
+    E: Send + Sync + 'static,
+{
+    ErrorStream::new(owner, environment).stream().clone()
+}

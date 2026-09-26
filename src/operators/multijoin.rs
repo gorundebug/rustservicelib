@@ -323,3 +323,17 @@ where
         MultiJoinStream::make(config, self, function)
     }
 }
+
+/// Create the shared join state before connecting its typed inputs.
+pub fn create<K, O, F>(
+    config: &MultiJoinStreamConfig,
+    environment: RuntimeEnvironment,
+    function: F,
+) -> RuntimeResult<Arc<MultiJoinStream<K, O, F>>>
+where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    O: Send + Sync + 'static,
+    F: MultiJoinFunction<K, O> + 'static,
+{
+    MultiJoinStream::new(config, environment, function)
+}

@@ -8,6 +8,18 @@ use crate::runtime::{
     stream::Stream,
 };
 
+/// Create the output handle without connecting a consumer.
+/// Both fluent and statically wired graphs resolve the output type's serde here.
+pub fn create<R>(
+    config: &MapStreamConfig,
+    environment: crate::runtime::environment::RuntimeEnvironment,
+) -> Stream<R>
+where
+    R: Send + Sync + 'static,
+{
+    Stream::new(&config.stream, environment)
+}
+
 pub trait MapFunction<T, R>: Send + Sync
 where
     T: Send + Sync + 'static,
@@ -65,7 +77,7 @@ where
         source: &Stream<T>,
         function: F,
     ) -> RuntimeResult<Stream<R>> {
-        let output = Stream::new(&config.stream, source.environment().clone());
+        let output = create(config, source.environment().clone());
         let operator = Arc::new(Self {
             collector: output.collector(),
             output: output.clone(),

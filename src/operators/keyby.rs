@@ -10,6 +10,23 @@ use crate::runtime::{
     stream::Stream,
 };
 
+/// Create the output handle with independently resolved key and value serdes.
+/// Consumer connections are installed separately.
+pub fn create<K, V>(
+    config: &KeyByStreamConfig,
+    environment: crate::runtime::environment::RuntimeEnvironment,
+) -> Stream<KeyValue<K, V>>
+where
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    let serde = make_stream_key_value_serde::<K, V>(
+        environment.make_serde::<K>(),
+        environment.make_serde::<V>(),
+    );
+    Stream::derived(&config.stream, environment, serde)
+}
+
 pub trait KeyByFunction<T, K, V>: Send + Sync
 where
     T: Send + Sync + 'static,
@@ -74,11 +91,7 @@ where
         source: &Stream<T>,
         function: F,
     ) -> RuntimeResult<Stream<KeyValue<K, V>>> {
-        let serde = make_stream_key_value_serde::<K, V>(
-            source.environment().make_serde::<K>(),
-            source.environment().make_serde::<V>(),
-        );
-        let output = Stream::derived(&config.stream, source.environment().clone(), serde);
+        let output = create(config, source.environment().clone());
         source.try_set_consumer(
             Arc::new(Self::from_collector(output.collector(), function)),
             output.id(),

@@ -76,3 +76,14 @@ where
         crate::runtime::common::instrument_if_present!(self.stream.emit(context, payload), span);
     }
 }
+
+/// Create a cyclic link before its source becomes available.
+pub fn create<T>(
+    config: &CycleLinkStreamConfig,
+    environment: RuntimeEnvironment,
+) -> Arc<LinkStream<T>>
+where
+    T: Send + Sync + 'static,
+{
+    LinkStream::make(config, environment)
+}

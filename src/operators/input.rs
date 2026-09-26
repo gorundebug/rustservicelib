@@ -190,3 +190,16 @@ where
         }
     }
 }
+
+/// Create the input handle before attaching endpoint and result consumers.
+pub fn create<T, R, E>(
+    config: &InputStreamConfig,
+    environment: RuntimeEnvironment,
+) -> Arc<InputStream<T, R, E>>
+where
+    T: Send + Sync + 'static,
+    R: Send + Sync + 'static,
+    E: Send + Sync + 'static,
+{
+    Arc::new(InputStream::new(config, environment))
+}

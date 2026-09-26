@@ -254,3 +254,28 @@ where
         SinkStreamWithResult::make(config, self)
     }
 }
+
+/// Create a sink before connecting its typed input and endpoint consumer.
+pub fn create<T, E>(
+    config: &SinkStreamConfig,
+    environment: RuntimeEnvironment,
+) -> RuntimeResult<Arc<SinkStream<T, E>>>
+where
+    T: Send + Sync + 'static,
+    E: Send + Sync + 'static,
+{
+    SinkStream::new(config, environment)
+}
+
+/// Create a sink with a result output before attaching its consumers.
+pub fn create_with_result<T, R, E>(
+    config: &SinkStreamConfig,
+    environment: RuntimeEnvironment,
+) -> RuntimeResult<Arc<SinkStreamWithResult<T, R, E>>>
+where
+    T: Send + Sync + 'static,
+    R: Send + Sync + 'static,
+    E: Send + Sync + 'static,
+{
+    SinkStreamWithResult::new(config, environment)
+}
