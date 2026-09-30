@@ -5,6 +5,9 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
+use tokio::sync::Mutex as AsyncMutex;
+use tower::ServiceExt;
+
 use servicelib::{
     MessageContext, Payload,
     api::HTTPMethodType,
@@ -23,8 +26,6 @@ use servicelib::{
         stream::Stream,
     },
 };
-use tokio::sync::Mutex as AsyncMutex;
-use tower::ServiceExt;
 
 type HttpResult = ResultContext<(), (), (), u32, u32, String>;
 

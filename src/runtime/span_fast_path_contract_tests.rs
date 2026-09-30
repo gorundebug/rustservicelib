@@ -1,12 +1,13 @@
-use opentelemetry::trace::{
-    SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState, TracerProvider,
-};
 use std::{
     fmt,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+};
+
+use opentelemetry::trace::{
+    SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState, TracerProvider,
 };
 use tracing::{Event, Subscriber};
 use tracing_opentelemetry::OpenTelemetrySpanExt;

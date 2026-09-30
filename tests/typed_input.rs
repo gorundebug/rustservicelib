@@ -1,5 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
+use tokio::sync::{Notify, mpsc};
+
 use servicelib::{
     MessageContext, Payload,
     operators::{InputStream, MapFunction, map::MapStream},
@@ -14,7 +16,6 @@ use servicelib::{
         stream::Stream,
     },
 };
-use tokio::sync::{Notify, mpsc};
 
 struct Echo;
 

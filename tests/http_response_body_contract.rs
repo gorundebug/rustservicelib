@@ -8,8 +8,9 @@ use std::{
     task::{Context, Poll},
 };
 
-use servicelib::datasink::http::ResponseBody;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
+
+use servicelib::datasink::http::ResponseBody;
 
 struct GeneratedBody {
     remaining: usize,

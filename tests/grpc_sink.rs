@@ -5,6 +5,8 @@ use std::sync::{
 
 use async_trait::async_trait;
 use futures::stream;
+use tokio::sync::{Mutex as AsyncMutex, Notify};
+
 use servicelib::{
     Consumer, MessageContext, Payload, Stream,
     datasink::grpc::{
@@ -23,7 +25,6 @@ use servicelib::{
         environment::RuntimeEnvironment,
     },
 };
-use tokio::sync::{Mutex as AsyncMutex, Notify};
 
 struct Handler {
     end_count: Arc<AtomicUsize>,

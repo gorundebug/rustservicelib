@@ -2,12 +2,13 @@ use std::{convert::Infallible, sync::Arc, time::Duration};
 
 use axum::{Router, body::Body, routing::get};
 use futures::StreamExt;
+use tokio::io::AsyncReadExt;
+use tokio::sync::Notify;
+
 use servicelib::{
     MessageContext,
     datasink::http::{Client, Request, ReqwestClient},
 };
-use tokio::io::AsyncReadExt;
-use tokio::sync::Notify;
 
 enum Finish {
     Cancel,

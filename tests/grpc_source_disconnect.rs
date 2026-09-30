@@ -10,6 +10,13 @@ use std::{
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+use tonic::{
+    Request, Response, Status,
+    codec::ProstCodec,
+    codegen::{Body, BoxFuture, Service, StdError, http},
+};
+
 use servicelib::{
     MessageContext,
     api::GrpcMethodType,
@@ -30,12 +37,6 @@ use servicelib::{
         environment::RuntimeEnvironment,
         stream::Stream,
     },
-};
-use tokio::sync::{Mutex as AsyncMutex, Semaphore};
-use tonic::{
-    Request, Response, Status,
-    codec::ProstCodec,
-    codegen::{Body, BoxFuture, Service, StdError, http},
 };
 
 type Results = ResultContext<bool, u32, u32, u32, String>;

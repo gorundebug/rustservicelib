@@ -1,5 +1,7 @@
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
+use tokio::{sync::mpsc, time::Instant};
+
 use servicelib::{
     MessageContext, Payload,
     runtime::{
@@ -14,7 +16,6 @@ use servicelib::{
         stream::Stream,
     },
 };
-use tokio::{sync::mpsc, time::Instant};
 
 type Received = (String, Option<Instant>, bool, Payload<Vec<u8>>);
 

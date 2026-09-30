@@ -6,6 +6,9 @@ use std::{
     time::Duration,
 };
 
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
 use servicelib::{
     MessageContext, Payload,
     operators::ProcessFunction,
@@ -20,8 +23,6 @@ use servicelib::{
         stream::Stream,
     },
 };
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 struct Failure {
     item: i32,

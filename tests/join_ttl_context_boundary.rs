@@ -7,13 +7,14 @@ use std::{
 };
 
 use futures::FutureExt;
-use servicelib::{
-    MessageContext,
-    runtime::store::{HashMapJoinStorage, JoinCallback, JoinStorage, Storage},
-};
 use tokio::{
     sync::mpsc,
     time::{Instant, advance, timeout},
+};
+
+use servicelib::{
+    MessageContext,
+    runtime::store::{HashMapJoinStorage, JoinCallback, JoinStorage, Storage},
 };
 
 #[tokio::test(start_paused = true)]

@@ -1,5 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
+use tokio::sync::{Notify, mpsc};
+
 use servicelib::{
     MessageContext, Payload,
     operators::{SinkStream, SinkStreamWithResult},
@@ -13,7 +15,6 @@ use servicelib::{
         stream::Stream,
     },
 };
-use tokio::sync::{Notify, mpsc};
 
 struct Capture<T>(mpsc::UnboundedSender<(MessageContext, Payload<T>)>);
 

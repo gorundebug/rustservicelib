@@ -3,6 +3,7 @@ use std::{collections::HashMap, sync::Mutex, time::Duration};
 use opentelemetry::propagation::TextMapCompositePropagator;
 use opentelemetry::{global, trace::TraceContextExt};
 use opentelemetry_sdk::propagation::{BaggagePropagator, TraceContextPropagator};
+
 use servicelib::MessageContext;
 
 static PROPAGATOR_LOCK: Mutex<()> = Mutex::new(());

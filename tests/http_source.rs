@@ -5,6 +5,9 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
+use tokio::sync::Mutex as AsyncMutex;
+use tower::ServiceExt;
+
 use servicelib::{
     Consumer, MessageContext, Payload,
     api::HTTPMethodType,
@@ -23,8 +26,6 @@ use servicelib::{
         stream::Stream,
     },
 };
-use tokio::sync::Mutex as AsyncMutex;
-use tower::ServiceExt;
 
 struct PanickingHandler;
 
@@ -73,8 +74,9 @@ impl EndpointHandler<(), (), (), u32, u32, String> for PanickingHandler {
 
 #[tokio::test]
 async fn http_handler_panic_propagates_without_becoming_a_response() {
-    use futures::FutureExt;
     use std::panic::AssertUnwindSafe;
+
+    use futures::FutureExt;
 
     let environment = RuntimeEnvironment::default();
     let input_config = InputStreamConfig {

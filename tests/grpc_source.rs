@@ -5,6 +5,8 @@ use std::sync::{
 
 use async_trait::async_trait;
 use futures::stream;
+use tokio::sync::Mutex as AsyncMutex;
+
 use servicelib::{
     Consumer, MessageContext, Payload,
     datasource::grpc::{
@@ -22,7 +24,6 @@ use servicelib::{
         stream::Stream,
     },
 };
-use tokio::sync::Mutex as AsyncMutex;
 
 struct Pipeline {
     results: Stream<u32>,

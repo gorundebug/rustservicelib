@@ -1,6 +1,7 @@
+use std::{process::Command, time::Duration};
+
 use super::RuntimeEnvironment;
 use crate::runtime::config::CallSemantics;
-use std::{process::Command, time::Duration};
 
 const CHILD_ENV: &str = "SERVICELIB_PARALLEL_PANIC_CHILD";
 const ENTERED: &str = "parallel-panic-callback-entered";

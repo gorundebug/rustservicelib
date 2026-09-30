@@ -2,6 +2,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use futures::stream;
+use tokio::sync::Mutex as AsyncMutex;
+
 use servicelib::{
     MessageContext,
     api::GrpcMethodType,
@@ -20,7 +22,6 @@ use servicelib::{
         stream::Stream,
     },
 };
-use tokio::sync::Mutex as AsyncMutex;
 
 struct Handler {
     recover: bool,

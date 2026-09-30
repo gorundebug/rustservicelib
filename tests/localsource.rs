@@ -1,6 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use tokio::sync::oneshot;
+
 use servicelib::{
     MessageContext, Payload,
     datasource::{
@@ -20,7 +22,6 @@ use servicelib::{
         environment::{Lifecycle, RuntimeEnvironment},
     },
 };
-use tokio::sync::oneshot;
 
 struct OneValueProducer;
 

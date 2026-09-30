@@ -1,3 +1,10 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
+use tracing_subscriber::layer::SubscriberExt;
+
 use servicelib::{
     MessageContext, Payload, Stream,
     operators::MapFunction,
@@ -10,11 +17,6 @@ use servicelib::{
         testtracing::TestTracing,
     },
 };
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
-use tracing_subscriber::layer::SubscriberExt;
 
 struct Count(Arc<AtomicUsize>);
 impl MapFunction<u32, u32> for Count {

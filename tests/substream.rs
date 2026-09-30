@@ -7,6 +7,8 @@ use std::{
 };
 
 use async_trait::async_trait;
+use tokio::sync::Notify;
+
 use servicelib::{
     MessageContext, Payload, SubStream, SubStreamCollector, SubStreamCollectorFunc,
     operators::MapFunction,
@@ -20,7 +22,6 @@ use servicelib::{
         stream::Stream,
     },
 };
-use tokio::sync::Notify;
 
 fn environment() -> (RuntimeEnvironment, SubStreamConfig, MapStreamConfig) {
     let mut entry = StreamConfig::new(1, "Lookup");

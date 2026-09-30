@@ -4,6 +4,8 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
+use tokio::sync::{Mutex as AsyncMutex, oneshot};
+
 use servicelib::{
     MessageContext, Payload,
     api::{KafkaSaslMechanism, KafkaSecurityProtocol},
@@ -22,7 +24,6 @@ use servicelib::{
         environment::{Lifecycle, RuntimeEnvironment},
     },
 };
-use tokio::sync::{Mutex as AsyncMutex, oneshot};
 
 struct Double;
 

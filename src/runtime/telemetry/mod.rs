@@ -113,6 +113,7 @@ mod attribute_fast_path_tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
     use tracing::{
         Subscriber,
         span::{Id, Record},

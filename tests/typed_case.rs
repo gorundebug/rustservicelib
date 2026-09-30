@@ -1,6 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
 use futures::FutureExt;
+use tokio::sync::mpsc;
+
 use servicelib::{
     MessageContext, Payload,
     operators::case::TypedCaseStream,
@@ -14,7 +16,6 @@ use servicelib::{
         stream::Stream,
     },
 };
-use tokio::sync::mpsc;
 
 struct Capture(mpsc::UnboundedSender<(MessageContext, u32)>);
 struct DoubleCapture(mpsc::UnboundedSender<(MessageContext, u32)>);

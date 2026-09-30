@@ -433,13 +433,15 @@ impl EndpointMetrics {
 
 #[cfg(test)]
 mod result_tracing_tests {
-    use super::ResultContext;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
     use tracing::{Event, Subscriber};
     use tracing_subscriber::{Layer, layer::Context, prelude::*};
+
+    use super::ResultContext;
 
     struct CountEvents(Arc<AtomicUsize>);
 

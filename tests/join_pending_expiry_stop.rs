@@ -7,11 +7,12 @@ use std::{
 };
 
 use futures::FutureExt;
+use tokio::sync::Semaphore;
+
 use servicelib::{
     MessageContext,
     runtime::store::{HashMapJoinStorage, JoinCallback, JoinStorage, Storage},
 };
-use tokio::sync::Semaphore;
 
 async fn accepted_expiry(stop_before_cancel: bool, drop_owner: bool) {
     let store = HashMapJoinStorage::<u32>::new(Duration::from_secs(3600), false);

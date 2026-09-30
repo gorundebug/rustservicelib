@@ -1,5 +1,7 @@
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
+use tokio::sync::mpsc;
+
 use servicelib::{
     MessageContext, Payload,
     operators::{MultiJoinFunction, MultiJoinStream, downcast_join_values},
@@ -16,7 +18,6 @@ use servicelib::{
         stream::Stream,
     },
 };
-use tokio::sync::mpsc;
 
 struct Combine {
     partial: bool,

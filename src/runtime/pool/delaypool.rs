@@ -204,8 +204,9 @@ impl DelayPool {
 
 #[cfg(test)]
 mod task_storage_tests {
-    use super::*;
     use std::cell::Cell;
+
+    use super::*;
 
     #[tokio::test]
     async fn scheduled_callback_can_be_send_without_sync_and_suspend() {

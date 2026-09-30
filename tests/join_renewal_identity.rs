@@ -1,11 +1,12 @@
 use std::{sync::Arc, time::Duration};
 
 use futures::FutureExt;
+use tokio::{sync::mpsc, time::timeout};
+
 use servicelib::{
     MessageContext,
     runtime::store::{HashMapJoinStorage, JoinCallback, JoinStorage, Storage},
 };
-use tokio::{sync::mpsc, time::timeout};
 
 type Observation = (&'static str, String, Vec<Vec<u32>>);
 

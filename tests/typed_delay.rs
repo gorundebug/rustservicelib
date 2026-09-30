@@ -6,6 +6,8 @@ use std::{
     time::Duration,
 };
 
+use tokio::sync::mpsc;
+
 use servicelib::{
     MessageContext, Payload,
     operators::delay::{DelayFunction, DelayStream},
@@ -20,7 +22,6 @@ use servicelib::{
         stream::Stream,
     },
 };
-use tokio::sync::mpsc;
 
 struct Item {
     dropped: Arc<AtomicUsize>,

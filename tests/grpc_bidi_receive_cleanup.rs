@@ -2,6 +2,8 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
+
 use servicelib::{
     MessageContext, Payload,
     api::GrpcMethodType,
@@ -20,7 +22,6 @@ use servicelib::{
         stream::Stream,
     },
 };
-use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
 struct Probe {

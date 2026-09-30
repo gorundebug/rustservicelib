@@ -11,6 +11,9 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
+use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+use tower::ServiceExt;
+
 use servicelib::{
     MessageContext,
     api::HTTPMethodType,
@@ -30,8 +33,6 @@ use servicelib::{
         stream::Stream,
     },
 };
-use tokio::sync::{Mutex as AsyncMutex, Semaphore};
-use tower::ServiceExt;
 
 struct Probe {
     entered: Semaphore,

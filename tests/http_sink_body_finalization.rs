@@ -11,6 +11,12 @@ use std::{
 };
 
 use async_trait::async_trait;
+use tokio::{
+    io::{AsyncRead, ReadBuf},
+    sync::Semaphore,
+    task::JoinHandle,
+};
+
 use servicelib::{
     MessageContext, Payload, Stream,
     api::HTTPMethodType,
@@ -25,11 +31,6 @@ use servicelib::{
         },
         environment::RuntimeEnvironment,
     },
-};
-use tokio::{
-    io::{AsyncRead, ReadBuf},
-    sync::Semaphore,
-    task::JoinHandle,
 };
 
 #[derive(Clone, Copy)]

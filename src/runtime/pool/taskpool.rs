@@ -1,9 +1,10 @@
+use std::sync::Arc;
+
 use super::queuedpool::QueuedPool;
 use crate::runtime::{
     common::MessageContext,
     environment::{RuntimeEnvironment, RuntimeResult},
 };
-use std::sync::Arc;
 pub type BoxTask = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>;
 
 /// FIFO pool; cancellation promotes queued work to the head.

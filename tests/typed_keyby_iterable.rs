@@ -1,5 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
+use tokio::sync::mpsc;
+
 use servicelib::{
     MessageContext, Payload,
     operators::{
@@ -20,7 +22,6 @@ use servicelib::{
         stream::Stream,
     },
 };
-use tokio::sync::mpsc;
 
 struct Key;
 

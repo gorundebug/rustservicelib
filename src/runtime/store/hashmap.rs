@@ -407,10 +407,12 @@ where
 
 #[cfg(test)]
 mod dynamic_ttl_contract {
-    use super::*;
-    use futures::FutureExt;
     use std::sync::atomic::AtomicU64;
+
+    use futures::FutureExt;
     use tokio::{sync::mpsc, time::timeout};
+
+    use super::*;
 
     async fn check(initial: u64, next: u64, expect_expiry: bool, minimum: u64) {
         let ttl = Arc::new(AtomicU64::new(initial));

@@ -11,6 +11,8 @@ use std::{
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
+use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+
 use servicelib::{
     MessageContext,
     api::GrpcMethodType,
@@ -29,7 +31,6 @@ use servicelib::{
         stream::Stream,
     },
 };
-use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
 type Invoke = Arc<
     dyn Fn(MessageContext) -> Pin<Box<dyn Future<Output = HandlerResult> + Send>> + Send + Sync,

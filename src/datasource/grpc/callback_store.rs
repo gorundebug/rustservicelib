@@ -53,8 +53,9 @@ impl<C> CallbackStore<C> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Arc;
+
+    use super::*;
 
     #[test]
     fn operations_match_hash_map() {

@@ -1,7 +1,5 @@
 mod callback_store;
 
-use callback_store::CallbackStore;
-
 use std::{
     collections::BTreeMap,
     error::Error,
@@ -11,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use callback_store::CallbackStore;
 use async_trait::async_trait;
 use tokio::sync::{Mutex as AsyncMutex, RwLock};
 use tokio_util::sync::CancellationToken;

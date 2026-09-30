@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use servicelib::runtime::{
     datastruct::KeyValue,
     serde::{
@@ -7,7 +9,6 @@ use servicelib::runtime::{
         make_stream_key_value_serde,
     },
 };
-use std::sync::Arc;
 
 fn emit<T>(name: &str, serde: &dyn Serde<T>, value: &T) {
     let data = serde

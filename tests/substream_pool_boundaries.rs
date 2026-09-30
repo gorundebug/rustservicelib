@@ -6,6 +6,9 @@ use std::{
     time::Duration,
 };
 
+use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
+
 use servicelib::{
     MessageContext, Payload, SubStream, SubStreamCollectorFunc,
     operators::MapFunction,
@@ -20,8 +23,6 @@ use servicelib::{
         stream::Stream,
     },
 };
-use tokio::sync::{mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 enum Scheduler {

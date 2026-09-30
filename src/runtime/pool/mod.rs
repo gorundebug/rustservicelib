@@ -6,7 +6,6 @@ mod taskpool;
 use std::{any::Any, future::Future, panic::AssertUnwindSafe};
 
 use futures::FutureExt;
-
 pub use delaypool::DelayPool;
 pub use prioritytaskpool::PriorityTaskPool;
 pub use taskpool::{BoxTask, TaskPool};

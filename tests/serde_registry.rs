@@ -1,10 +1,11 @@
+use std::{any::TypeId, sync::Arc};
+
 use servicelib::runtime::{
     config::StreamConfig,
     environment::{RuntimeEnvironment, RuntimeError, RuntimeResult},
     serde::{JsonSerde, Serde, Serializer, StringSerde},
     stream::Stream,
 };
-use std::{any::TypeId, sync::Arc};
 
 struct NoSerde;
 

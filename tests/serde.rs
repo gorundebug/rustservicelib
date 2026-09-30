@@ -1,10 +1,12 @@
+use std::{collections::HashMap, sync::Arc};
+
 use serde::{Deserialize, Serialize};
+
 use servicelib::runtime::serde::{
     ArraySerde, Float32Serde, Int8Serde, Int16ArraySerde, Int16Serde, Int32Serde, JsonSerde,
     MapSerde, Serde, SerdeLimits, StringArraySerde, StringSerde, make_stream_key_value_serde,
     make_stream_serde,
 };
-use std::{collections::HashMap, sync::Arc};
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct Value {

@@ -1,6 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::{Notify, mpsc};
+
 use servicelib::{
     MessageContext,
     runtime::{
@@ -9,7 +11,6 @@ use servicelib::{
         pool::{DelayPool, PriorityTaskPool, TaskPool},
     },
 };
-use tokio::sync::{Notify, mpsc};
 
 #[derive(Clone, Serialize, Deserialize)]
 struct PoolTestConfig {

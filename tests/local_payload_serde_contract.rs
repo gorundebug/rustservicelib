@@ -7,6 +7,8 @@ use std::{
     time::Duration,
 };
 
+use tokio::sync::mpsc;
+
 use servicelib::{
     MessageContext, Payload,
     operators::{DelayFunction, FilterFunction},
@@ -23,7 +25,6 @@ use servicelib::{
         stream::Stream,
     },
 };
-use tokio::sync::mpsc;
 
 // Deliberately no Clone, Serialize or Deserialize implementations.
 struct LargeValue {

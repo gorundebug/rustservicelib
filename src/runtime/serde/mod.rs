@@ -3,7 +3,6 @@ mod serdeimpl;
 
 pub(crate) use registry::SerdeRegistry;
 pub use registry::{SerdeProvider, Serializer};
-
 pub use serdeimpl::{
     ArraySerde, BoolArraySerde, BoolSerde, BytesSerde, FixedSizeArraySerde, Float32ArraySerde,
     Float32Serde, Float64ArraySerde, Float64Serde, Int8ArraySerde, Int8Serde, Int16ArraySerde,

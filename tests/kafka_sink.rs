@@ -1,6 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use tokio::sync::Notify;
+
 use servicelib::{
     Consumer, MessageContext, Payload, Stream,
     api::{KafkaSaslMechanism, KafkaSecurityProtocol},
@@ -15,7 +17,6 @@ use servicelib::{
         environment::{Lifecycle, RuntimeEnvironment},
     },
 };
-use tokio::sync::Notify;
 
 struct FixedPartitioner;
 

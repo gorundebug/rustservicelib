@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tracing_subscriber::layer::SubscriberExt;
+
 use servicelib::{
     MessageContext, Payload, Stream, SubStream, SubStreamCollectorFunc,
     operators::MapFunction,
@@ -16,7 +18,6 @@ use servicelib::{
         testtracing::TestTracing,
     },
 };
-use tracing_subscriber::layer::SubscriberExt;
 
 #[test]
 fn test_metrics_uses_the_production_prometheus_wire_format() {

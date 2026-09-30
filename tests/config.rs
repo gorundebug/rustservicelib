@@ -4,6 +4,7 @@ use std::sync::{
 };
 
 use serde::{Deserialize, Serialize};
+
 use servicelib::{
     api::{DataType, TypeDefinitionFormat},
     runtime::{

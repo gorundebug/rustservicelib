@@ -1,6 +1,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tokio::{
+    sync::{Notify, mpsc},
+    time::Duration,
+};
+
 use servicelib::{
     Collector, MessageContext, Payload, ScheduleEndpointFunction, ScheduleTrigger,
     api::{ScheduleMissedRunPolicy, ScheduleOverlapPolicy},
@@ -15,10 +20,6 @@ use servicelib::{
         environment::{Lifecycle, RuntimeEnvironment},
         stream::Stream,
     },
-};
-use tokio::{
-    sync::{Notify, mpsc},
-    time::Duration,
 };
 
 fn runtime(enabled: bool, schedule: &str) -> (RuntimeEnvironment, InputStream<String, (), String>) {

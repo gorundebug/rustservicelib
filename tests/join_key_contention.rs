@@ -4,11 +4,12 @@ use std::{
 };
 
 use futures::{FutureExt, poll};
+use tokio::sync::Semaphore;
+
 use servicelib::{
     MessageContext,
     runtime::store::{HashMapJoinStorage, JoinCallback, JoinStorage},
 };
-use tokio::sync::Semaphore;
 
 fn callback(
     entered: Arc<Semaphore>,

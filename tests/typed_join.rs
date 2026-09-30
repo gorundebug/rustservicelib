@@ -1,5 +1,7 @@
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
+use tokio::sync::mpsc;
+
 use servicelib::{
     MessageContext, Payload,
     operators::join::{JoinFunction, JoinStream},
@@ -15,7 +17,6 @@ use servicelib::{
         stream::Stream,
     },
 };
-use tokio::sync::mpsc;
 
 struct Sum {
     keep: bool,

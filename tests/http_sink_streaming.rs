@@ -1,4 +1,19 @@
+use std::{
+    io,
+    pin::Pin,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    task::{Context, Poll},
+};
+
 use async_trait::async_trait;
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, ReadBuf},
+    sync::Semaphore,
+};
+
 use servicelib::{
     Consumer, MessageContext, Payload, Stream,
     api::HTTPMethodType,
@@ -13,19 +28,6 @@ use servicelib::{
         },
         environment::RuntimeEnvironment,
     },
-};
-use std::{
-    io,
-    pin::Pin,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
-    task::{Context, Poll},
-};
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, ReadBuf},
-    sync::Semaphore,
 };
 
 struct Reader {

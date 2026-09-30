@@ -1,6 +1,7 @@
+use std::{sync::Arc, time::Duration};
+
 use super::RuntimeEnvironment;
 use crate::runtime::config::CallSemantics;
-use std::{sync::Arc, time::Duration};
 
 #[tokio::test]
 async fn completed_parallel_callbacks_release_captures_before_shutdown() {

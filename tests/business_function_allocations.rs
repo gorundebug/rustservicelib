@@ -8,6 +8,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+
 use servicelib::{
     MessageContext, Payload,
     operators::MapFunction,

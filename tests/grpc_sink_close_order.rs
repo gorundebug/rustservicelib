@@ -1,4 +1,14 @@
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+
 use async_trait::async_trait;
+use tokio::sync::{Mutex, Semaphore};
+
 use servicelib::{
     MessageContext, Payload, Stream,
     api::GrpcMethodType,
@@ -14,14 +24,6 @@ use servicelib::{
         environment::RuntimeEnvironment,
     },
 };
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
-use tokio::sync::{Mutex, Semaphore};
 
 struct Gates {
     after_done: Semaphore,

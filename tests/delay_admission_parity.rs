@@ -4,8 +4,9 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use servicelib::{MessageContext, runtime::pool::DelayPool};
 use tokio::sync::Barrier;
+
+use servicelib::{MessageContext, runtime::pool::DelayPool};
 
 #[tokio::test]
 async fn suspended_callback_does_not_block_other_delays_and_stop_drains_both() {
