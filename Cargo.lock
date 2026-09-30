@@ -2026,7 +2026,7 @@ dependencies = [
 
 [[package]]
 name = "servicelib-gorundebug"
-version = "0.2.151"
+version = "0.2.152"
 dependencies = [
  "arc-swap",
  "async-trait",
