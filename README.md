@@ -179,6 +179,19 @@ body on completion, after `end_request`, even if a handler retained the body.
 processing. Test clients can construct a buffered body with `bytes.into()` or
 use `ResponseBody::new(reader)` for an arbitrary asynchronous reader.
 
+### gRPC client addresses
+
+The Tonic sink accepts HTTP(S) endpoint URIs and gRPC DNS targets such as
+`dns:///inventory:9202` or `dns:inventory:9202`. DNS targets are adapted to an
+HTTP endpoint only when creating or reloading the transport; the authored
+configuration and status graph keep their original address. DNS resolution
+remains asynchronous and channels connect lazily. An omitted DNS target port
+defaults to 443. The `dns` scheme does not enable TLS, including on port 443;
+explicit HTTP(S) addresses retain their existing transport behavior.
+
+Custom DNS resolver authorities (`dns://resolver/host`) and malformed DNS
+targets are rejected rather than silently interpreted as another destination.
+
 ### gRPC streaming queues
 
 Each gRPC connector has its own immutable `stream_buffer_capacity`. The default

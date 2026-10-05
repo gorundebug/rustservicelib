@@ -1,5 +1,5 @@
 use servicelib::api::{
-    CallSemantics, DataConnectorImplementation, KubernetesWorkloadType, ProgrammingLanguage,
+    CallSemantics, KubernetesWorkloadType, ProgrammingLanguage,
     StreamApp,
 };
 
@@ -35,7 +35,7 @@ fn framework_api_deserializes_the_canonical_wire_shape() {
             "id": 1,
             "name": "HTTP",
             "type": 1,
-            "rustImplementation": "rust/axum"
+            "implementations": {"rust": "rust/axum", "external": "custom/http"}
         }],
         "endpoints": [],
         "pools": []
@@ -55,7 +55,11 @@ fn framework_api_deserializes_the_canonical_wire_shape() {
         KubernetesWorkloadType::Deployment
     );
     assert_eq!(
-        app.data_connectors[0].rust_implementation,
-        Some(DataConnectorImplementation::RustAxum)
+        app.data_connectors[0].implementations.as_ref().unwrap().get("rust").map(String::as_str),
+        Some("rust/axum")
+    );
+    assert_eq!(
+        app.data_connectors[0].implementations.as_ref().unwrap().get("external").map(String::as_str),
+        Some("custom/http")
     );
 }

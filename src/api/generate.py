@@ -2,7 +2,7 @@
 """Generate Rust API models from servicelib/api/serviceapi.yaml.
 
 The schema deliberately uses a small OpenAPI subset: enums and object models
-whose properties are primitives, references, or arrays. Keeping this generator
+whose properties are primitives, references, arrays, or typed dictionaries. Keeping this generator
 in the framework repository makes generation reproducible without committing a
 generic OpenAPI client runtime.
 """
@@ -152,6 +152,17 @@ def property_type(block: list[str]) -> str:
                 }[primitive]
                 return f"Vec<{item_type}>"
         raise ValueError(f"array property has no supported items: {block!r}")
+    if direct_type == "object":
+        for index, line in enumerate(block):
+            if line == "          additionalProperties:":
+                value_schema = []
+                for child in block[index + 1 :]:
+                    if child and not child.startswith("            "):
+                        break
+                    value_schema.append(child[2:] if child else child)
+                value_type = property_type(value_schema)
+                return f"std::collections::BTreeMap<String, {value_type}>"
+        raise ValueError(f"object property has no supported additionalProperties: {block!r}")
     if direct_type is not None:
         return {
             "boolean": "bool",

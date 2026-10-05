@@ -43,14 +43,44 @@ pub struct TonicDataSink {
 }
 
 impl TonicDataSink {
+    fn endpoint(address: &str) -> RuntimeResult<Endpoint> {
+        let invalid = |error: String| {
+            RuntimeError::InvalidConfiguration(format!("gRPC address {address:?}: {error}"))
+        };
+        let Some(target) = address.strip_prefix("dns:") else {
+            return Endpoint::from_shared(address.to_owned())
+                .map_err(|error| invalid(error.to_string()));
+        };
+        // gRPC resolver URIs name a host in the path, whereas Tonic expects
+        // an HTTP URI. Resolution remains asynchronous in Tonic's connector.
+        let target = target.strip_prefix("///").unwrap_or(target);
+        if target.starts_with("//") {
+            return Err(invalid("custom DNS resolver authorities are not supported".to_owned()));
+        }
+        let authority = target
+            .parse::<tonic::codegen::http::uri::Authority>()
+            .map_err(|error| invalid(error.to_string()))?;
+        if authority.host().is_empty()
+            || target.contains('@')
+            || target.ends_with(':')
+            || (authority.port().is_some() && authority.port_u16().is_none())
+        {
+            return Err(invalid("expected a DNS host and optional numeric port".to_owned()));
+        }
+        // DNS selects a resolver, not TLS. Match gRPC's default target port;
+        // explicit HTTP(S) addresses above retain their existing semantics.
+        let port = if authority.port().is_none() { ":443" } else { "" };
+        Endpoint::from_shared(format!("http://{authority}{port}"))
+            .map_err(|error| invalid(error.to_string()))
+    }
+
     fn validate_config(config: &GrpcDataConnectorConfig) -> RuntimeResult<Endpoint> {
         if config.connections_count == 0 {
             return Err(RuntimeError::InvalidConfiguration(
                 "gRPC connections_count must be at least 1".to_owned(),
             ));
         }
-        Endpoint::from_shared(config.address.clone())
-            .map_err(|error| RuntimeError::InvalidConfiguration(error.to_string()))
+        Self::endpoint(&config.address)
     }
 
     fn new(
@@ -151,8 +181,7 @@ impl TonicDataSink {
     }
 
     pub fn reload_address(&self, address: String) -> RuntimeResult<()> {
-        let endpoint = Endpoint::from_shared(address)
-            .map_err(|error| RuntimeError::InvalidConfiguration(error.to_string()))?;
+        let endpoint = Self::endpoint(&address)?;
         let config = self.connector_config()?;
         let channels = Self::make_channels(&endpoint, config.connections_count);
         if self.state.load(Ordering::Acquire) == 1 {
@@ -229,6 +258,9 @@ impl Lifecycle for TonicDataSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::config::{CallSemantics, RuntimeConfig};
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn config(connections_count: usize) -> GrpcDataConnectorConfig {
         GrpcDataConnectorConfig {
@@ -242,6 +274,100 @@ mod tests {
     #[test]
     fn rejects_zero_connections() {
         assert!(TonicDataSink::validate_config(&config(0)).is_err());
+    }
+
+    #[test]
+    fn accepts_dns_targets_without_changing_http_uris() {
+        for (address, expected) in [
+            ("dns:///ctproxy.invalid:443", "http://ctproxy.invalid:443/"),
+            ("dns:inventory:9202", "http://inventory:9202/"),
+            ("dns:///inventory", "http://inventory:443/"),
+            ("dns:///[::1]:9202", "http://[::1]:9202/"),
+            ("dns:///[::1]", "http://[::1]:443/"),
+            ("http://inventory:9202/", "http://inventory:9202/"),
+            ("https://inventory:443/", "https://inventory:443/"),
+        ] {
+            let mut config = config(1);
+            config.address = address.to_owned();
+            let endpoint = TonicDataSink::validate_config(&config).unwrap();
+            assert_eq!(endpoint.uri().to_string(), expected, "{address}");
+            assert_eq!(config.address, address);
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_dns_targets() {
+        for address in [
+            "dns:",
+            "dns:///",
+            "dns://resolver/inventory:9202",
+            "dns:///inventory:9202/path",
+            "dns:///inventory?query",
+            "dns:///inventory#fragment",
+            "dns:///user@inventory:9202",
+            "dns:///inventory:",
+            "dns:///inventory:99999",
+            "dns:///inventory:not-a-port",
+            "dns:///bad host:9202",
+        ] {
+            let error = TonicDataSink::endpoint(address).unwrap_err().to_string();
+            assert!(error.contains("gRPC address"), "{address}: {error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn dns_targets_work_through_start_and_reload() {
+        let mut config = config(3);
+        config.address = "dns:///inventory.invalid:9202".to_owned();
+        let environment = RuntimeEnvironment::default();
+        environment.publish_runtime_config(Arc::new(
+            RuntimeConfig::from_parts(
+                CallSemantics::FunctionCall,
+                [],
+                [],
+                [],
+                [config.clone().into()],
+                [],
+                [],
+            )
+            .unwrap(),
+        ));
+        let sink = TonicDataSink::from_config(environment, &config).unwrap();
+        sink.start(MessageContext::new()).await.unwrap();
+        assert_eq!(sink.channels.read().unwrap().len(), 3);
+        sink.reload_address("dns:///replacement.invalid:9203".to_owned())
+            .unwrap();
+        assert_eq!(sink.channels.read().unwrap().len(), 3);
+        assert!(sink.reload_address("dns:///".to_owned()).is_err());
+        assert!(sink.channel().await.is_ok());
+        sink.stop(MessageContext::new()).await.unwrap();
+        assert!(sink.channel().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn dns_target_connects_to_local_http2_listener() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (done, finished) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut preface = [0; 24];
+            socket.read_exact(&mut preface).await.unwrap();
+            assert_eq!(&preface, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+            socket.write_all(&[0, 0, 0, 4, 0, 0, 0, 0, 0]).await.unwrap();
+            let _ = finished.await;
+        });
+        let endpoint = TonicDataSink::endpoint(&format!("dns:///localhost:{port}")).unwrap();
+        let channel = tokio::time::timeout(Duration::from_secs(5), endpoint.connect())
+            .await
+            .unwrap()
+            .unwrap();
+        done.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(channel);
     }
 
     #[tokio::test]

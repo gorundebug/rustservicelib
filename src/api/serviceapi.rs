@@ -17,8 +17,8 @@ pub enum ProgrammingLanguage {
     CppUserver = 2,
     Python = 3,
     Rust = 4,
-    CppBoost = 5,
     TypeScript = 6,
+    CppCoro = 7,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize_repr, Deserialize_repr)]
@@ -530,30 +530,8 @@ pub struct DataConnector {
     pub r#type: DataConnectorType,
     #[serde(rename = "implementation", skip_serializing_if = "Option::is_none")]
     pub implementation: Option<DataConnectorImplementation>,
-    #[serde(rename = "goImplementation", skip_serializing_if = "Option::is_none")]
-    pub go_implementation: Option<DataConnectorImplementation>,
-    #[serde(
-        rename = "cppUserverImplementation",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub cpp_userver_implementation: Option<DataConnectorImplementation>,
-    #[serde(
-        rename = "cppBoostImplementation",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub cpp_boost_implementation: Option<DataConnectorImplementation>,
-    #[serde(
-        rename = "pythonImplementation",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub python_implementation: Option<DataConnectorImplementation>,
-    #[serde(rename = "rustImplementation", skip_serializing_if = "Option::is_none")]
-    pub rust_implementation: Option<DataConnectorImplementation>,
-    #[serde(
-        rename = "typeScriptImplementation",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub type_script_implementation: Option<DataConnectorImplementation>,
+    #[serde(rename = "implementations", skip_serializing_if = "Option::is_none")]
+    pub implementations: Option<std::collections::BTreeMap<String, String>>,
     #[serde(rename = "host", skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
     #[serde(rename = "port", skip_serializing_if = "Option::is_none")]
@@ -704,6 +682,17 @@ pub struct Endpoint {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct NativeTypeBinding {
+    #[serde(rename = "definition", skip_serializing_if = "Option::is_none")]
+    pub definition: Option<String>,
+    #[serde(rename = "import", skip_serializing_if = "Option::is_none")]
+    pub import: Option<String>,
+    #[serde(rename = "package", skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Type {
     #[serde(rename = "name")]
     pub name: String,
@@ -721,20 +710,8 @@ pub struct Type {
     pub transfer_by_value: Option<bool>,
     #[serde(rename = "useAlias", skip_serializing_if = "Option::is_none")]
     pub use_alias: Option<bool>,
-    #[serde(
-        rename = "typeDefinitionLang1",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub type_definition_lang1: Option<String>,
-    #[serde(
-        rename = "typeDefinitionLang2",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub type_definition_lang2: Option<String>,
-    #[serde(rename = "typeImportLang1", skip_serializing_if = "Option::is_none")]
-    pub type_import_lang1: Option<String>,
-    #[serde(rename = "typeImportLang2", skip_serializing_if = "Option::is_none")]
-    pub type_import_lang2: Option<String>,
+    #[serde(rename = "bindings", skip_serializing_if = "Option::is_none")]
+    pub bindings: Option<std::collections::BTreeMap<String, NativeTypeBinding>>,
     #[serde(rename = "package", skip_serializing_if = "Option::is_none")]
     pub package: Option<String>,
     #[serde(rename = "publicType", skip_serializing_if = "Option::is_none")]
