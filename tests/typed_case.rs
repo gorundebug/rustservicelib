@@ -71,6 +71,10 @@ async fn typed_case_routes_concrete_branches_and_preserves_public_stream_entries
     });
     let even = case.when(&config(3, 2).into());
     let odd = case.when(&config(4, 2).into());
+    assert_eq!(case.when_index("node-3").unwrap(), 0);
+    assert_eq!(case.when_index("node-4").unwrap(), 1);
+    assert!(case.when_index("missing").is_err());
+    assert!(case.when_index("").is_err());
     let (sender, mut receiver) = mpsc::unbounded_channel();
     let even_output = even
         .try_set_typed_consumer(Arc::new(Capture(sender.clone())), 5)
@@ -123,4 +127,22 @@ async fn typed_case_rejects_an_invalid_index_instead_of_losing_the_message() {
         .await;
     assert!(panic.is_err());
     environment.delay_pool().stop().await;
+}
+
+#[tokio::test]
+async fn named_case_binding_tracks_registration_order_and_rejects_duplicates() {
+    for reversed in [false, true] {
+        let environment = environment();
+        let root = Stream::new(&config(1, 0), environment.clone());
+        let case = TypedCaseStream::create_links(&config(2, 1).into(), &root, |_: &u32| 0);
+        let order = if reversed { [4, 3] } else { [3, 4] };
+        for id in order {
+            case.when(&config(id, 2).into());
+        }
+        assert_eq!(case.when_index("node-3").unwrap(), usize::from(reversed));
+        assert_eq!(case.when_index("node-4").unwrap(), usize::from(!reversed));
+        case.when(&config(3, 2).into());
+        assert!(case.when_index("node-3").is_err());
+        environment.delay_pool().stop().await;
+    }
 }

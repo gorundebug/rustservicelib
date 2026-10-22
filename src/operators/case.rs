@@ -239,6 +239,33 @@ where
         self.inner.when_streams.get().len()
     }
 
+    /// Resolve a configured When identity after registering all branches and
+    /// before publishing the graph. Cache the index in the business selector;
+    /// this lookup is not part of per-message dispatch.
+    pub fn when_index(&self, name: &str) -> RuntimeResult<usize> {
+        if name.is_empty() {
+            return Err(RuntimeError::InvalidConfiguration(
+                "case branch name must not be empty".into(),
+            ));
+        }
+        let mut selected = None;
+        for (index, branch) in self.inner.when_streams.get().iter().enumerate() {
+            if branch.stream().name() != name {
+                continue;
+            }
+            if let Some(previous) = selected {
+                return Err(RuntimeError::InvalidConfiguration(format!(
+                    "case {} branch {name:?} is ambiguous (indices {previous} and {index})",
+                    self.id
+                )));
+            }
+            selected = Some(index);
+        }
+        selected.ok_or_else(|| RuntimeError::InvalidConfiguration(format!(
+            "case {} branch {name:?} was not found", self.id
+        )))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
