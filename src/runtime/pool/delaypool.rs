@@ -174,11 +174,8 @@ impl DelayPool {
         Ok(())
     }
 
-    pub async fn stop(&self) {
-        self.stop_with_context(MessageContext::new()).await;
-    }
 
-    pub async fn stop_with_context(&self, context: MessageContext) {
+    pub async fn stop(&self, context: MessageContext) {
         {
             let mut state = self.state.lock().await;
             state.stopped = true;
@@ -224,7 +221,7 @@ mod task_storage_tests {
         })
         .await
         .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), pool.stop())
+        tokio::time::timeout(Duration::from_secs(5), pool.stop(MessageContext::new()))
             .await
             .expect("accepted callback must finish before the pool stops");
         assert_eq!(completed.load(Ordering::Acquire), 2);
@@ -312,6 +309,6 @@ mod tests {
 
         assert_eq!(pool.active_tasks.load(Ordering::Acquire), 1);
         let _ = release.send(());
-        pool.stop().await;
+        pool.stop(MessageContext::new()).await;
     }
 }

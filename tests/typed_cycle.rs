@@ -123,5 +123,5 @@ async fn typed_cycle_has_a_finite_future_and_preserves_each_invocation() {
         assert_eq!(observed["public-source"], [1, 0]);
         assert_eq!(observed.len(), 34);
     }
-    environment.delay_pool().stop().await;
+    environment.delay_pool().stop(servicelib::runtime::common::MessageContext::new()).await;
 }

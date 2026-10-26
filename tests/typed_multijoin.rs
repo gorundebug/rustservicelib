@@ -192,7 +192,7 @@ async fn typed_multijoin_preserves_slots_across_all_arrival_orders_and_concurren
             .emit(MessageContext::new(), Payload::new((100, 7)))
             .await;
         assert_eq!(receiver.try_recv().unwrap().1, (100, 7));
-        environment.delay_pool().stop().await;
+        environment.delay_pool().stop(servicelib::runtime::common::MessageContext::new()).await;
     })
     .await
     .unwrap();
@@ -229,5 +229,5 @@ async fn multijoin_ttl_keeps_the_typed_collector_and_original_context_alive() {
         .unwrap();
     assert_eq!(context.stream_id(), Some("ttl-multi"));
     assert_eq!(value, (7, 11));
-    environment.delay_pool().stop().await;
+    environment.delay_pool().stop(servicelib::runtime::common::MessageContext::new()).await;
 }

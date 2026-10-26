@@ -208,7 +208,7 @@ async fn typed_chain_boxes_concrete_continuations_once_per_link_call() {
         "the public Stream entry adds one erased future to the concrete link continuations"
     );
     assert_eq!(total.load(Ordering::Relaxed), (CALLS * 2 + 2) * 3);
-    environment.delay_pool().stop().await;
+    environment.delay_pool().stop(servicelib::runtime::common::MessageContext::new()).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -241,7 +241,7 @@ async fn dynamic_control_counts_each_operator_boundary() {
     eprintln!("dynamic control: calls={CALLS} allocations={allocations:?}");
     assert_eq!(allocations.calls, CALLS * 5);
     assert_eq!(total.load(Ordering::Relaxed), (CALLS + 1) * 3);
-    environment.delay_pool().stop().await;
+    environment.delay_pool().stop(servicelib::runtime::common::MessageContext::new()).await;
 }
 
 struct PaddedCapture<const BYTES: usize>(Arc<AtomicUsize>);
@@ -287,7 +287,7 @@ async fn padded_chain_sizes<const BYTES: usize>() -> (usize, usize) {
     input.collect(MessageContext::new(), [1, 2]).await;
     root.emit(MessageContext::new(), Payload::new([1, 2])).await;
     assert_eq!(total.load(Ordering::Relaxed), 6);
-    environment.delay_pool().stop().await;
+    environment.delay_pool().stop(servicelib::runtime::common::MessageContext::new()).await;
     (terminal_size, continuation_size)
 }
 

@@ -210,12 +210,12 @@ async fn local_links_preserve_large_payload_and_do_not_invoke_serde() {
                     results.push(payload);
                 }
                 if let Some(pool) = fifo {
-                    pool.stop().await;
+                    pool.stop(servicelib::runtime::common::MessageContext::new()).await;
                 }
                 if let Some(pool) = priority {
-                    pool.stop().await;
+                    pool.stop(servicelib::runtime::common::MessageContext::new()).await;
                 }
-                environment.delay_pool().stop().await;
+                environment.delay_pool().stop(servicelib::runtime::common::MessageContext::new()).await;
                 assert_eq!(CODEC_CALLS.load(Ordering::SeqCst), 0);
                 assert_eq!(dropped.load(Ordering::SeqCst), 0);
                 results.pop();

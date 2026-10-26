@@ -107,7 +107,7 @@ async fn typed_case_routes_concrete_branches_and_preserves_public_stream_entries
         assert!(context.is_cancelled());
     }
     assert!(receiver.try_recv().is_err());
-    environment.delay_pool().stop().await;
+    environment.delay_pool().stop(servicelib::runtime::common::MessageContext::new()).await;
 }
 
 #[tokio::test]
@@ -126,7 +126,7 @@ async fn typed_case_rejects_an_invalid_index_instead_of_losing_the_message() {
         .catch_unwind()
         .await;
     assert!(panic.is_err());
-    environment.delay_pool().stop().await;
+    environment.delay_pool().stop(servicelib::runtime::common::MessageContext::new()).await;
 }
 
 #[tokio::test]
@@ -143,6 +143,6 @@ async fn named_case_binding_tracks_registration_order_and_rejects_duplicates() {
         assert_eq!(case.when_index("node-4").unwrap(), usize::from(!reversed));
         case.when(&config(3, 2).into());
         assert!(case.when_index("node-3").is_err());
-        environment.delay_pool().stop().await;
+        environment.delay_pool().stop(servicelib::runtime::common::MessageContext::new()).await;
     }
 }

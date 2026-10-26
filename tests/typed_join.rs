@@ -155,7 +155,7 @@ async fn typed_join_shares_state_between_inputs_and_preserves_public_entries() {
             .emit(MessageContext::new(), Payload::new((100, 7)))
             .await;
         assert_eq!(receiver.try_recv().unwrap().1, (100, 7));
-        environment.delay_pool().stop().await;
+        environment.delay_pool().stop(servicelib::runtime::common::MessageContext::new()).await;
     })
     .await
     .unwrap();
@@ -191,5 +191,5 @@ async fn ttl_retains_typed_output_after_operator_handles_are_dropped() {
         .unwrap();
     assert_eq!(context.stream_id(), Some("ttl"));
     assert_eq!(result, (7, 11));
-    environment.delay_pool().stop().await;
+    environment.delay_pool().stop(servicelib::runtime::common::MessageContext::new()).await;
 }

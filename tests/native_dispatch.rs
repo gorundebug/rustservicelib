@@ -230,10 +230,10 @@ async fn typed_and_dynamic_entries_preserve_context_and_payload_across_all_sched
             }
         }
         if let Some(pool) = pool {
-            pool.stop().await;
+            pool.stop(servicelib::runtime::common::MessageContext::new()).await;
         }
         if let Some(pool) = priority_pool {
-            pool.stop().await;
+            pool.stop(servicelib::runtime::common::MessageContext::new()).await;
         }
     }
 }

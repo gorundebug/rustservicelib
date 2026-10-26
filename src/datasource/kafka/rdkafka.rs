@@ -285,6 +285,8 @@ pub struct RdkafkaKafkaDataSource {
     name: String,
     endpoints: Mutex<Vec<Arc<dyn KafkaInputEndpoint>>>,
     state: Mutex<u8>,
+    lifecycle: AsyncMutex<()>,
+    active_endpoints: Mutex<Vec<Arc<dyn KafkaInputEndpoint>>>,
 }
 
 impl RdkafkaKafkaDataSource {
@@ -295,6 +297,8 @@ impl RdkafkaKafkaDataSource {
             name,
             endpoints: Mutex::new(Vec::new()),
             state: Mutex::new(0),
+            lifecycle: AsyncMutex::new(()),
+            active_endpoints: Mutex::new(Vec::new()),
         })
     }
 
@@ -476,73 +480,23 @@ impl DataSource for RdkafkaKafkaDataSource {
     }
 }
 
-#[async_trait]
-impl Lifecycle for RdkafkaKafkaDataSource {
-    async fn start(&self, context: MessageContext) -> RuntimeResult<()> {
-        {
-            let mut state = self
-                .state
-                .lock()
-                .expect("Kafka datasource state lock poisoned");
-            match *state {
-                0 => *state = 1,
-                1 => {
-                    return Err(RuntimeError::ResourceAlreadyStarted(self.name.clone()));
-                }
-                _ => return Err(RuntimeError::ResourceStopped(self.name.clone())),
-            }
-        }
-        let endpoints = self
-            .endpoints
-            .lock()
-            .expect("Kafka datasource endpoints lock poisoned")
-            .clone();
-        if let Err(error) = self.create_topics(&endpoints).await {
-            *self
-                .state
-                .lock()
-                .expect("Kafka datasource state lock poisoned") = 0;
-            return Err(RuntimeError::Transport(error.to_string()));
-        }
-        let mut started: Vec<Arc<dyn KafkaInputEndpoint>> = Vec::new();
-        for endpoint in &endpoints {
-            if let Err(error) = endpoint.start(context.clone()).await {
-                for endpoint in started.into_iter().rev() {
-                    let _ = endpoint.stop(context.clone()).await;
-                }
-                *self
-                    .state
-                    .lock()
-                    .expect("Kafka datasource state lock poisoned") = 0;
-                return Err(error);
-            }
-            started.push(Arc::clone(endpoint));
-        }
-        Ok(())
-    }
-
-    async fn stop(&self, context: MessageContext) -> RuntimeResult<()> {
-        {
-            let mut state = self
-                .state
-                .lock()
-                .expect("Kafka datasource state lock poisoned");
-            if *state == 2 {
-                return Ok(());
-            }
-            *state = 2;
-        }
-        let endpoints = self
-            .endpoints
-            .lock()
-            .expect("Kafka datasource endpoints lock poisoned")
-            .clone();
+impl RdkafkaKafkaDataSource {
+    // The lifecycle gate serializes callers. Ownership is recorded before each
+    // start await so even a dropped startup future can be cleaned up by stop.
+    async fn stop_active_endpoints(&self, context: &MessageContext) -> RuntimeResult<()> {
+        let endpoints = self.active_endpoints.lock()
+            .expect("Kafka active endpoints lock poisoned").clone();
         let mut first_error = None;
         for endpoint in endpoints.iter().rev() {
-            if let Err(error) = endpoint.stop(context.clone()).await
-                && first_error.is_none()
-            {
-                first_error = Some(error);
+            match endpoint.stop(context.clone()).await {
+                Ok(()) => self.active_endpoints.lock()
+                    .expect("Kafka active endpoints lock poisoned")
+                    .retain(|active| !Arc::ptr_eq(active, endpoint)),
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
             }
         }
         match first_error {
@@ -552,6 +506,72 @@ impl Lifecycle for RdkafkaKafkaDataSource {
     }
 }
 
+#[async_trait]
+impl Lifecycle for RdkafkaKafkaDataSource {
+    async fn start(&self, context: MessageContext) -> RuntimeResult<()> {
+        let _lifecycle = tokio::select! {
+            biased;
+            () = context.cancelled() => return Err(RuntimeError::ContextCancelled),
+            gate = self.lifecycle.lock() => gate,
+        };
+        {
+            let mut state = self.state.lock().expect("Kafka datasource state lock poisoned");
+            match *state {
+                0 => *state = 1,
+                1 => return Err(RuntimeError::ResourceAlreadyStarted(self.name.clone())),
+                _ => return Err(RuntimeError::ResourceStopped(self.name.clone())),
+            }
+        }
+        let endpoints = self.endpoints.lock()
+            .expect("Kafka datasource endpoints lock poisoned").clone();
+        let topics = tokio::select! {
+            biased;
+            () = context.cancelled() => Err(RuntimeError::ContextCancelled),
+            result = self.create_topics(&endpoints) => {
+                result.map_err(|error| RuntimeError::Transport(error.to_string()))
+            }
+        };
+        if let Err(error) = topics {
+            *self.state.lock().expect("Kafka datasource state lock poisoned") = 0;
+            return Err(error);
+        }
+        for endpoint in endpoints {
+            self.active_endpoints.lock().expect("Kafka active endpoints lock poisoned")
+                .push(Arc::clone(&endpoint));
+            if let Err(error) = endpoint.start(context.clone()).await {
+                *self.state.lock().expect("Kafka datasource state lock poisoned") = 3;
+                match self.stop_active_endpoints(&context).await {
+                    Ok(()) => *self.state.lock()
+                        .expect("Kafka datasource state lock poisoned") = 2,
+                    Err(cleanup_error) => tracing::warn!(
+                        error = %cleanup_error,
+                        "Kafka startup rollback incomplete; endpoints remain owned for stop retry"
+                    ),
+                }
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    async fn stop(&self, context: MessageContext) -> RuntimeResult<()> {
+        let _lifecycle = tokio::select! {
+            biased;
+            gate = self.lifecycle.lock() => gate,
+            () = context.cancelled() => return Err(RuntimeError::ContextCancelled),
+        };
+        {
+            let mut state = self.state.lock().expect("Kafka datasource state lock poisoned");
+            if *state == 2 {
+                return Ok(());
+            }
+            *state = 3;
+        }
+        self.stop_active_endpoints(&context).await?;
+        *self.state.lock().expect("Kafka datasource state lock poisoned") = 2;
+        Ok(())
+    }
+}
 fn make_client_config(config: &KafkaDataConnectorConfig) -> RuntimeResult<ClientConfig> {
     let mut client_config = ClientConfig::new();
     client_config.set("bootstrap.servers", &config.brokers);
@@ -726,6 +746,7 @@ where
             Arc::clone(current.as_ref().expect("Kafka consumer initialized"))
         };
         self.endpoint_consumer.start();
+        let context = context.child();
         *self.context.lock().await = Some(context.clone());
         let endpoint_consumer = Arc::clone(&self.endpoint_consumer);
         let tracing_enabled = self.environment.tracing_enabled();
@@ -846,17 +867,27 @@ where
     async fn stop(&self, context: MessageContext) -> RuntimeResult<()> {
         self.endpoint_consumer.stop();
         self.stop.cancel();
-        if let Some(lifecycle_context) = self.context.lock().await.take() {
+        // Never take the handle before joining: cancelling this wait must not
+        // detach an accepted handler or make a subsequent stop report success.
+        let mut task = tokio::select! {
+            biased;
+            task = self.task.lock() => task,
+            () = context.cancelled() => return Err(RuntimeError::ContextCancelled),
+        };
+        if let Some(lifecycle_context) = self.context.lock().await.as_ref() {
             lifecycle_context.cancel();
         }
-        if let Some(task) = self.task.lock().await.take() {
-            tokio::select! {
-                _ = task => {}
-                _ = context.cancelled() => {
-                    return Err(RuntimeError::ContextCancelled);
-                }
-            }
+        if let Some(handle) = task.as_mut() {
+            let result = tokio::select! {
+                biased;
+                result = handle => result,
+                () = context.cancelled() => return Err(RuntimeError::ContextCancelled),
+            };
+            *task = None;
+            result.map_err(|error| RuntimeError::Transport(error.to_string()))?;
         }
+        *self.context.lock().await = None;
+        self.consumer.lock().await.take();
         Ok(())
     }
 }
@@ -1416,3 +1447,7 @@ where
         }
     }
 }
+
+#[cfg(test)]
+#[path = "rdkafka_lifecycle_tests.rs"]
+mod lifecycle_tests;

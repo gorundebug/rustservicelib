@@ -123,7 +123,7 @@ async fn typed_input_keeps_concurrent_results_context_and_public_result_entry() 
         weak.upgrade().is_none(),
         "result link must not retain the input graph in an Arc cycle"
     );
-    environment.delay_pool().stop().await;
+    environment.delay_pool().stop(servicelib::runtime::common::MessageContext::new()).await;
 }
 
 struct PendingResult {
@@ -167,5 +167,5 @@ async fn typed_input_retains_pending_result_without_retaining_the_input_graph() 
         .unwrap();
     assert_eq!(receiver.try_recv().unwrap(), 42);
     assert!(weak.upgrade().is_none());
-    environment.delay_pool().stop().await;
+    environment.delay_pool().stop(servicelib::runtime::common::MessageContext::new()).await;
 }

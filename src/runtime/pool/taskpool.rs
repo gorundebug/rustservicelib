@@ -40,10 +40,7 @@ impl TaskPool {
     ) -> RuntimeResult<()> {
         self.inner.add_task(context, 0, task).await
     }
-    pub async fn stop(self: &Arc<Self>) {
-        self.stop_with_context(MessageContext::new()).await;
-    }
-    pub async fn stop_with_context(self: &Arc<Self>, context: MessageContext) {
+    pub async fn stop(self: &Arc<Self>, context: MessageContext) {
         self.inner.stop(context).await;
     }
 }

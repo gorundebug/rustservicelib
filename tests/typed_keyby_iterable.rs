@@ -181,12 +181,12 @@ async fn typed_keyby_and_iterable_keep_live_streams_context_and_serde_in_every_c
             values.sort_unstable();
             assert_eq!(values, vec![1, 2, 3, 4, 5, 6]);
             if let Some(pool) = fifo {
-                pool.stop().await;
+                pool.stop(servicelib::runtime::common::MessageContext::new()).await;
             }
             if let Some(pool) = priority {
-                pool.stop().await;
+                pool.stop(servicelib::runtime::common::MessageContext::new()).await;
             }
-            environment.delay_pool().stop().await;
+            environment.delay_pool().stop(servicelib::runtime::common::MessageContext::new()).await;
             assert!(receiver.try_recv().is_err());
         }
     })

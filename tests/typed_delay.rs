@@ -131,7 +131,7 @@ async fn scheduled_typed_output_owns_payload_after_the_call_and_handles_are_gone
         drop(payload);
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
         assert_eq!(rejected.load(Ordering::SeqCst), 0);
-        environment.delay_pool().stop().await;
+        environment.delay_pool().stop(servicelib::runtime::common::MessageContext::new()).await;
     })
     .await
     .unwrap();
@@ -192,7 +192,7 @@ async fn zero_delay_keeps_all_public_entries_live_even_after_cancellation() {
     }
     assert_eq!(dropped.load(Ordering::SeqCst), 3);
     assert_eq!(rejected.load(Ordering::SeqCst), 0);
-    environment.delay_pool().stop().await;
+    environment.delay_pool().stop(servicelib::runtime::common::MessageContext::new()).await;
 }
 
 #[tokio::test]
@@ -224,7 +224,7 @@ async fn positive_delay_preserves_rejection_and_accepted_cancellation() {
                 context.cancel();
             }
             if mode == 1 {
-                environment.delay_pool().stop().await;
+                environment.delay_pool().stop(servicelib::runtime::common::MessageContext::new()).await;
             }
             input
                 .collect(
@@ -237,7 +237,7 @@ async fn positive_delay_preserves_rejection_and_accepted_cancellation() {
             if mode == 2 {
                 context.cancel();
             }
-            environment.delay_pool().stop().await;
+            environment.delay_pool().stop(servicelib::runtime::common::MessageContext::new()).await;
             assert!(receiver.try_recv().is_err());
             assert_eq!(rejected.load(Ordering::SeqCst), usize::from(mode != 2));
             assert_eq!(dropped.load(Ordering::SeqCst), 1);

@@ -45,9 +45,9 @@ impl Scheduler {
 
     async fn stop(&self) {
         match self {
-            Self::Fifo(pool) => pool.stop().await,
-            Self::Priority(pool) => pool.stop().await,
-            Self::Delay(pool) => pool.stop().await,
+            Self::Fifo(pool) => pool.stop(servicelib::runtime::common::MessageContext::new()).await,
+            Self::Priority(pool) => pool.stop(servicelib::runtime::common::MessageContext::new()).await,
+            Self::Delay(pool) => pool.stop(servicelib::runtime::common::MessageContext::new()).await,
         }
     }
 }

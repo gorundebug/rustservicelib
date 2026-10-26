@@ -92,7 +92,7 @@ async fn typed_sink_keeps_public_input_context_and_endpoint_replacement() {
     assert!(receiver.try_recv().is_err());
     assert_eq!(&*errors.try_recv().unwrap().1, "business failure");
     assert_eq!(sink.endpoint_id(), 7);
-    environment.delay_pool().stop().await;
+    environment.delay_pool().stop(servicelib::runtime::common::MessageContext::new()).await;
 }
 
 #[tokio::test]
@@ -152,7 +152,7 @@ async fn typed_sinks_sharing_an_endpoint_keep_separate_results_and_errors() {
     assert!(results_a.try_recv().is_err());
     assert!(results_b.try_recv().is_err());
     assert_eq!(a.endpoint_id(), b.endpoint_id());
-    environment.delay_pool().stop().await;
+    environment.delay_pool().stop(servicelib::runtime::common::MessageContext::new()).await;
 }
 
 struct PendingEndpoint {
@@ -206,5 +206,5 @@ async fn typed_sink_retains_a_pending_endpoint_until_delivery_finishes() {
     assert_eq!(*value, 42);
     assert_eq!(context.stream_id(), Some("pending"));
     assert!(weak_endpoint.upgrade().is_none());
-    environment.delay_pool().stop().await;
+    environment.delay_pool().stop(servicelib::runtime::common::MessageContext::new()).await;
 }

@@ -140,5 +140,5 @@ async fn static_chain_depth_does_not_expand_the_callers_future_or_spawn_tasks() 
     output.collect(context.clone(), 12345).await;
     streams[0].emit(context, Payload::new(12345)).await;
     assert_eq!(calls.load(Ordering::Relaxed), 2);
-    environment.delay_pool().stop().await;
+    environment.delay_pool().stop(servicelib::runtime::common::MessageContext::new()).await;
 }

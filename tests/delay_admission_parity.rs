@@ -32,7 +32,7 @@ async fn suspended_callback_does_not_block_other_delays_and_stop_drains_both() {
         .unwrap();
         second_finished.await.unwrap();
 
-        let mut stop = Box::pin(pool.stop());
+        let mut stop = Box::pin(pool.stop(servicelib::runtime::common::MessageContext::new()));
         assert!(futures::poll!(stop.as_mut()).is_pending());
         assert!(
             pool.delay(MessageContext::new(), Duration::ZERO, async {})
@@ -66,7 +66,7 @@ async fn accepted_cancelled_delay_still_executes_callback_once() {
         .await
         .unwrap()
         .unwrap();
-    pool.stop().await;
+    pool.stop(servicelib::runtime::common::MessageContext::new()).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -86,7 +86,7 @@ async fn admission_deadline_expedites_callback_without_restarting_delay() {
         .unwrap()
         .unwrap();
     assert_eq!(completed_at.duration_since(started), Duration::from_secs(2));
-    pool.stop().await;
+    pool.stop(servicelib::runtime::common::MessageContext::new()).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -123,7 +123,7 @@ async fn delay_admission_cancel_stop_race_preserves_exactly_accepted_callbacks()
         let stop_pool = pool.clone();
         let stop = tokio::spawn(async move {
             barrier.wait().await;
-            stop_pool.stop().await;
+            stop_pool.stop(servicelib::runtime::common::MessageContext::new()).await;
         });
 
         let accepted = tokio::time::timeout(Duration::from_secs(5), async {

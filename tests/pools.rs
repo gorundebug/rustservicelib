@@ -93,7 +93,7 @@ async fn fifo_pool_expedites_a_cancelled_queued_task() {
     release.notify_one();
     assert_eq!(receiver.recv().await, Some(3));
     assert_eq!(receiver.recv().await, Some(2));
-    pool.stop().await;
+    pool.stop(servicelib::runtime::common::MessageContext::new()).await;
 }
 
 #[tokio::test]
@@ -146,7 +146,7 @@ async fn priority_pool_is_stable_and_cancelled_task_becomes_first() {
     assert_eq!(receiver.recv().await, Some(4));
     assert_eq!(receiver.recv().await, Some(2));
     assert_eq!(receiver.recv().await, Some(3));
-    pool.stop().await;
+    pool.stop(servicelib::runtime::common::MessageContext::new()).await;
 }
 
 #[tokio::test]
@@ -192,7 +192,7 @@ async fn fifo_pool_monitors_cancellation_for_a_large_queue() {
         Some(257)
     );
     assert_eq!(receiver.recv().await, Some(2));
-    pool.stop().await;
+    pool.stop(servicelib::runtime::common::MessageContext::new()).await;
 }
 
 #[tokio::test]
@@ -241,7 +241,7 @@ async fn priority_pool_monitors_cancellation_for_a_large_queue() {
         Some(257)
     );
     assert_eq!(receiver.recv().await, Some(2));
-    pool.stop().await;
+    pool.stop(servicelib::runtime::common::MessageContext::new()).await;
 }
 
 #[tokio::test]
@@ -264,7 +264,7 @@ async fn task_pool_queues_before_start_and_rejects_after_stop() {
         pool.start(),
         Err(RuntimeError::ResourceAlreadyStarted(_))
     ));
-    pool.stop().await;
+    pool.stop(servicelib::runtime::common::MessageContext::new()).await;
     assert!(matches!(
         pool.add_task(MessageContext::new(), Box::pin(async {}))
             .await,
@@ -299,8 +299,8 @@ async fn task_pools_drain_queued_tasks_when_stopped_before_start() {
         .await
         .unwrap();
 
-    fifo.stop().await;
-    priority.stop().await;
+    fifo.stop(servicelib::runtime::common::MessageContext::new()).await;
+    priority.stop(servicelib::runtime::common::MessageContext::new()).await;
 
     let mut completed = vec![
         receiver.recv().await.unwrap(),
@@ -356,7 +356,7 @@ async fn task_pool_resizes_from_the_published_runtime_config() {
         Some(2)
     );
     release.notify_one();
-    pool.stop().await;
+    pool.stop(servicelib::runtime::common::MessageContext::new()).await;
 }
 
 #[tokio::test]
@@ -371,7 +371,7 @@ async fn delay_pool_expedites_on_cancel_and_rejects_after_stop() {
     .unwrap();
     context.cancel();
     assert_eq!(receiver.recv().await, Some(1));
-    pool.stop().await;
+    pool.stop(servicelib::runtime::common::MessageContext::new()).await;
     assert!(matches!(
         pool.delay(MessageContext::new(), Duration::ZERO, async {})
             .await,
@@ -399,7 +399,7 @@ async fn delay_pool_stop_timeout_reports_but_still_drains_accepted_task() {
     stop_context.cancel();
     let stop_pool = Arc::clone(&pool);
     let stop = tokio::spawn(async move {
-        stop_pool.stop_with_context(stop_context).await;
+        stop_pool.stop(stop_context).await;
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!stop.is_finished());
@@ -439,7 +439,7 @@ async fn delay_pool_wait_queue_length_includes_executing_callback() {
     );
 
     release.notify_one();
-    pool.stop().await;
+    pool.stop(servicelib::runtime::common::MessageContext::new()).await;
     assert!(
         environment
             .metrics()
@@ -473,9 +473,9 @@ async fn registered_pools_publish_the_go_metric_contract() {
         .delay(MessageContext::new(), Duration::ZERO, async {})
         .await
         .unwrap();
-    task_pool.stop().await;
-    priority_pool.stop().await;
-    environment.delay_pool().stop().await;
+    task_pool.stop(servicelib::runtime::common::MessageContext::new()).await;
+    priority_pool.stop(servicelib::runtime::common::MessageContext::new()).await;
+    environment.delay_pool().stop(servicelib::runtime::common::MessageContext::new()).await;
 
     let metrics = environment.metrics().render_prometheus();
     for name in [
@@ -593,7 +593,7 @@ async fn stop_timeout_is_observable_but_pool_still_drains_safely() {
     context.cancel();
     let stop_pool = Arc::clone(&pool);
     let stop = tokio::spawn(async move {
-        stop_pool.stop_with_context(context).await;
+        stop_pool.stop(context).await;
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!stop.is_finished());
@@ -639,7 +639,7 @@ async fn priority_pool_stop_timeout_reports_but_still_drains_worker() {
     stop_context.cancel();
     let stop_pool = Arc::clone(&pool);
     let stop = tokio::spawn(async move {
-        stop_pool.stop_with_context(stop_context).await;
+        stop_pool.stop(stop_context).await;
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!stop.is_finished());
@@ -684,7 +684,7 @@ async fn delay_callbacks_have_independent_tasks_and_do_not_serialize() {
     .unwrap();
     let second = tokio::time::timeout(Duration::from_secs(2), second_rx).await;
     let _ = release_tx.send(());
-    pool.stop().await;
+    pool.stop(servicelib::runtime::common::MessageContext::new()).await;
     assert_ne!(first_id, second.unwrap().unwrap());
 }
 
@@ -702,7 +702,7 @@ async fn delay_deadline_is_measured_from_admission_not_scheduler_poll() {
         .await
         .unwrap()
         .unwrap();
-    pool.stop().await;
+    pool.stop(servicelib::runtime::common::MessageContext::new()).await;
 }
 
 #[tokio::test]
@@ -718,9 +718,9 @@ async fn delay_concurrent_stops_both_wait_for_running_callback() {
     .unwrap();
     started_rx.await.unwrap();
     let first_pool = Arc::clone(&pool);
-    let first = tokio::spawn(async move { first_pool.stop().await });
+    let first = tokio::spawn(async move { first_pool.stop(servicelib::runtime::common::MessageContext::new()).await });
     let second_pool = Arc::clone(&pool);
-    let second = tokio::spawn(async move { second_pool.stop().await });
+    let second = tokio::spawn(async move { second_pool.stop(servicelib::runtime::common::MessageContext::new()).await });
     tokio::task::yield_now().await;
     assert!(!first.is_finished());
     assert!(!second.is_finished());
@@ -749,7 +749,7 @@ async fn delay_cancelled_entries_execute_once_and_release_payloads() {
     }
     drop(payload);
     context.cancel();
-    tokio::time::timeout(Duration::from_secs(5), pool.stop())
+    tokio::time::timeout(Duration::from_secs(5), pool.stop(servicelib::runtime::common::MessageContext::new()))
         .await
         .unwrap();
     assert_eq!(executions.load(Ordering::Relaxed), 1000);
@@ -773,9 +773,9 @@ async fn fifo_concurrent_stop_must_drain() {
     .unwrap();
     started_rx.await.unwrap();
     let first_pool = Arc::clone(&pool);
-    let first = tokio::spawn(async move { first_pool.stop().await });
+    let first = tokio::spawn(async move { first_pool.stop(servicelib::runtime::common::MessageContext::new()).await });
     tokio::task::yield_now().await;
-    let second_returned = tokio::time::timeout(Duration::from_millis(20), pool.stop())
+    let second_returned = tokio::time::timeout(Duration::from_millis(20), pool.stop(servicelib::runtime::common::MessageContext::new()))
         .await
         .is_ok();
     let _ = release_tx.send(());
@@ -804,9 +804,9 @@ async fn priority_concurrent_stop_must_drain() {
     .unwrap();
     started_rx.await.unwrap();
     let first_pool = Arc::clone(&pool);
-    let first = tokio::spawn(async move { first_pool.stop().await });
+    let first = tokio::spawn(async move { first_pool.stop(servicelib::runtime::common::MessageContext::new()).await });
     tokio::task::yield_now().await;
-    let second_returned = tokio::time::timeout(Duration::from_millis(20), pool.stop())
+    let second_returned = tokio::time::timeout(Duration::from_millis(20), pool.stop(servicelib::runtime::common::MessageContext::new()))
         .await
         .is_ok();
     let _ = release_tx.send(());
@@ -868,7 +868,7 @@ async fn fifo_uses_configured_workers_and_zero_means_cpu_count() {
             "callbacks must reuse the configured workers"
         );
         assert_eq!(ids.len(), expected);
-        pool.stop().await;
+        pool.stop(servicelib::runtime::common::MessageContext::new()).await;
     }
 }
 
@@ -889,17 +889,17 @@ async fn fifo_aborted_stop_does_not_lose_drain() {
     .unwrap();
     started_rx.await.unwrap();
     let first_pool = Arc::clone(&pool);
-    let first = tokio::spawn(async move { first_pool.stop().await });
+    let first = tokio::spawn(async move { first_pool.stop(servicelib::runtime::common::MessageContext::new()).await });
     tokio::task::yield_now().await;
     first.abort();
     let _ = first.await;
     assert!(
-        tokio::time::timeout(Duration::from_millis(10), pool.stop())
+        tokio::time::timeout(Duration::from_millis(10), pool.stop(servicelib::runtime::common::MessageContext::new()))
             .await
             .is_err()
     );
     let _ = release_tx.send(());
-    tokio::time::timeout(Duration::from_secs(2), pool.stop())
+    tokio::time::timeout(Duration::from_secs(2), pool.stop(servicelib::runtime::common::MessageContext::new()))
         .await
         .unwrap();
 }
@@ -916,7 +916,7 @@ async fn fifo_start_admission_and_stop_race_preserves_accepted_work() {
         });
         let other = Arc::clone(&pool);
         let stop = tokio::spawn(async move {
-            other.stop().await;
+            other.stop(servicelib::runtime::common::MessageContext::new()).await;
         });
         let done = Arc::clone(&completed);
         let accepted = pool
@@ -990,7 +990,7 @@ async fn priority_uses_configured_workers_and_zero_means_cpu_count() {
             "callbacks must reuse the configured workers"
         );
         assert_eq!(ids.len(), expected);
-        pool.stop().await;
+        pool.stop(servicelib::runtime::common::MessageContext::new()).await;
     }
 }
 
@@ -1012,17 +1012,17 @@ async fn priority_aborted_stop_does_not_lose_drain() {
     .unwrap();
     started_rx.await.unwrap();
     let first_pool = Arc::clone(&pool);
-    let first = tokio::spawn(async move { first_pool.stop().await });
+    let first = tokio::spawn(async move { first_pool.stop(servicelib::runtime::common::MessageContext::new()).await });
     tokio::task::yield_now().await;
     first.abort();
     let _ = first.await;
     assert!(
-        tokio::time::timeout(Duration::from_millis(10), pool.stop())
+        tokio::time::timeout(Duration::from_millis(10), pool.stop(servicelib::runtime::common::MessageContext::new()))
             .await
             .is_err()
     );
     let _ = release_tx.send(());
-    tokio::time::timeout(Duration::from_secs(2), pool.stop())
+    tokio::time::timeout(Duration::from_secs(2), pool.stop(servicelib::runtime::common::MessageContext::new()))
         .await
         .unwrap();
 }
@@ -1039,7 +1039,7 @@ async fn priority_start_admission_and_stop_race_preserves_accepted_work() {
         });
         let other = Arc::clone(&pool);
         let stop = tokio::spawn(async move {
-            other.stop().await;
+            other.stop(servicelib::runtime::common::MessageContext::new()).await;
         });
         let done = Arc::clone(&completed);
         let accepted = pool
@@ -1101,7 +1101,7 @@ async fn fifo_downsize_waits_for_busy_workers_without_starting_extra_callbacks()
     for release in releases {
         let _ = release.send(());
     }
-    pool.stop().await;
+    pool.stop(servicelib::runtime::common::MessageContext::new()).await;
     assert!(!extra_started);
 }
 
@@ -1148,6 +1148,6 @@ async fn priority_downsize_waits_for_busy_workers_without_starting_extra_callbac
     for release in releases {
         let _ = release.send(());
     }
-    pool.stop().await;
+    pool.stop(servicelib::runtime::common::MessageContext::new()).await;
     assert!(!extra_started);
 }

@@ -69,7 +69,15 @@ impl CronJob {
         }
     }
 
-    fn dispatch(&self, scheduled_at: DateTime<Utc>, tasks: &mut tokio::task::JoinSet<()>) {
+    fn dispatch(
+        &self,
+        owner: &MessageContext,
+        scheduled_at: DateTime<Utc>,
+        tasks: &mut tokio::task::JoinSet<()>,
+    ) {
+        if owner.is_cancelled() {
+            return;
+        }
         let overlap_guard = if self.overlap_policy == ScheduleOverlapPolicy::Skip {
             if self
                 .running
@@ -85,10 +93,10 @@ impl CronJob {
         let consumer = Arc::clone(&self.consumer);
         let endpoint_id = self.endpoint_id;
         let endpoint_name = self.endpoint_name.clone();
+        let context = owner.child().with_stream_id(new_stream_id());
         tasks.spawn(async move {
             let _overlap_guard = overlap_guard;
             let fired_at = Utc::now();
-            let context = MessageContext::new().with_stream_id(new_stream_id());
             consumer
                 .consume(
                     context,
@@ -213,8 +221,11 @@ impl DataSource for CronDataSource {
 
 #[async_trait]
 impl Lifecycle for CronDataSource {
-    async fn start(&self, _context: MessageContext) -> RuntimeResult<()> {
+    async fn start(&self, context: MessageContext) -> RuntimeResult<()> {
         let mut scheduler = self.scheduler.lock().await;
+        if context.is_cancelled() {
+            return Err(RuntimeError::ContextCancelled);
+        }
         if scheduler.is_some() {
             return Err(RuntimeError::ResourceAlreadyStarted(self.name.clone()));
         }
@@ -236,33 +247,35 @@ impl Lifecycle for CronDataSource {
                 job,
             });
         }
-        *scheduler = Some(tokio::spawn(run_scheduler(scheduled, cancellation)));
+        *scheduler = Some(tokio::spawn(run_scheduler(scheduled, cancellation, context)));
         Ok(())
     }
 
     async fn stop(&self, context: MessageContext) -> RuntimeResult<()> {
+        // Keep the handle in the owner until physical completion. A cancelled
+        // stop future or an expired shutdown deadline must remain retryable.
+        let mut scheduler = tokio::select! {
+            biased;
+            scheduler = self.scheduler.lock() => scheduler,
+            () = context.cancelled() => return Err(RuntimeError::ContextCancelled),
+        };
         self.cancellation
             .lock()
             .expect("cron cancellation lock poisoned")
             .cancel();
-        if let Some(mut scheduler) = self.scheduler.lock().await.take() {
-            if let Some(remaining) = context.remaining() {
-                tokio::select! {
-                    result = &mut scheduler => {
-                        result.map_err(|error| RuntimeError::Transport(error.to_string()))??;
-                    }
-                    () = tokio::time::sleep(remaining) => {
-                        scheduler.abort();
-                        let _ = scheduler.await;
-                        tracing::warn!("cron datasource stopped by shutdown timeout");
-                    }
-                }
-            } else {
-                scheduler
-                    .await
-                    .map_err(|error| RuntimeError::Transport(error.to_string()))??;
+        let Some(handle) = scheduler.as_mut() else {
+            return Ok(());
+        };
+        let result = tokio::select! {
+            biased;
+            result = handle => result,
+            () = context.cancelled() => {
+                tracing::warn!("cron shutdown context cancelled; accepted work remains owned");
+                return Err(RuntimeError::ContextCancelled);
             }
-        }
+        };
+        *scheduler = None;
+        result.map_err(|error| RuntimeError::Transport(error.to_string()))??;
         Ok(())
     }
 }
@@ -270,22 +283,24 @@ impl Lifecycle for CronDataSource {
 async fn run_scheduler(
     mut scheduled: Vec<ScheduledJob>,
     cancellation: CancellationToken,
+    owner: MessageContext,
 ) -> RuntimeResult<()> {
     let mut tasks = tokio::task::JoinSet::new();
     loop {
         let Some(next) = scheduled.iter().map(|job| job.next).min() else {
-            cancellation.cancelled().await;
+            tokio::select! {
+                () = cancellation.cancelled() => {}
+                () = owner.cancelled() => {}
+            }
             return Ok(());
         };
         let delay = (next - Utc::now()).to_std().unwrap_or_default();
         tokio::select! {
             () = cancellation.cancelled() => {
-                while let Some(result) = tasks.join_next().await {
-                    if let Err(error) = result {
-                        tracing::error!(error = %error, "cron endpoint task failed while draining");
-                    }
-                }
-                return Ok(());
+                break;
+            }
+            () = owner.cancelled() => {
+                break;
             }
             () = tokio::time::sleep(delay) => {}
             result = tasks.join_next(), if !tasks.is_empty() => {
@@ -313,10 +328,18 @@ async fn run_scheduler(
             if due_count == 1
                 || scheduled_job.job.missed_run_policy == ScheduleMissedRunPolicy::FireOnce
             {
-                scheduled_job.job.dispatch(last_due, &mut tasks);
+                scheduled_job.job.dispatch(&owner, last_due, &mut tasks);
             }
         }
     }
+    // Stopping admission never aborts already accepted occurrences. Their
+    // child contexts still inherit the service owner's cancellation/deadline.
+    while let Some(result) = tasks.join_next().await {
+        if let Err(error) = result {
+            tracing::error!(error = %error, "cron endpoint task failed while draining");
+        }
+    }
+    Ok(())
 }
 
 pub struct CronEndpointConsumer<T, R, E, F>
