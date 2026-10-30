@@ -157,13 +157,16 @@ async fn kafka_sink_shares_one_endpoint_between_independent_sink_streams() {
         .unwrap();
     let data_sink = RdkafkaKafkaDataSink::from_stream(&first_sink).unwrap();
 
+    // A shared business handler need not implement Clone. Both bindings retain
+    // the same instance, including its optional partitioner.
+    let handler = Arc::new(Handler {
+        events: Arc::new(Mutex::new(Vec::new())),
+    });
     for sink in [&first_sink, &second_sink] {
         make_rdkafka_kafka_endpoint_consumer_with_partitioner(
             sink,
             Arc::clone(&data_sink),
-            Handler {
-                events: Arc::new(Mutex::new(Vec::new())),
-            },
+            Arc::clone(&handler),
         )
         .unwrap();
     }
@@ -300,9 +303,9 @@ async fn kafka_sink_preserves_lifecycle_partition_and_delivery_result() {
             }
         },
         Some(Arc::new(FixedPartitioner)),
-        Handler {
+        Arc::new(Handler {
             events: Arc::clone(&events),
-        },
+        }),
     )
     .unwrap();
 

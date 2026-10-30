@@ -455,6 +455,12 @@ pub trait Partitioner<T>: Send + Sync {
     fn partition(&self, value: &T, num_partitions: i32) -> HandlerResult<i32>;
 }
 
+impl<T, H: Partitioner<T> + ?Sized> Partitioner<T> for Arc<H> {
+    fn partition(&self, value: &T, num_partitions: i32) -> HandlerResult<i32> {
+        self.as_ref().partition(value, num_partitions)
+    }
+}
+
 pub struct SinkMessage<R, E>
 where
     R: Send + Sync + 'static,
@@ -568,6 +574,66 @@ where
         result: &HandlerResult,
         handler_state: HandlerState,
     );
+}
+
+// Forward the existing boxed future without allocating an async wrapper.
+impl<HandlerState, T, R, E, H> EndpointHandler<HandlerState, T, R, E> for Arc<H>
+where
+    HandlerState: Send + 'static,
+    T: Send + Sync + 'static,
+    R: Send + Sync + 'static,
+    E: Send + Sync + 'static,
+    H: EndpointHandler<HandlerState, T, R, E> + ?Sized,
+{
+    fn get_stream_id(&self, context: &MessageContext, value: &T) -> String {
+        self.as_ref().get_stream_id(context, value)
+    }
+
+    fn begin_request<'owner, 'future>(
+        &'owner self,
+        context: MessageContext,
+        stream: StreamContext<T, R, E>,
+    ) -> futures::future::BoxFuture<'future, (MessageContext, HandlerState)>
+    where
+        'owner: 'future,
+        Self: 'future,
+    {
+        self.as_ref().begin_request(context, stream)
+    }
+
+    fn consume_message<'owner, 'handler_state, 'message, 'future>(
+        &'owner self,
+        context: MessageContext,
+        stream: StreamContext<T, R, E>,
+        handler_state: &'handler_state mut HandlerState,
+        value: Payload<T>,
+        message: &'message mut SinkMessage<R, E>,
+    ) -> futures::future::BoxFuture<'future, HandlerResult>
+    where
+        'owner: 'future,
+        'handler_state: 'future,
+        'message: 'future,
+        Self: 'future,
+    {
+        self.as_ref()
+            .consume_message(context, stream, handler_state, value, message)
+    }
+
+    fn end_request<'owner, 'result, 'future>(
+        &'owner self,
+        context: MessageContext,
+        stream: StreamContext<T, R, E>,
+        result: &'result HandlerResult,
+        handler_state: HandlerState,
+    ) -> futures::future::BoxFuture<'future, ()>
+    where
+        'owner: 'future,
+        'result: 'future,
+        Self: 'future,
+    {
+        self.as_ref()
+            .end_request(context, stream, result, handler_state)
+    }
 }
 
 pub struct RdkafkaKafkaEndpointConsumer<HandlerState, T, R, E, H>

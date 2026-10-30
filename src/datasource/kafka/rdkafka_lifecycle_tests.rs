@@ -149,6 +149,9 @@ async fn abandoned_start_can_be_cleaned_up() {
 struct Handler;
 #[async_trait]
 impl EndpointHandler<(), u32, u32, String> for Handler {
+    async fn on_error(&self, context: MessageContext, stream: StreamContext<u32, u32, String>, error: HandlerError) {
+        stream.error_collect(context, error.to_string()).await;
+    }
     fn concurrency(&self, _: &StreamContext<u32, u32, String>) -> usize { 1 }
     async fn begin_request(&self, context: MessageContext, _: StreamContext<u32, u32, String>)
         -> Result<(MessageContext, ()), HandlerError> { Ok((context, ())) }

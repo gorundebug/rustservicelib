@@ -182,6 +182,14 @@ where
 {
     fn concurrency(&self, stream: &StreamContext<T, R, E>) -> usize;
 
+    /// Transport errors have no message state. Reporting does not select retry policy.
+    async fn on_error(
+        &self,
+        context: MessageContext,
+        stream: StreamContext<T, R, E>,
+        error: HandlerError,
+    );
+
     async fn begin_request(
         &self,
         context: MessageContext,
@@ -725,8 +733,10 @@ where
             let mut current = self.consumer.lock().await;
             if current.is_none() {
                 let mut config = make_client_config(connector)?;
+                // Match the ordinary Kafka input contract across SDKs; never expose aborted data.
                 config
                     .set("group.id", &endpoint.consumer_group)
+                    .set("isolation.level", "read_committed")
                     .set("auto.offset.reset", "earliest")
                     .set("enable.auto.commit", "true")
                     .set("enable.auto.offset.store", "false");
@@ -760,7 +770,17 @@ where
                     _ = context.cancelled() => break,
                     message = consumer.recv() => match message {
                         Ok(message) => message,
-                        Err(_) => continue,
+                        Err(error) => {
+                            tracing::warn!(error = %error, "Kafka consumer receive failed");
+                            if !context.is_cancelled() && !stop.is_cancelled() {
+                                endpoint_consumer.handler.on_error(
+                                    context.clone(),
+                                    endpoint_consumer.stream_context.clone(),
+                                    Box::new(error),
+                                ).await;
+                            }
+                            continue;
+                        },
                     },
                 };
                 let topic = message.topic().to_owned();

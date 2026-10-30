@@ -89,6 +89,64 @@ impl Consumer<String> for Capture {
 
 struct BuildScheduledValue;
 
+#[tokio::test]
+async fn empty_cron_activation_waits_for_explicit_result() {
+    let (environment, input) = runtime(true, "@every 10ms");
+    let results = Stream::new(&StreamConfig::new(3, "scheduled result"), environment.clone());
+    input.set_source(&results).expect("result stream");
+    let source = CronDataSource::new(4, environment).expect("cron datasource");
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let endpoint = make_croner_endpoint_consumer(&source, &input, CaptureInterval(sender))
+        .expect("cron endpoint");
+    let trigger = ScheduleTrigger::new(2, "empty-check", chrono::Utc::now(), chrono::Utc::now(),
+        servicelib::runtime::schedule::ScheduleBackend::Local);
+    let mut activation = tokio::spawn(async move {
+        let context = MessageContext::with_timeout(Duration::from_secs(2)).with_stream_id("empty");
+        endpoint.consume(context, Payload::new(trigger)).await;
+    });
+    let context = tokio::time::timeout(Duration::from_secs(1), receiver.recv()).await
+        .expect("trigger invoked").expect("receiver alive").0;
+    assert!(tokio::time::timeout(Duration::from_millis(20), &mut activation).await.is_err(),
+        "absence of output must not complete an invocation");
+    results.emit(context, Payload::new(())).await;
+    tokio::time::timeout(Duration::from_secs(1), activation).await
+        .expect("explicit result completes invocation").expect("activation joined");
+}
+
+struct CaptureInterval(mpsc::UnboundedSender<(MessageContext, ScheduleTrigger)>);
+
+#[async_trait]
+impl ScheduleEndpointFunction<String> for CaptureInterval {
+    async fn on_trigger(&self, context: MessageContext, trigger: ScheduleTrigger, _out: &Collector<String>) {
+        self.0.send((context, trigger)).expect("interval receiver alive");
+    }
+}
+
+#[tokio::test]
+async fn interval_source_keeps_subsecond_cadence_and_owner() {
+    let (environment, input) = runtime(true, "@every 100ms");
+    let source = CronDataSource::new(4, environment).expect("interval datasource");
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    make_croner_endpoint_consumer(&source, &input, CaptureInterval(sender)).expect("interval endpoint");
+    let owner = MessageContext::with_timeout(Duration::from_secs(5));
+    source.start(owner.clone()).await.expect("start interval");
+    let mut previous: Option<ScheduleTrigger> = None;
+    for _ in 0..3 {
+        let (context, trigger) = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+            .await.expect("interval fired").expect("receiver alive");
+        assert_eq!(context.deadline(), owner.deadline());
+        assert!(context.stream_id().is_some());
+        if let Some(previous) = previous {
+            let delta = (trigger.scheduled_at - previous.scheduled_at).num_milliseconds();
+            assert!(delta >= 100 && delta % 100 == 0);
+            assert_ne!(trigger.trigger_id, previous.trigger_id);
+        }
+        previous = Some(trigger);
+    }
+    owner.cancel();
+    source.stop(MessageContext::new()).await.expect("drain interval");
+}
+
 #[async_trait]
 impl ScheduleEndpointFunction<String> for BuildScheduledValue {
     async fn on_trigger(

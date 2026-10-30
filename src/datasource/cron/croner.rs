@@ -29,10 +29,38 @@ use crate::{
     },
 };
 
+enum LocalSchedule {
+    Calendar(Cron),
+    Interval(i64),
+}
+
+impl LocalSchedule {
+    fn parse(expression: &str) -> RuntimeResult<Self> {
+        if !expression.starts_with("@every") {
+            return Cron::from_str(expression)
+                .map(Self::Calendar)
+                .map_err(|error| RuntimeError::InvalidConfiguration(error.to_string()));
+        }
+        let invalid = || RuntimeError::InvalidConfiguration(
+            "local interval requires @every <10..86400000>ms".to_owned());
+        let digits = expression.strip_prefix("@every ")
+            .and_then(|value| value.strip_suffix("ms")).ok_or_else(invalid)?;
+        if digits.is_empty() || digits.len() > 8 || digits.starts_with('0')
+            || !digits.bytes().all(|value| value.is_ascii_digit()) {
+            return Err(invalid());
+        }
+        let milliseconds = digits.parse::<i64>().map_err(|_| invalid())?;
+        if !(10..=86400000).contains(&milliseconds) {
+            return Err(invalid());
+        }
+        Ok(Self::Interval(milliseconds))
+    }
+}
+
 struct CronJob {
     endpoint_id: i32,
     endpoint_name: String,
-    schedule: Cron,
+    schedule: LocalSchedule,
     timezone: Tz,
     overlap_policy: ScheduleOverlapPolicy,
     missed_run_policy: ScheduleMissedRunPolicy,
@@ -42,14 +70,19 @@ struct CronJob {
 
 impl CronJob {
     fn next(&self, after: DateTime<Utc>) -> RuntimeResult<DateTime<Utc>> {
+        let schedule = match &self.schedule {
+            LocalSchedule::Interval(milliseconds) => {
+                return DateTime::from_timestamp_millis(after.timestamp_millis() + milliseconds)
+                    .ok_or_else(|| RuntimeError::InvalidConfiguration("interval timestamp out of range".to_owned()));
+            }
+            LocalSchedule::Calendar(schedule) => schedule,
+        };
         let mut cursor = after.with_timezone(&self.timezone);
         loop {
-            let candidate = self
-                .schedule
+            let candidate = schedule
                 .find_next_occurrence(&cursor, false)
                 .map_err(|error| RuntimeError::InvalidConfiguration(error.to_string()))?;
-            let matches = self
-                .schedule
+            let matches = schedule
                 .is_time_matching(&candidate)
                 .map_err(|error| RuntimeError::InvalidConfiguration(error.to_string()))?;
             let first_fold = match self.timezone.from_local_datetime(&candidate.naive_local()) {
@@ -67,6 +100,24 @@ impl CronJob {
             // the second instant of an ambiguous fall wall time.
             cursor = candidate;
         }
+    }
+
+    fn due(&self, first: DateTime<Utc>, now: DateTime<Utc>) -> RuntimeResult<(DateTime<Utc>, DateTime<Utc>, bool)> {
+        if let LocalSchedule::Interval(milliseconds) = &self.schedule {
+            // Constant-space/constant-time catch-up; never queue each missed tick.
+            let skipped = (now - first).num_milliseconds() / milliseconds;
+            let latest = first + chrono::TimeDelta::milliseconds(skipped * milliseconds);
+            return Ok((latest, self.next(latest)?, skipped > 0));
+        }
+        let mut latest = first;
+        let mut next = self.next(first)?;
+        let mut missed = false;
+        while next <= now {
+            latest = next;
+            missed = true;
+            next = self.next(next)?;
+        }
+        Ok((latest, next, missed))
     }
 
     fn dispatch(
@@ -316,16 +367,9 @@ async fn run_scheduler(
             if scheduled_job.next > now {
                 continue;
             }
-            let mut last_due = scheduled_job.next;
-            let mut due_count = 1usize;
-            let mut next = scheduled_job.job.next(scheduled_job.next)?;
-            while next <= now {
-                last_due = next;
-                due_count += 1;
-                next = scheduled_job.job.next(next)?;
-            }
+            let (last_due, next, missed) = scheduled_job.job.due(scheduled_job.next, now)?;
             scheduled_job.next = next;
-            if due_count == 1
+            if !missed
                 || scheduled_job.job.missed_run_policy == ScheduleMissedRunPolicy::FireOnce
             {
                 scheduled_job.job.dispatch(&owner, last_due, &mut tasks);
@@ -466,8 +510,7 @@ where
         .environment()
         .register_endpoint_consumer(consumer.clone())?;
     if config.enabled {
-        let schedule = Cron::from_str(&config.schedule)
-            .map_err(|error| RuntimeError::InvalidConfiguration(error.to_string()))?;
+        let schedule = LocalSchedule::parse(&config.schedule)?;
         let timezone = Tz::from_str(&config.timezone)
             .map_err(|error| RuntimeError::InvalidConfiguration(error.to_string()))?;
         data_source.add_job(Arc::new(CronJob {
@@ -523,7 +566,7 @@ mod tests {
         let job = CronJob {
             endpoint_id: 1,
             endpoint_name: "hourly".to_owned(),
-            schedule: Cron::from_str("0 * * * *").expect("valid cron fixture"),
+            schedule: LocalSchedule::parse("0 * * * *").expect("valid cron fixture"),
             timezone: Tz::from_str("UTC").expect("valid timezone fixture"),
             overlap_policy: ScheduleOverlapPolicy::Skip,
             missed_run_policy: ScheduleMissedRunPolicy::Skip,
@@ -540,6 +583,36 @@ mod tests {
                 .single()
                 .expect("valid fixture")
         );
+    }
+
+    #[test]
+    fn local_interval_contract_and_constant_time_catch_up() {
+        for invalid in ["@every", "@every 9ms", "@every 86400001ms", "@every 010ms",
+                        "@every +10ms", "@every -10ms", "@every 1s", "@every 0.1s",
+                        "@every  100ms", "@every 100ms ", "@everywhere 100ms"] {
+            assert!(LocalSchedule::parse(invalid).is_err(), "{invalid}");
+        }
+        for valid in ["@every 10ms", "@every 100ms", "@every 86400000ms"] {
+            assert!(LocalSchedule::parse(valid).is_ok(), "{valid}");
+        }
+        let job = CronJob {
+            endpoint_id: 1, endpoint_name: "interval".to_owned(),
+            schedule: LocalSchedule::parse("@every 100ms").unwrap(),
+            timezone: chrono_tz::UTC, overlap_policy: ScheduleOverlapPolicy::Skip,
+            missed_run_policy: ScheduleMissedRunPolicy::Skip,
+            consumer: Arc::new(NoopConsumer), running: Arc::new(AtomicBool::new(false)),
+        };
+        let start = DateTime::from_timestamp_micros(1793102400123456).unwrap();
+        let first = job.next(start).unwrap();
+        assert_eq!(first.timestamp_millis(), start.timestamp_millis() + 100);
+        assert_eq!(first.timestamp_subsec_nanos() % 1_000_000, 0);
+        let now = first + chrono::TimeDelta::milliseconds(999999999);
+        let (latest, next, missed) = job.due(first, now).unwrap();
+        assert!(missed);
+        assert!(latest <= now && next > now);
+        assert_eq!((latest - first).num_milliseconds() % 100, 0);
+        assert_eq!(next - latest, chrono::TimeDelta::milliseconds(100));
+        assert!(!job.due(first, first).unwrap().2);
     }
 
     struct NoopConsumer;
