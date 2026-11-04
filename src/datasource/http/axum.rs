@@ -527,6 +527,7 @@ where
     pending_requests: PendingRequests,
     request_duration: crate::runtime::environment::metrics::Float64Histogram,
     endpoint_name: String,
+    endpoint_path: String,
     request_tasks: TaskTracker,
 }
 
@@ -641,6 +642,7 @@ where
             None,
         )?,
         endpoint_name: endpoint_config.name.clone(),
+        endpoint_path: endpoint_config.path.clone(),
         request_tasks,
     });
     if input_stream.result_stream().is_some() {
@@ -809,7 +811,8 @@ where
                 component = component_name,
                 endpoint = %self.endpoint_name,
                 method = %data.method,
-                path = %data.uri.path(),
+                // Use the configured route, never request-specific identifiers.
+                path = %self.endpoint_path,
                 error = tracing::field::Empty,
                 otel.status_code = tracing::field::Empty,
                 otel.status_message = tracing::field::Empty,

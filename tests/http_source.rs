@@ -300,3 +300,132 @@ async fn http_source_correlates_pipeline_result_and_waits_for_done() {
         r#"datasource_endpoint_pending_requests{connector="order api",endpoint="process order"} 0"#
     ));
 }
+
+struct PrivatePathHandler {
+    seen: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl EndpointHandler<(), (), (), u32, u32, String> for PrivatePathHandler {
+    async fn begin_request(
+        &self,
+        _context: MessageContext,
+        _: StreamContext<u32, u32, String>,
+        data: HandlerData,
+    ) -> Result<(MessageContext, ()), HandlerError> {
+        self.seen.lock().unwrap().push(data.uri.to_string());
+        data.set_status(StatusCode::BAD_REQUEST);
+        Err(std::io::Error::other("invalid tracking request").into())
+    }
+    async fn consume_message(
+        &self,
+        _: MessageContext,
+        _: StreamContext<u32, u32, String>,
+        _: Arc<AsyncMutex<()>>,
+        _: HandlerData,
+        _: Arc<ResultContext<(), (), (), u32, u32, String>>,
+    ) -> HandlerResult {
+        panic!("rejected request entered graph")
+    }
+    async fn get_message_id(
+        &self,
+        _: &MessageContext,
+        _: &StreamContext<u32, u32, String>,
+        _: Arc<AsyncMutex<()>>,
+        _: &u32,
+    ) -> String {
+        unreachable!()
+    }
+    async fn end_request(
+        &self,
+        _: MessageContext,
+        _: StreamContext<u32, u32, String>,
+        _: &HandlerResult,
+        _: Arc<AsyncMutex<()>>,
+        _: HandlerData,
+    ) {
+        panic!("begin failure ran end_request")
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn http_trace_records_route_not_private_request_path() {
+    use servicelib::runtime::testtracing::TestTracing;
+    use tracing_subscriber::prelude::*;
+    let spans = TestTracing::default();
+    let subscriber = tracing_subscriber::registry().with(spans.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let environment = RuntimeEnvironment::default();
+    let input_config = InputStreamConfig {
+        stream: StreamConfig::new(1, "private input"),
+        endpoint_id: 7,
+    };
+    environment.publish_runtime_config(Arc::new(
+        RuntimeConfig::from_parts(
+            CallSemantics::FunctionCall,
+            [],
+            [RuntimeStreamConfig::from(input_config.clone())],
+            [],
+            [],
+            [],
+            [],
+        )
+        .unwrap(),
+    ));
+    let endpoint_config = HttpEndpointConfig {
+        id: 7,
+        name: "notice".to_owned(),
+        id_data_connector: 8,
+        tracing_enabled: true,
+        http_method_type: HTTPMethodType::GET,
+        path: "/notice/{id}".to_owned(),
+    };
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let endpoint = make_endpoint_consumer::<(), (), (), u32, u32, String, _>(
+        InputStream::new(&input_config, environment),
+        endpoint_config.clone(),
+        "api",
+        PrivatePathHandler { seen: seen.clone() },
+    )
+    .unwrap();
+    for uri in [
+        "/notice/private-subject?token=private-grant",
+        "/notice/other-subject?token=other-grant",
+    ] {
+        let response = endpoint
+            .router(&endpoint_config)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .header("x-trace", "1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(seen.lock().unwrap().last().unwrap(), uri);
+    }
+    let completed = spans.spans();
+    let inputs: Vec<_> = completed
+        .iter()
+        .filter(|span| span.name == "http.input")
+        .collect();
+    assert_eq!(inputs.len(), 2);
+    for span in inputs {
+        assert_eq!(span.fields["path"], "/notice/{id}");
+        let text = format!("{span:?}");
+        for private in [
+            "private-subject",
+            "private-grant",
+            "other-subject",
+            "other-grant",
+        ] {
+            assert!(
+                !text.contains(private),
+                "private request value entered trace"
+            );
+        }
+    }
+}
