@@ -32,6 +32,7 @@ struct ErrorProbe {
 
 #[async_trait]
 impl EndpointHandler<(), u32, u32, String> for ErrorProbe {
+    fn restore_checkpoint(&self, _: &MessageContext, _: &StreamContext<u32, u32, String>) -> Result<Option<std::collections::BTreeMap<i32, i64>>, Box<dyn std::error::Error + Send + Sync>> { Ok(None) }
     fn concurrency(&self, _: &StreamContext<u32, u32, String>) -> usize { 1 }
 
     async fn on_error(&self, context: MessageContext, _: StreamContext<u32, u32, String>, error: HandlerError) {

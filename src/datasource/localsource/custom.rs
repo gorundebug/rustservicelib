@@ -617,6 +617,7 @@ where
     name: String,
     endpoint_consumer: Arc<CustomEndpointConsumer<HandlerState, T, R, E, H>>,
     producer: Arc<P>,
+    enabled: bool,
     cancellation: CancellationToken,
     producer_task: AsyncMutex<Option<JoinHandle<()>>>,
 }
@@ -714,7 +715,7 @@ where
             )?,
         },
     });
-    if endpoint_consumer.input_stream.result_stream().is_some() {
+    if endpoint.enabled && endpoint_consumer.input_stream.result_stream().is_some() {
         endpoint_consumer
             .input_stream
             .stream()
@@ -734,6 +735,7 @@ where
         name,
         endpoint_consumer,
         producer: Arc::new(producer),
+        enabled: endpoint.enabled,
         cancellation: CancellationToken::new(),
         producer_task: AsyncMutex::new(None),
     }))
@@ -786,6 +788,9 @@ where
     P: DataProducer<T> + 'static,
 {
     async fn start(&self, context: MessageContext) -> RuntimeResult<()> {
+        if !self.enabled {
+            return Ok(());
+        }
         let producer = Arc::clone(&self.producer);
         let consumer = self.endpoint_consumer.clone();
         let cancellation = self.cancellation.clone();
@@ -799,6 +804,9 @@ where
     }
 
     async fn stop(&self, context: MessageContext) -> RuntimeResult<()> {
+        if !self.enabled {
+            return Ok(());
+        }
         self.endpoint_consumer.stop();
         self.cancellation.cancel();
         self.producer.stop(context).await;

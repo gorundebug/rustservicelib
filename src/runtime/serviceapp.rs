@@ -644,7 +644,21 @@ impl ServiceApp {
             .collect()
     }
 
+    /// Start graph resources and sinks without datasource, gRPC or HTTP admission.
+    /// Choose start_graph OR start once per lifecycle; stop releases either mode.
+    pub async fn start_graph(&self, context: MessageContext) -> RuntimeResult<()> {
+        self.start_with_admission(context, false).await
+    }
+
     pub async fn start(&self, context: MessageContext) -> RuntimeResult<()> {
+        self.start_with_admission(context, true).await
+    }
+
+    async fn start_with_admission(
+        &self,
+        context: MessageContext,
+        admission: bool,
+    ) -> RuntimeResult<()> {
         let config = self.config();
         {
             let mut state = self.state.lock().await;
@@ -678,11 +692,13 @@ impl ServiceApp {
             }
             // Sources may emit from start(), so open graph admission only
             // after every downstream resource is ready.
-            for resource in &data_sources {
-                resource.start(context.clone()).await?;
+            if admission {
+                for resource in &data_sources {
+                    resource.start(context.clone()).await?;
+                }
+                self.start_grpc_server().await?;
+                self.start_http_server().await?;
             }
-            self.start_grpc_server().await?;
-            self.start_http_server().await?;
             RuntimeResult::Ok(())
         }
         .await;
@@ -942,63 +958,68 @@ mod tests {
 
     #[tokio::test]
     async fn sources_start_after_all_downstream_resources() {
-        let service = ServiceConfig {
-            id: 1,
-            name: "startup-order".to_owned(),
-            http_host: "127.0.0.1".to_owned(),
-            http_port: 0,
-            grpc_host: "127.0.0.1".to_owned(),
-            grpc_port: 0,
-            shutdown_timeout: 1_000,
-            ..ServiceConfig::default()
-        };
-        let events = Arc::new(StdMutex::new(Vec::new()));
-        let environment = RuntimeEnvironment::default();
-        environment.publish_runtime_config(Arc::new(
-            RuntimeConfig::from_parts(
-                CallSemantics::FunctionCall,
-                [service.clone()],
-                [],
-                [],
-                [],
-                [],
-                [],
-            )
-            .expect("test runtime config"),
-        ));
-        environment.register_storage(Arc::new(RecordingStorage {
-            events: Arc::clone(&events),
-        }));
-        let mut app = ServiceApp::new(environment, service).expect("test service");
-        app.add_component(Arc::new(RecordingResource {
-            id: 2,
-            name: "component",
-            events: Arc::clone(&events),
-        }))
-        .expect("register component");
-        app.register_data_sink(Arc::new(RecordingSink(RecordingResource {
-            id: 3,
-            name: "sink",
-            events: Arc::clone(&events),
-        })))
-        .expect("register sink");
-        app.register_data_source(Arc::new(RecordingResource {
-            id: 4,
-            name: "source",
-            events: Arc::clone(&events),
-        }))
-        .expect("register source");
+        for graph_only in [false, true] {
+            let service = ServiceConfig {
+                id: 1,
+                name: "startup-order".to_owned(),
+                http_host: "127.0.0.1".to_owned(),
+                http_port: 0,
+                grpc_host: "127.0.0.1".to_owned(),
+                grpc_port: 0,
+                shutdown_timeout: 1_000,
+                ..ServiceConfig::default()
+            };
+            let events = Arc::new(StdMutex::new(Vec::new()));
+            let environment = RuntimeEnvironment::default();
+            environment.publish_runtime_config(Arc::new(
+                RuntimeConfig::from_parts(
+                    CallSemantics::FunctionCall,
+                    [service.clone()],
+                    [],
+                    [],
+                    [],
+                    [],
+                    [],
+                )
+                .expect("test runtime config"),
+            ));
+            environment.register_storage(Arc::new(RecordingStorage {
+                events: Arc::clone(&events),
+            }));
+            let mut app = ServiceApp::new(environment, service).expect("test service");
+            app.add_component(Arc::new(RecordingResource {
+                id: 2,
+                name: "component",
+                events: Arc::clone(&events),
+            }))
+            .expect("register component");
+            app.register_data_sink(Arc::new(RecordingSink(RecordingResource {
+                id: 3,
+                name: "sink",
+                events: Arc::clone(&events),
+            })))
+            .expect("register sink");
+            app.register_data_source(Arc::new(RecordingResource {
+                id: 4,
+                name: "source",
+                events: Arc::clone(&events),
+            }))
+            .expect("register source");
 
-        app.start(MessageContext::new())
-            .await
-            .expect("start test service");
-        assert_eq!(
-            *events.lock().expect("lifecycle event log poisoned"),
-            vec!["storage", "component", "sink", "source"]
-        );
-        app.stop(MessageContext::new())
-            .await
-            .expect("stop test service");
+            if graph_only {
+                app.start_graph(MessageContext::new()).await.expect("start graph");
+                assert!(app.http_task.lock().await.is_none());
+                assert!(app.grpc_task.lock().await.is_none());
+            } else {
+                app.start(MessageContext::new()).await.expect("start test service");
+            }
+            let expected = if graph_only { vec!["storage", "component", "sink"] }
+                else { vec!["storage", "component", "sink", "source"] };
+            assert_eq!(*events.lock().expect("event log"), expected);
+            app.stop(MessageContext::new())
+                .await
+                .expect("stop test service");
+        }
     }
 
     #[tokio::test]

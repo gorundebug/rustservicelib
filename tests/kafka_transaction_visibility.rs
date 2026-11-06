@@ -32,6 +32,7 @@ struct Handler(Arc<Mutex<Vec<String>>>);
 
 #[async_trait]
 impl EndpointHandler<(), String, String, String> for Handler {
+    fn restore_checkpoint(&self, _: &MessageContext, _: &StreamContext<String, String, String>) -> Result<Option<std::collections::BTreeMap<i32, i64>>, Box<dyn std::error::Error + Send + Sync>> { Ok(None) }
     fn concurrency(&self, _stream: &StreamContext<String, String, String>) -> usize { 2 }
 
     async fn on_error(&self, _context: MessageContext,

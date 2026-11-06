@@ -94,6 +94,7 @@ impl Consumer<String> for Capture {
 
 async fn run_custom_sink(environment: RuntimeEnvironment, context: MessageContext) {
     let endpoint_config = CustomEndpointConfig {
+        enabled: true,
         id: 10,
         name: "Custom endpoint".to_owned(),
         id_data_connector: 20,

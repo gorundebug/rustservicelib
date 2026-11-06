@@ -122,6 +122,7 @@ impl EndpointHandler<(), i32, i32, String> for Handler {
 async fn custom_source_correlates_result_and_waits_for_done() {
     let environment = RuntimeEnvironment::default();
     let endpoint = CustomEndpointConfig {
+        enabled: true,
         id: 10,
         name: "Input endpoint".to_owned(),
         id_data_connector: 20,
@@ -176,4 +177,67 @@ async fn custom_source_correlates_result_and_waits_for_done() {
         r#"datasource_endpoint_messages_total{connector="Custom connector",endpoint="Input endpoint"} 1"#
     ));
     assert!(!metrics.contains(r#"protocol="local""#));
+}
+
+struct DisabledProducer;
+#[async_trait]
+impl DataProducer<i32> for DisabledProducer {
+    async fn start(&self, _: MessageContext, _: Arc<impl Consumer<i32> + 'static>) -> HandlerResult { panic!("disabled producer started") }
+    async fn stop(&self, _: MessageContext) { panic!("disabled producer stopped") }
+}
+#[tokio::test]
+async fn disabled_custom_source_does_not_invoke_producer() {
+    let environment = RuntimeEnvironment::default();
+    let endpoint = CustomEndpointConfig {
+        enabled: false,
+        id: 10,
+        name: "Input endpoint".to_owned(),
+        id_data_connector: 20,
+        tracing_enabled: false,
+    };
+    environment.publish_runtime_config(Arc::new(
+        RuntimeConfig::from_parts(
+            CallSemantics::FunctionCall,
+            [],
+            [],
+            [],
+            [CustomDataConnectorConfig {
+                id: 20,
+                name: "Custom connector".to_owned(),
+            }
+            .into()],
+            [endpoint.clone().into()],
+            [],
+        )
+        .unwrap(),
+    ));
+    let input = InputStream::<i32, i32, String>::new(
+        &InputStreamConfig {
+            stream: StreamConfig::new(1, "Input"),
+            endpoint_id: 10,
+        },
+        environment.clone(),
+    );
+    let result = input
+        .stream()
+        .map(&(StreamConfig::new(2, "Double").into()), Double)
+        .unwrap();
+    input.set_source(&result).unwrap();
+    let (finished, mut wait_finished) = oneshot::channel();
+    let data_source = make_custom_endpoint_consumer(
+        input,
+        &endpoint,
+        DisabledProducer,
+        Handler {
+            finished: Mutex::new(Some(finished)),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(data_source.id(), i32::MIN | 1);
+
+    data_source.start(MessageContext::new()).await.unwrap();
+    tokio::task::yield_now().await;
+    assert!(matches!(wait_finished.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+    data_source.stop(MessageContext::new()).await.unwrap();
 }

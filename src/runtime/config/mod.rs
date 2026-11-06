@@ -312,6 +312,8 @@ pub struct CustomDataConnectorConfig {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CustomEndpointConfig {
+    #[serde(default)]
+    pub enabled: bool,
     pub id: i32,
     pub name: String,
     pub id_data_connector: i32,

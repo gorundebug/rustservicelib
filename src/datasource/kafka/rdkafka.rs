@@ -1,3 +1,4 @@
+use super::checkpoint::{Assignments, CheckpointContext, Restore};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     error::Error,
@@ -53,6 +54,8 @@ pub const IMPLEMENTATION: &str = "rust/rdkafka";
 
 pub type HandlerError = Box<dyn Error + Send + Sync>;
 pub type HandlerResult<T = ()> = Result<T, HandlerError>;
+/// Next offsets of already restored durable state, by endpoint-topic partition.
+pub type CheckpointOffsets = BTreeMap<i32, i64>;
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 pub type StreamContext<T, R, E> = DataSourceStreamContext<T, R, E>;
 
@@ -180,6 +183,11 @@ where
     R: Send + Sync + 'static,
     E: Send + Sync + 'static,
 {
+    /// None retains broker positions; Some enables strict checkpoint restoration.
+    /// Called before startup and assignments. Read available restored state;
+    /// the prefix may be committed, but no later message is acknowledged.
+    fn restore_checkpoint(&self, context: &MessageContext, stream: &StreamContext<T, R, E>) -> HandlerResult<Option<CheckpointOffsets>>;
+
     fn concurrency(&self, stream: &StreamContext<T, R, E>) -> usize;
 
     /// Transport errors have no message state. Reporting does not select retry policy.
@@ -632,7 +640,7 @@ where
     connector_id: i32,
     endpoint_name: String,
     topic: String,
-    consumer: AsyncMutex<Option<Arc<StreamConsumer<LibrdkafkaStatisticsContext>>>>,
+    consumer: Arc<AsyncMutex<Option<Arc<StreamConsumer<CheckpointContext>>>>>,
     endpoint_consumer: Arc<RdkafkaKafkaTypedEndpointConsumer<HandlerState, T, R, E, H>>,
     stop: CancellationToken,
     context: AsyncMutex<Option<MessageContext>>,
@@ -665,7 +673,7 @@ where
             connector_id: endpoint_config.id_data_connector,
             endpoint_name: endpoint_config.name,
             topic: endpoint_config.topic,
-            consumer: AsyncMutex::new(None),
+            consumer: Arc::new(AsyncMutex::new(None)),
             endpoint_consumer,
             stop: CancellationToken::new(),
             context: AsyncMutex::new(None),
@@ -729,48 +737,80 @@ where
                 self.endpoint_name.clone(),
             ));
         }
-        let consumer = {
-            let mut current = self.consumer.lock().await;
-            if current.is_none() {
-                let mut config = make_client_config(connector)?;
-                // Match the ordinary Kafka input contract across SDKs; never expose aborted data.
-                config
-                    .set("group.id", &endpoint.consumer_group)
-                    .set("isolation.level", "read_committed")
-                    .set("auto.offset.reset", "earliest")
-                    .set("enable.auto.commit", "true")
-                    .set("enable.auto.offset.store", "false");
-                let statistics =
-                    LibrdkafkaStatisticsContext::new(self.environment.metrics(), "consumer")?;
-                statistics.configure(&mut config);
-                let created = Arc::new(
-                    config
-                        .create_with_context::<_, StreamConsumer<_>>(statistics)
-                        .map_err(|error| RuntimeError::Transport(error.to_string()))?,
-                );
-                created
-                    .subscribe(&[&self.topic])
-                    .map_err(|error| RuntimeError::Transport(error.to_string()))?;
-                *current = Some(created);
-            }
-            Arc::clone(current.as_ref().expect("Kafka consumer initialized"))
-        };
-        self.endpoint_consumer.start();
         let context = context.child();
+        let assignments = Assignments::new();
+        let checkpoint_handler = Arc::clone(&self.endpoint_consumer.handler);
+        let checkpoint_stream = self.endpoint_consumer.stream_context.clone();
+        let checkpoint_owner = context.clone();
+        let restore: Restore = Arc::new(move || checkpoint_handler.restore_checkpoint(&checkpoint_owner, &checkpoint_stream));
+        let mut config = make_client_config(connector)?;
+        config.set("group.id", &endpoint.consumer_group)
+            .set("isolation.level", "read_committed")
+            .set("enable.auto.commit", "true")
+            .set("enable.auto.offset.store", "false");
+        let statistics = LibrdkafkaStatisticsContext::new(self.environment.metrics(), "consumer")?;
+        statistics.configure(&mut config);
+        let consumer_slot = Arc::clone(&self.consumer);
+        let topic = self.topic.clone();
+        self.endpoint_consumer.start();
         *self.context.lock().await = Some(context.clone());
         let endpoint_consumer = Arc::clone(&self.endpoint_consumer);
         let tracing_enabled = self.environment.tracing_enabled();
         let stop = self.stop.clone();
         *task = Some(tokio::spawn(async move {
-            let mut lanes = HashMap::new();
+            // The service Start loop must remain free to start the source that
+            // installs recovery state. A synchronous provider may wait on its
+            // received cancellation context; it never occupies a Tokio worker.
+            let initialize = async {
+                let initial_restore = Arc::clone(&restore);
+                let initial = tokio::task::spawn_blocking(move || initial_restore())
+                    .await.map_err(|e| RuntimeError::Transport(e.to_string()))?
+                    .map_err(|e| RuntimeError::Transport(e.to_string()))?;
+                if context.is_cancelled() || stop.is_cancelled() {
+                    return Err(RuntimeError::ContextCancelled);
+                }
+                super::checkpoint::validate(&initial).map_err(|e| RuntimeError::Transport(e.to_string()))?;
+                let restoring = initial.is_some();
+                config.set("auto.offset.reset", if restoring { "error" } else { "earliest" });
+                let checkpoint_context = CheckpointContext::new(statistics, restore, restoring,
+                    topic.clone(), context.clone(), Arc::clone(&assignments));
+                let consumer = Arc::new(config.create_with_context::<_, StreamConsumer<_>>(checkpoint_context)
+                    .map_err(|e| RuntimeError::Transport(e.to_string()))?);
+                consumer.subscribe(&[&topic]).map_err(|e| RuntimeError::Transport(e.to_string()))?;
+                *consumer_slot.lock().await = Some(Arc::clone(&consumer));
+                RuntimeResult::Ok((consumer, restoring))
+            }.await;
+            let (consumer, restoring) = match initialize {
+                Ok(value) => value,
+                Err(error) => {
+                    if !context.is_cancelled() && !stop.is_cancelled() {
+                        endpoint_consumer.handler.on_error(context.clone(), endpoint_consumer.stream_context.clone(), error.to_string().into()).await;
+                    }
+                    context.cancel();
+                    return;
+                }
+            };
+
+            let mut lanes: HashMap<(String, i32, u64), mpsc::Sender<ConsumerMessage>> = HashMap::new();
             let mut lane_tasks = JoinSet::new();
+            let mut assignment_revision = 0;
             loop {
                 let message = tokio::select! {
+                    biased;
                     _ = stop.cancelled() => break,
                     _ = context.cancelled() => break,
+                    _ = assignments.failed.cancelled() => {
+                        if let Some(error) = assignments.take_error() {
+                            endpoint_consumer.handler.on_error(context.clone(), endpoint_consumer.stream_context.clone(), error).await;
+                        }
+                        context.cancel();
+                        break;
+                    }
                     message = consumer.recv() => match message {
                         Ok(message) => message,
                         Err(error) => {
+                            let checkpoint_lost = restoring && matches!(error.rdkafka_error_code(),
+                                Some(RDKafkaErrorCode::OffsetOutOfRange | RDKafkaErrorCode::AutoOffsetReset));
                             tracing::warn!(error = %error, "Kafka consumer receive failed");
                             if !context.is_cancelled() && !stop.is_cancelled() {
                                 endpoint_consumer.handler.on_error(
@@ -779,6 +819,10 @@ where
                                     Box::new(error),
                                 ).await;
                             }
+                            if checkpoint_lost {
+                                context.cancel();
+                                break;
+                            }
                             continue;
                         },
                     },
@@ -786,6 +830,14 @@ where
                 let topic = message.topic().to_owned();
                 let partition = message.partition();
                 let offset = message.offset();
+                let revision = assignments.revision();
+                if revision != assignment_revision {
+                    lanes.retain(|(_, partition, generation), _| assignments.current(*partition, *generation));
+                    while lane_tasks.try_join_next().is_some() {}
+                    assignment_revision = revision;
+                }
+                let Some((generation, partition_context)) = assignments.get(partition) else { continue; };
+                if partition_context.is_cancelled() { continue; }
                 let key = message.key().map(ToOwned::to_owned);
                 let value = message.payload().unwrap_or_default().to_vec();
                 let transport_metadata = message
@@ -822,9 +874,11 @@ where
 
                 let commit_consumer = Arc::clone(&consumer);
                 let commit_topic = topic.clone();
+                let commit_assignments = Arc::clone(&assignments);
                 let commit = move || {
                     let consumer = Arc::clone(&commit_consumer);
                     let topic = commit_topic.clone();
+                    let assignments = Arc::clone(&commit_assignments);
                     async move {
                         let mut offsets = rdkafka::TopicPartitionList::new();
                         offsets.add_partition_offset(
@@ -832,25 +886,31 @@ where
                             partition,
                             rdkafka::Offset::Offset(offset + 1),
                         )?;
-                        consumer.commit(&offsets, CommitMode::Sync)?;
+                        assignments.acknowledge(partition, generation, || { consumer.commit(&offsets, CommitMode::Sync)?; Ok(()) })?;
                         Ok(())
                     }
                 };
                 let mark_consumer = Arc::clone(&consumer);
                 let mark_topic = topic.clone();
+                let mark_assignments = Arc::clone(&assignments);
                 let mark_message = move |_metadata: String| {
-                    let _ = mark_consumer.store_offset(&mark_topic, partition, offset + 1);
+                    let _ = mark_assignments.acknowledge(partition, generation, || { mark_consumer.store_offset(&mark_topic, partition, offset + 1)?; Ok(()) });
                 };
-                let lane_key = (topic.clone(), partition);
+                let lane_key = (topic.clone(), partition, generation);
                 let sender = lanes.entry(lane_key).or_insert_with(|| {
                     // Sarama invokes ConsumeClaim sequentially for each partition
                     // while different claims run concurrently. A dedicated lane
                     // preserves that same ordering with rdkafka's combined stream.
                     let (sender, mut receiver) = mpsc::channel(256);
                     let endpoint_consumer = Arc::clone(&endpoint_consumer);
-                    let context = context.clone();
+                    let context = partition_context.clone();
                     lane_tasks.spawn(async move {
-                        while let Some(message) = receiver.recv().await {
+                        loop {
+                            let message = tokio::select! {
+                                biased;
+                                _ = context.cancelled() => break,
+                                message = receiver.recv() => match message { Some(message) => message, None => break },
+                            };
                             endpoint_consumer
                                 .endpoint_request(context.clone(), message)
                                 .await;
