@@ -581,6 +581,7 @@ where
         labels(&[
             ("connector", connector_name),
             ("endpoint", endpoint_config.name.as_str()),
+            ("protocol", ""),
         ]),
     );
     let pending = RotatingMap::new(PENDING_ROTATION_INTERVAL);

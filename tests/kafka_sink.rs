@@ -324,6 +324,6 @@ async fn kafka_sink_preserves_lifecycle_partition_and_delivery_result() {
 
     let metrics = environment.metrics().render_prometheus();
     assert!(metrics.contains(
-        r#"datasink_endpoint_messages_total{connector="kafka",endpoint="orders topic"} 1"#
+        r#"datasink_endpoint_messages_total{connector="kafka",endpoint="orders topic",protocol=""} 1"#
     ));
 }

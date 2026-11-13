@@ -294,10 +294,10 @@ async fn http_source_correlates_pipeline_result_and_waits_for_done() {
 
     let metrics = environment.metrics().render_prometheus();
     assert!(metrics.contains(
-        r#"datasource_endpoint_messages_total{connector="order api",endpoint="process order"} 1"#
+        r#"datasource_endpoint_messages_total{connector="order api",endpoint="process order",protocol=""} 1"#
     ));
     assert!(metrics.contains(
-        r#"datasource_endpoint_pending_requests{connector="order api",endpoint="process order"} 0"#
+        r#"datasource_endpoint_pending_requests{connector="order api",endpoint="process order",protocol=""} 0"#
     ));
 }
 

@@ -1383,6 +1383,7 @@ where
     let labels = [
         ("connector".to_owned(), data_connector_config.name),
         ("endpoint".to_owned(), endpoint_config.name.clone()),
+        ("protocol".to_owned(), String::new()),
     ]
     .into_iter()
     .collect::<BTreeMap<_, _>>();

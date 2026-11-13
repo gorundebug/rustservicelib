@@ -150,7 +150,7 @@ async fn run_custom_sink(environment: RuntimeEnvironment, context: MessageContex
     assert_eq!(*result_capture.0.lock().unwrap(), ["result-42"]);
     let metrics = environment.metrics().render_prometheus();
     assert!(metrics.contains(
-        r#"datasink_endpoint_messages_total{connector="Custom connector",endpoint="Custom endpoint"} 1"#
+        r#"datasink_endpoint_messages_total{connector="Custom connector",endpoint="Custom endpoint",protocol=""} 1"#
     ));
     assert!(!metrics.contains(r#"protocol="local""#));
 }

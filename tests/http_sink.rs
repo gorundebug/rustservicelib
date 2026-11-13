@@ -189,7 +189,7 @@ async fn http_sink_preserves_lifecycle_correlation_and_metrics() {
 
     let metrics = environment.metrics().render_prometheus();
     assert!(metrics.contains(
-        r#"datasink_endpoint_messages_total{connector="inventory",endpoint="reserve"} 1"#
+        r#"datasink_endpoint_messages_total{connector="inventory",endpoint="reserve",protocol=""} 1"#
     ));
     for metric in [
         "http_client_request_duration_seconds_count",

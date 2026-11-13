@@ -142,6 +142,39 @@ fn metrics_scopes_share_handles_and_render_prometheus() {
 }
 
 #[test]
+fn endpoint_protocol_labels_export_in_both_registration_orders() {
+    for protocols in [["", "grpc"], ["grpc", ""]] {
+        let metrics = Metrics::default();
+        for prefix in ["datasource_endpoint", "datasink_endpoint"] {
+            for protocol in protocols {
+                let endpoint = if protocol.is_empty() { "http" } else { "grpc" };
+                metrics
+                    .scope(
+                        prefix,
+                        labels(&[
+                            ("connector", "connector"),
+                            ("endpoint", endpoint),
+                            ("protocol", protocol),
+                        ]),
+                    )
+                    .counter("messages_total", "Processed messages", Labels::new())
+                    .unwrap()
+                    .inc();
+            }
+        }
+        let output = metrics.render_prometheus();
+        for prefix in ["datasource_endpoint", "datasink_endpoint"] {
+            assert!(output.contains(&format!(
+                "{prefix}_messages_total{{connector=\"connector\",endpoint=\"http\",protocol=\"\"}} 1"
+            )));
+            assert!(output.contains(&format!(
+                "{prefix}_messages_total{{connector=\"connector\",endpoint=\"grpc\",protocol=\"grpc\"}} 1"
+            )));
+        }
+    }
+}
+
+#[test]
 fn prometheus_metric_family_header_is_rendered_once_for_all_label_series() {
     let metrics = Metrics::default();
     let scope = metrics.scope("task_pool", labels(&[("name", "default")]));

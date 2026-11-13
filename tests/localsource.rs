@@ -174,7 +174,7 @@ async fn custom_source_correlates_result_and_waits_for_done() {
     data_source.stop(MessageContext::new()).await.unwrap();
     let metrics = environment.metrics().render_prometheus();
     assert!(metrics.contains(
-        r#"datasource_endpoint_messages_total{connector="Custom connector",endpoint="Input endpoint"} 1"#
+        r#"datasource_endpoint_messages_total{connector="Custom connector",endpoint="Input endpoint",protocol=""} 1"#
     ));
     assert!(!metrics.contains(r#"protocol="local""#));
 }

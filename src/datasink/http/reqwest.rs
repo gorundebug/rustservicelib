@@ -507,6 +507,7 @@ where
         labels(&[
             ("connector", data_connector_config.name.as_str()),
             ("endpoint", endpoint_config.name.as_str()),
+            ("protocol", ""),
         ]),
     );
     let consumer = Arc::new(EndpointConsumer {

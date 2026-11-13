@@ -95,6 +95,7 @@ pub(crate) fn custom_endpoint_metric_labels(
     Ok([
         ("connector".to_owned(), connector.name().to_owned()),
         ("endpoint".to_owned(), endpoint.name.clone()),
+        ("protocol".to_owned(), String::new()),
     ]
     .into_iter()
     .collect())
@@ -201,6 +202,7 @@ impl DataSourceEndpointMetrics {
         let labels = [
             ("connector".to_owned(), connector_name.to_owned()),
             ("endpoint".to_owned(), endpoint_name.to_owned()),
+            ("protocol".to_owned(), String::new()),
         ]
         .into_iter()
         .collect();
@@ -403,8 +405,18 @@ where
 
 #[cfg(test)]
 mod telemetry_tests {
-    use super::PendingRequests;
+    use super::{DataSourceEndpointMetrics, PendingRequests};
     use crate::runtime::environment::metrics::{Labels, Metrics};
+
+    #[test]
+    fn non_grpc_endpoint_exports_explicit_empty_protocol_label() {
+        let metrics = Metrics::default();
+        let endpoint = DataSourceEndpointMetrics::new(&metrics, "connector", "endpoint").unwrap();
+        endpoint.request_end(endpoint.request_start(), true);
+        assert!(metrics.render_prometheus().contains(
+            "datasource_endpoint_messages_total{connector=\"connector\",endpoint=\"endpoint\",protocol=\"\"} 1"
+        ));
+    }
 
     #[test]
     fn pending_request_timestamps_exist_only_when_metrics_are_enabled() {

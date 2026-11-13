@@ -253,6 +253,6 @@ async fn kafka_source_correlates_result_then_commits_and_ends() {
     assert_eq!(&*marked.lock().unwrap(), &["accepted"]);
     let metrics = environment.metrics().render_prometheus();
     assert!(metrics.contains(
-        r#"datasource_endpoint_messages_total{connector="kafka",endpoint="orders topic"} 1"#
+        r#"datasource_endpoint_messages_total{connector="kafka",endpoint="orders topic",protocol=""} 1"#
     ));
 }
