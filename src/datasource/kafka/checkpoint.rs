@@ -21,11 +21,13 @@ pub(super) struct Assignments {
     revision: AtomicU64,
     error: Mutex<Option<HandlerError>>,
     pub failed: CancellationToken,
+    pub commits: Arc<tokio::sync::Semaphore>,
 }
 impl Assignments {
     pub fn new() -> Arc<Self> {
         Arc::new(Self { partitions: Mutex::new(HashMap::new()), revision: AtomicU64::new(0),
-            error: Mutex::new(None), failed: CancellationToken::new() })
+            error: Mutex::new(None), failed: CancellationToken::new(),
+            commits: Arc::new(tokio::sync::Semaphore::new(super::commit::MAX_COMMITS as usize)) })
     }
     pub fn revision(&self) -> u64 { self.revision.load(Ordering::Acquire) }
     pub fn get(&self, partition: i32) -> Option<(u64, MessageContext)> {
@@ -34,7 +36,8 @@ impl Assignments {
     pub fn current(&self, partition: i32, generation: u64) -> bool {
         self.get(partition).is_some_and(|(g, ctx)| g == generation && !ctx.is_cancelled())
     }
-    // Serialize ACK with revoke/reassign. A retained old message must not store
+    // Serialize local native ACK admission with revoke/reassign, never a broker
+    // wait. A retained old message must not store
     // its offset into the new native assignment between a check and the call.
     pub fn acknowledge<T>(&self, partition: i32, generation: u64, apply: impl FnOnce() -> HandlerResult<T>) -> HandlerResult<T> {
         let states = self.partitions.lock().expect("Kafka assignment lock poisoned");
@@ -42,6 +45,16 @@ impl Assignments {
             return Err("Kafka message belongs to a revoked assignment".into());
         }
         apply()
+    }
+    // Local pause admission and generation fencing share the assignment lock.
+    // The closure must not wait for broker I/O. Failed pause still fences handles.
+    pub fn retire_partition(&self, partition: i32, generation: u64, pause: impl FnOnce() -> HandlerResult) -> HandlerResult {
+        let states = self.partitions.lock().expect("Kafka assignment lock poisoned");
+        let Some((current, context)) = states.get(&partition) else { return Ok(()); };
+        if *current != generation || context.is_cancelled() { return Ok(()); }
+        let result = pause();
+        context.cancel();
+        result
     }
     pub fn take_error(&self) -> Option<HandlerError> { self.error.lock().expect("Kafka checkpoint error lock poisoned").take() }
     fn fail(&self, error: HandlerError) {
@@ -78,35 +91,45 @@ impl CheckpointContext {
                     if item.topic() != self.topic { return Err("Kafka assigned an unexpected topic".into()); }
                     if let Some(offsets) = &offsets {
                         let next = *offsets.get(&item.partition()).ok_or("Kafka checkpoint does not cover assigned partition")?;
-                        let (low, high) = consumer.fetch_watermarks(item.topic(), item.partition(), Duration::from_secs(5))?;
+                        if self.owner.is_cancelled() { return Err("Kafka checkpoint restoration cancelled".into()); }
+                        let timeout = self.owner.remaining().unwrap_or(Duration::from_secs(5)).min(Duration::from_secs(5));
+                        let (low, high) = consumer.fetch_watermarks(item.topic(), item.partition(), timeout)?;
                         if low < 0 || next < low || next > high { return Err("Kafka checkpoint is outside retained log bounds".into()); }
                         item.set_offset(Offset::Offset(next))?;
                     }
                 }
                 if self.owner.is_cancelled() { return Err("Kafka checkpoint restoration cancelled".into()); }
-                let mut states = self.assignments.partitions.lock().expect("Kafka assignment lock poisoned");
-                if !cooperative {
-                    for (_, ctx) in states.values() { ctx.cancel(); }
-                    states.clear();
+                {
+                    let mut states = self.assignments.partitions.lock().expect("Kafka assignment lock poisoned");
+                    if !cooperative {
+                        for (_, ctx) in states.values() { ctx.cancel(); }
+                        states.clear();
+                    }
+                    for item in list.elements() {
+                        if let Some((_, ctx)) = states.remove(&item.partition()) { ctx.cancel(); }
+                    }
                 }
-                for item in list.elements() {
-                    if let Some((_, ctx)) = states.remove(&item.partition()) { ctx.cancel(); }
-                }
+                // Fence old handles before the native transition. Even native
+                // assignment/close may wait internally; never hold our mutex
+                // while calling them. New handles appear only after completion.
                 if cooperative { consumer.incremental_assign(list)?; } else { consumer.assign(list)?; }
+                if self.owner.is_cancelled() { return Err("Kafka checkpoint restoration cancelled".into()); }
                 let generation = self.assignments.revision.fetch_add(1, Ordering::AcqRel) + 1;
+                let mut states = self.assignments.partitions.lock().expect("Kafka assignment lock poisoned");
                 for item in list.elements() { states.insert(item.partition(), (generation, self.owner.child())); }
             }
             RDKafkaRespErr::RD_KAFKA_RESP_ERR__REVOKE_PARTITIONS => {
-                let mut states = self.assignments.partitions.lock().expect("Kafka assignment lock poisoned");
-                if cooperative {
-                    for item in list.elements() { if let Some((_, ctx)) = states.remove(&item.partition()) { ctx.cancel(); } }
-                    consumer.incremental_unassign(list)?;
-                } else {
-                    for (_, ctx) in states.values() { ctx.cancel(); }
-                    states.clear();
-                    consumer.unassign()?;
+                {
+                    let mut states = self.assignments.partitions.lock().expect("Kafka assignment lock poisoned");
+                    if cooperative {
+                        for item in list.elements() { if let Some((_, ctx)) = states.remove(&item.partition()) { ctx.cancel(); } }
+                    } else {
+                        for (_, ctx) in states.values() { ctx.cancel(); }
+                        states.clear();
+                    }
+                    self.assignments.revision.fetch_add(1, Ordering::AcqRel);
                 }
-                self.assignments.revision.fetch_add(1, Ordering::AcqRel);
+                if cooperative { consumer.incremental_unassign(list)?; } else { consumer.unassign()?; }
             }
             _ => return Err(format!("Kafka rebalance failed: {event:?}").into()),
         }
@@ -178,4 +201,22 @@ mod tests {
         assert!(state.acknowledge(0, 7, || -> HandlerResult { panic!("stale ACK was executed") }).is_err());
         assert_eq!(state.take_error().unwrap().to_string(), "retained history lost");
     }
+    #[test]
+    fn failed_partition_fences_only_its_generation_even_if_pause_fails() {
+        let state = Assignments::new();
+        let owner = MessageContext::new();
+        let first = owner.child();
+        let other = owner.child();
+        state.partitions.lock().unwrap().extend([(0, (1, first.clone())), (1, (1, other.clone()))]);
+        assert!(state.retire_partition(0, 1, || Err("pause failed".into())).is_err());
+        assert!(first.is_cancelled());
+        assert!(!other.is_cancelled());
+        assert!(state.acknowledge(0, 1, || -> HandlerResult { panic!("failed lane marked an offset") }).is_err());
+        state.acknowledge(1, 1, || Ok(())).unwrap();
+        state.partitions.lock().unwrap().insert(0, (2, owner.child()));
+        state.retire_partition(0, 1, || panic!("old lane paused a new assignment")).unwrap();
+        assert!(state.current(0, 2));
+        assert!(!owner.is_cancelled());
+    }
+
 }

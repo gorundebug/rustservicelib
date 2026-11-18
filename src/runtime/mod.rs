@@ -16,3 +16,5 @@ pub mod telemetry;
 pub mod testlog;
 pub mod testmetrics;
 pub mod testtracing;
+
+pub(crate) mod nats;

@@ -245,3 +245,72 @@ async fn endpoint_task_panic_is_not_reported_as_success() {
     *endpoint.task.lock().await = Some(tokio::spawn(async { panic!("handler task panic") }));
     assert!(matches!(endpoint.stop(owner()).await, Err(RuntimeError::Transport(_))));
 }
+
+
+struct FailureProbe {
+    mode: &'static str,
+    ended: Arc<Mutex<Vec<bool>>>,
+}
+#[async_trait]
+impl EndpointHandler<(), u32, u32, String> for FailureProbe {
+    fn concurrency(&self, _: &StreamContext<u32, u32, String>) -> usize { 1 }
+    fn restore_checkpoint(&self, _: &MessageContext, _: &StreamContext<u32, u32, String>) -> HandlerResult<Option<CheckpointOffsets>> { Ok(None) }
+    async fn on_error(&self, _: MessageContext, _: StreamContext<u32, u32, String>, _: HandlerError) {}
+    async fn begin_request(&self, context: MessageContext, _: StreamContext<u32, u32, String>) -> HandlerResult<(MessageContext, ())> {
+        if self.mode == "begin" { return Err("begin failure".into()); }
+        Ok((context.child(), ()))
+    }
+    async fn consume_message(&self, context: MessageContext, _: StreamContext<u32, u32, String>, _: Arc<AsyncMutex<()>>, _: ConsumerMessage, done: Arc<ResultContext<(), u32, u32, String>>) -> HandlerResult {
+        match self.mode {
+            "consume" => Err("consume failure".into()),
+            "cancel" => { context.cancel(); Ok(()) },
+            "async" => { tokio::spawn(async move { tokio::task::yield_now().await; context.cancel(); }); Ok(()) },
+            "done" => { done.done(); context.cancel(); Ok(()) },
+            _ => Ok(()),
+        }
+    }
+    async fn get_message_id(&self, _: &MessageContext, _: &StreamContext<u32, u32, String>, _: Arc<AsyncMutex<()>>, _: &u32) -> String { "result".into() }
+    async fn end_request(&self, _: MessageContext, _: StreamContext<u32, u32, String>, result: &HandlerResult, _: Arc<AsyncMutex<()>>) {
+        self.ended.lock().unwrap().push(result.is_ok());
+    }
+}
+struct Identity;
+impl crate::operators::MapFunction<u32, u32> for Identity {
+    async fn map(&self, context: MessageContext, _: &dyn RuntimeStream, value: &u32, out: &impl crate::runtime::collector::Collect<u32>) {
+        out.emit(context, Payload::new(*value)).await;
+    }
+}
+
+#[tokio::test]
+async fn request_outcome_preserves_failure_and_exactly_once_finalization() {
+    for mode in ["begin", "consume", "cancel", "async", "done", "success"] {
+        let environment = RuntimeEnvironment::default();
+        let input = InputStream::<u32, u32, String>::new(&InputStreamConfig {
+            stream: StreamConfig::new(1, "input"), endpoint_id: 2,
+        }, environment);
+        let result_stream = input.stream().map(&(StreamConfig::new(3, "result").into()), Identity).unwrap();
+        if matches!(mode, "async" | "done") { input.set_source(&result_stream).unwrap(); }
+        let ended = Arc::new(Mutex::new(Vec::new()));
+        let endpoint = make_rdkafka_kafka_endpoint_consumer(input, KafkaEndpointConfig {
+            enabled: true, id: 2, name: "topic".into(), id_data_connector: 4,
+            tracing_enabled: false, create_topic: false, topic: "topic".into(),
+            partitions: 2, consumer_group: "group".into(), replication_factor: 1,
+        }, KafkaDataConnectorConfig {
+            id: 4, name: "connector".into(), brokers: "localhost:9092".into(),
+            version: String::new(), dial_timeout: 0.0, use_partitioner: false,
+            r#async: true, security_protocol: KafkaSecurityProtocol::PLAINTEXT,
+            sasl_mechanism: KafkaSaslMechanism::PLAIN, username: String::new(), password: String::new(),
+        }, FailureProbe { mode, ended: ended.clone() }).unwrap();
+        let parent = owner();
+        let outcome = tokio::time::timeout(Duration::from_secs(2), endpoint.endpoint_request_outcome(parent.clone(), ConsumerMessage::new(
+            None, vec![], "topic", 0, 10,
+            || async { panic!("completion must not commit") },
+            |_| panic!("completion must not mark"),
+        ))).await.unwrap();
+        let success = matches!(mode, "done" | "success");
+        assert_eq!(outcome.is_ok(), success, "{mode}");
+        assert_eq!(*ended.lock().unwrap(), if mode == "begin" { vec![] } else { vec![success] }, "{mode}");
+        assert_eq!(endpoint.concurrency.active.load(Ordering::Acquire), 0);
+        assert!(!parent.is_cancelled());
+    }
+}

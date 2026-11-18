@@ -6,6 +6,8 @@ use crate::api;
 pub use crate::api::JoinType;
 
 mod loader;
+pub(crate) mod nats;
+pub use nats::{NatsDataConnectorConfig, NatsEndpointConfig};
 mod runtime;
 
 pub use loader::{Config, ConfigLoader};
@@ -326,6 +328,7 @@ pub enum RuntimeDataConnectorConfig {
     Http(HttpDataConnectorConfig),
     Grpc(GrpcDataConnectorConfig),
     Kafka(KafkaDataConnectorConfig),
+    Nats(NatsDataConnectorConfig),
     Cron(CronDataConnectorConfig),
     Temporal(TemporalDataConnectorConfig),
     Custom(CustomDataConnectorConfig),
@@ -337,6 +340,7 @@ impl RuntimeDataConnectorConfig {
             Self::Http(config) => config.id,
             Self::Grpc(config) => config.id,
             Self::Kafka(config) => config.id,
+            Self::Nats(config) => config.id,
             Self::Cron(config) => config.id,
             Self::Temporal(config) => config.id,
             Self::Custom(config) => config.id,
@@ -348,6 +352,7 @@ impl RuntimeDataConnectorConfig {
             Self::Http(config) => &config.name,
             Self::Grpc(config) => &config.name,
             Self::Kafka(config) => &config.name,
+            Self::Nats(config) => &config.name,
             Self::Cron(config) => &config.name,
             Self::Temporal(config) => &config.name,
             Self::Custom(config) => &config.name,
@@ -359,6 +364,7 @@ impl RuntimeDataConnectorConfig {
             Self::Http(_) => api::DataConnectorType::HTTP,
             Self::Grpc(_) => api::DataConnectorType::GRPC,
             Self::Kafka(_) => api::DataConnectorType::Kafka,
+            Self::Nats(config) => config.kind,
             Self::Cron(_) => api::DataConnectorType::Cron,
             Self::Temporal(_) => api::DataConnectorType::Temporal,
             Self::Custom(_) => api::DataConnectorType::Custom,
@@ -371,6 +377,7 @@ pub enum RuntimeEndpointConfig {
     Http(HttpEndpointConfig),
     Grpc(GrpcEndpointConfig),
     Kafka(KafkaEndpointConfig),
+    Nats(NatsEndpointConfig),
     Cron(CronEndpointConfig),
     Temporal(TemporalEndpointConfig),
     Custom(CustomEndpointConfig),
@@ -382,6 +389,7 @@ impl RuntimeEndpointConfig {
             Self::Http(config) => config.id,
             Self::Grpc(config) => config.id,
             Self::Kafka(config) => config.id,
+            Self::Nats(config) => config.id,
             Self::Cron(config) => config.id,
             Self::Temporal(config) => config.id,
             Self::Custom(config) => config.id,
@@ -393,6 +401,7 @@ impl RuntimeEndpointConfig {
             Self::Http(config) => &config.name,
             Self::Grpc(config) => &config.name,
             Self::Kafka(config) => &config.name,
+            Self::Nats(config) => &config.name,
             Self::Cron(config) => &config.name,
             Self::Temporal(config) => &config.name,
             Self::Custom(config) => &config.name,
@@ -404,6 +413,7 @@ impl RuntimeEndpointConfig {
             Self::Http(config) => config.id_data_connector,
             Self::Grpc(config) => config.id_data_connector,
             Self::Kafka(config) => config.id_data_connector,
+            Self::Nats(config) => config.id_data_connector,
             Self::Cron(config) => config.id_data_connector,
             Self::Temporal(config) => config.id_data_connector,
             Self::Custom(config) => config.id_data_connector,
@@ -415,6 +425,7 @@ impl RuntimeEndpointConfig {
             Self::Http(_) => api::DataConnectorType::HTTP,
             Self::Grpc(_) => api::DataConnectorType::GRPC,
             Self::Kafka(_) => api::DataConnectorType::Kafka,
+            Self::Nats(config) => config.kind,
             Self::Cron(_) => api::DataConnectorType::Cron,
             Self::Temporal(_) => api::DataConnectorType::Temporal,
             Self::Custom(_) => api::DataConnectorType::Custom,
@@ -426,6 +437,7 @@ impl RuntimeEndpointConfig {
             Self::Http(config) => config.tracing_enabled,
             Self::Grpc(config) => config.tracing_enabled,
             Self::Kafka(config) => config.tracing_enabled,
+            Self::Nats(config) => config.tracing_enabled,
             Self::Cron(config) => config.tracing_enabled,
             Self::Temporal(config) => config.tracing_enabled,
             Self::Custom(config) => config.tracing_enabled,
@@ -858,3 +870,6 @@ impl From<StreamConfig> for RuntimeStreamConfig {
         Self::Plain(config)
     }
 }
+
+impl From<NatsDataConnectorConfig> for RuntimeDataConnectorConfig { fn from(config: NatsDataConnectorConfig) -> Self { Self::Nats(config) } }
+impl From<NatsEndpointConfig> for RuntimeEndpointConfig { fn from(config: NatsEndpointConfig) -> Self { Self::Nats(config) } }

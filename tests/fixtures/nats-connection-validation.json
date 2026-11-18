@@ -1,0 +1,519 @@
+[
+  {
+    "name": "host",
+    "config": {
+      "servers": [
+        "nats://broker"
+      ]
+    },
+    "invalidFields": []
+  },
+  {
+    "name": "port-min",
+    "config": {
+      "servers": [
+        "nats://broker:1"
+      ]
+    },
+    "invalidFields": []
+  },
+  {
+    "name": "port-max",
+    "config": {
+      "servers": [
+        "nats://broker:65535"
+      ]
+    },
+    "invalidFields": []
+  },
+  {
+    "name": "ipv6",
+    "config": {
+      "servers": [
+        "nats://[::1]:4222"
+      ]
+    },
+    "invalidFields": []
+  },
+  {
+    "name": "tls",
+    "config": {
+      "servers": [
+        "tls://broker:4222"
+      ]
+    },
+    "invalidFields": []
+  },
+  {
+    "name": "no-scheme",
+    "config": {
+      "servers": [
+        "broker:4222"
+      ]
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "ws",
+    "config": {
+      "servers": [
+        "ws://broker:4222"
+      ]
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "wss",
+    "config": {
+      "servers": [
+        "wss://broker:4222"
+      ]
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "http",
+    "config": {
+      "servers": [
+        "http://broker:4222"
+      ]
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "missing-host",
+    "config": {
+      "servers": [
+        "nats://"
+      ]
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "path",
+    "config": {
+      "servers": [
+        "nats://broker/path"
+      ]
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "slash",
+    "config": {
+      "servers": [
+        "nats://broker/"
+      ]
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "query",
+    "config": {
+      "servers": [
+        "nats://broker?token=fixture-secret"
+      ]
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "empty-query",
+    "config": {
+      "servers": [
+        "nats://broker?"
+      ]
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "fragment",
+    "config": {
+      "servers": [
+        "nats://broker#part"
+      ]
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "empty-fragment",
+    "config": {
+      "servers": [
+        "nats://broker#"
+      ]
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "empty-port",
+    "config": {
+      "servers": [
+        "nats://broker:"
+      ]
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "zero-port",
+    "config": {
+      "servers": [
+        "nats://broker:0"
+      ]
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "large-port",
+    "config": {
+      "servers": [
+        "nats://broker:65536"
+      ]
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "bad-port",
+    "config": {
+      "servers": [
+        "nats://broker:abc"
+      ]
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "userinfo",
+    "config": {
+      "servers": [
+        "nats://user:fixture-secret@broker"
+      ]
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "token-userinfo",
+    "config": {
+      "servers": [
+        "nats://fixture-secret@broker"
+      ]
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "empty-userinfo",
+    "config": {
+      "servers": [
+        "nats://@broker"
+      ]
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "space",
+    "config": {
+      "servers": [
+        " nats://broker"
+      ]
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "tab",
+    "config": {
+      "servers": [
+        "nats://bro\tker"
+      ]
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "newline",
+    "config": {
+      "servers": [
+        "nats://broker\n"
+      ]
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "control",
+    "config": {
+      "servers": [
+        "nats://bro\u007fker"
+      ]
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "unicode-space",
+    "config": {
+      "servers": [
+        "nats://bro\u0085ker"
+      ]
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "no-servers",
+    "config": {
+      "servers": []
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "tls-uri-false",
+    "config": {
+      "servers": [
+        "tls://broker:4222"
+      ],
+      "tlsEnabled": false
+    },
+    "invalidFields": []
+  },
+  {
+    "name": "tls-uri-ca",
+    "config": {
+      "servers": [
+        "tls://broker:4222"
+      ],
+      "tlsCaFile": "/tls/ca"
+    },
+    "invalidFields": []
+  },
+  {
+    "name": "tls-setting-alone",
+    "config": {
+      "tlsCaFile": "/tls/ca"
+    },
+    "invalidFields": [
+      "tlsEnabled"
+    ]
+  },
+  {
+    "name": "tls-enabled-ca",
+    "config": {
+      "tlsEnabled": true,
+      "tlsCaFile": "/tls/ca"
+    },
+    "invalidFields": []
+  },
+  {
+    "name": "mixed-implicit",
+    "config": {
+      "servers": [
+        "nats://one:4222",
+        "tls://two:4222"
+      ]
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "mixed-false",
+    "config": {
+      "servers": [
+        "nats://one:4222",
+        "tls://two:4222"
+      ],
+      "tlsEnabled": false
+    },
+    "invalidFields": [
+      "servers"
+    ]
+  },
+  {
+    "name": "mixed-explicit",
+    "config": {
+      "servers": [
+        "nats://one:4222",
+        "tls://two:4222"
+      ],
+      "tlsEnabled": true
+    },
+    "invalidFields": []
+  },
+  {
+    "name": "connectTimeoutMs-0",
+    "config": {
+      "connectTimeoutMs": 0
+    },
+    "invalidFields": [
+      "connectTimeoutMs"
+    ]
+  },
+  {
+    "name": "connectTimeoutMs--1",
+    "config": {
+      "connectTimeoutMs": -1
+    },
+    "invalidFields": [
+      "connectTimeoutMs"
+    ]
+  },
+  {
+    "name": "connectTimeoutMs-1",
+    "config": {
+      "connectTimeoutMs": 1
+    },
+    "invalidFields": []
+  },
+  {
+    "name": "connectTimeoutMs-2000",
+    "config": {
+      "connectTimeoutMs": 2000
+    },
+    "invalidFields": []
+  },
+  {
+    "name": "connectTimeoutMs-5000",
+    "config": {
+      "connectTimeoutMs": 5000
+    },
+    "invalidFields": []
+  },
+  {
+    "name": "connectTimeoutMs-9223372036854",
+    "config": {
+      "connectTimeoutMs": 9223372036854
+    },
+    "invalidFields": []
+  },
+  {
+    "name": "connectTimeoutMs-9223372036855",
+    "config": {
+      "connectTimeoutMs": 9223372036855
+    },
+    "invalidFields": [
+      "connectTimeoutMs"
+    ]
+  },
+  {
+    "name": "operationTimeoutMs-0",
+    "config": {
+      "operationTimeoutMs": 0
+    },
+    "invalidFields": [
+      "operationTimeoutMs"
+    ]
+  },
+  {
+    "name": "operationTimeoutMs--1",
+    "config": {
+      "operationTimeoutMs": -1
+    },
+    "invalidFields": [
+      "operationTimeoutMs"
+    ]
+  },
+  {
+    "name": "operationTimeoutMs-1",
+    "config": {
+      "operationTimeoutMs": 1
+    },
+    "invalidFields": []
+  },
+  {
+    "name": "operationTimeoutMs-2000",
+    "config": {
+      "operationTimeoutMs": 2000
+    },
+    "invalidFields": []
+  },
+  {
+    "name": "operationTimeoutMs-5000",
+    "config": {
+      "operationTimeoutMs": 5000
+    },
+    "invalidFields": []
+  },
+  {
+    "name": "operationTimeoutMs-9223372036854",
+    "config": {
+      "operationTimeoutMs": 9223372036854
+    },
+    "invalidFields": []
+  },
+  {
+    "name": "operationTimeoutMs-9223372036855",
+    "config": {
+      "operationTimeoutMs": 9223372036855
+    },
+    "invalidFields": [
+      "operationTimeoutMs"
+    ]
+  },
+  {
+    "name": "topology-token",
+    "config": {
+      "token": "fixture-secret"
+    },
+    "invalidFields": [
+      "token"
+    ]
+  },
+  {
+    "name": "topology-password-auth",
+    "config": {
+      "username": "fixture-user",
+      "password": "fixture-secret"
+    },
+    "invalidFields": [
+      "username",
+      "password"
+    ]
+  },
+  {
+    "name": "mounted-credentials",
+    "config": {
+      "credentialsFile": "/run/nats.creds"
+    },
+    "invalidFields": []
+  }
+]

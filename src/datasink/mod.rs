@@ -4,3 +4,5 @@ pub mod kafka;
 pub mod localsink;
 
 pub use crate::runtime::datasink::DataSink;
+
+pub mod nats;

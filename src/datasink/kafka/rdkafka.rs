@@ -394,10 +394,7 @@ impl Lifecycle for RdkafkaKafkaDataSink {
     }
 
     async fn stop(&self, context: MessageContext) -> RuntimeResult<()> {
-        let previous = self.state.swap(3, Ordering::AcqRel);
-        if previous == 3 {
-            return Ok(());
-        }
+        self.state.store(3, Ordering::Release);
         self.tasks.close();
         tokio::select! {
             () = self.tasks.wait() => {}
@@ -412,7 +409,12 @@ impl Lifecycle for RdkafkaKafkaDataSink {
             let Some(producer) = producer else {
                 break Ok(());
             };
-            match producer.flush(Timeout::After(std::time::Duration::from_millis(100))) {
+            // librdkafka flush is blocking even when its timeout is short.
+            // Keep ownership through this bounded native step off Tokio workers.
+            let flushed = tokio::task::spawn_blocking(move || {
+                producer.flush(Timeout::After(std::time::Duration::from_millis(100)))
+            }).await.map_err(|error| RuntimeError::Transport(error.to_string()))?;
+            match flushed {
                 Ok(()) => return Ok(()),
                 Err(_) if context.is_cancelled() => return Err(RuntimeError::ContextCancelled),
                 Err(_) => {}
@@ -1030,5 +1032,52 @@ where
             }
         }
         drop(stream);
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn repeat_stop_waits_for_owned_delivery_after_cancellation() {
+        let sink = RdkafkaKafkaDataSink::new(RuntimeEnvironment::default(), 1, "test".into());
+        let (release, held) = tokio::sync::oneshot::channel::<()>();
+        sink.tasks.spawn(async move { let _ = held.await; });
+        let cancelled = MessageContext::new();
+        cancelled.cancel();
+        assert!(matches!(sink.stop(cancelled).await, Err(RuntimeError::ContextCancelled)));
+        let stop = sink.stop(MessageContext::new());
+        tokio::pin!(stop);
+        tokio::select! {
+            result = &mut stop => panic!("unfinished delivery reported drained: {result:?}"),
+            () = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+        release.send(()).unwrap();
+        stop.await.unwrap();
+        sink.stop(MessageContext::new()).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn native_flush_keeps_single_tokio_worker_responsive() {
+        let sink = RdkafkaKafkaDataSink::new(RuntimeEnvironment::default(), 1, "test".into());
+        let context = LibrdkafkaStatisticsContext::new(sink.environment.metrics(), "producer").unwrap();
+        let producer: FutureProducer<_> = ClientConfig::new()
+            .set("bootstrap.servers", "127.0.0.1:1")
+            .set("message.timeout.ms", "500")
+            .create_with_context(context).unwrap();
+        let delivery = producer.send_result(FutureRecord::to("unreachable").key("k").payload("v")).unwrap();
+        *sink.producer.lock().unwrap() = Some(producer);
+        let stopped = sink.stop(MessageContext::with_timeout(Duration::from_millis(50)));
+        tokio::pin!(stopped);
+        let started = Instant::now();
+        tokio::select! {
+            result = &mut stopped => panic!("expected in-flight native flush: {result:?}"),
+            () = tokio::time::sleep(Duration::from_millis(10)) => {}
+        }
+        assert!(started.elapsed() < Duration::from_millis(90), "native flush blocked Tokio worker");
+        assert!(matches!(stopped.await, Err(RuntimeError::ContextCancelled)));
+        let _ = delivery.await;
+        sink.stop(MessageContext::new()).await.unwrap();
     }
 }

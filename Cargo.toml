@@ -13,6 +13,8 @@ name = "servicelib"
 [dependencies]
 arc-swap = "1.7"
 async-trait = "0.1"
+async-nats = "=0.52.0"
+rustls-native-certs = "0.8"
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"

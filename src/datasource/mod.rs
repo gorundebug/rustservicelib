@@ -5,3 +5,5 @@ pub mod kafka;
 pub mod localsource;
 
 pub use crate::runtime::datasource::DataSource;
+
+pub mod nats;

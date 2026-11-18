@@ -119,6 +119,29 @@ pub enum DataConnectorType {
     Custom = 4,
     Cron = 5,
     Temporal = 6,
+    NATS = 7,
+    JetStream = 8,
+    RabbitMQ = 9,
+    RedisStreams = 10,
+    Pulsar = 11,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub enum RabbitMQQueueType {
+    #[serde(rename = "quorum")]
+    Quorum,
+    #[serde(rename = "classic")]
+    Classic,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub enum RabbitMQExchangeType {
+    #[serde(rename = "direct")]
+    Direct,
+    #[serde(rename = "topic")]
+    Topic,
+    #[serde(rename = "fanout")]
+    Fanout,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize_repr, Deserialize_repr)]
@@ -225,6 +248,38 @@ pub enum DataConnectorImplementation {
     TemporalPython,
     #[serde(rename = "temporal/typescript")]
     TemporalTypeScript,
+    #[serde(rename = "nats.go")]
+    NatsGo,
+    #[serde(rename = "nats.py")]
+    NatsPy,
+    #[serde(rename = "@nats-io/transport-node")]
+    NatsNode,
+    #[serde(rename = "async-nats")]
+    AsyncNats,
+    #[serde(rename = "nats.c")]
+    NatsC,
+    #[serde(rename = "rabbitmq-amqp-go-client")]
+    RabbitMQAMQPGo,
+    #[serde(rename = "rabbitmq-amqp-python-client")]
+    RabbitMQAMQPPython,
+    #[serde(rename = "rabbitmq-amqp-js-client")]
+    RabbitMQAMQPJavaScript,
+    #[serde(rename = "go-redis")]
+    GoRedis,
+    #[serde(rename = "redis-py")]
+    RedisPy,
+    #[serde(rename = "node-redis")]
+    NodeRedis,
+    #[serde(rename = "hiredis")]
+    Hiredis,
+    #[serde(rename = "pulsar-client-go")]
+    PulsarGo,
+    #[serde(rename = "pulsar-client-python")]
+    PulsarPython,
+    #[serde(rename = "pulsar-client-node")]
+    PulsarNode,
+    #[serde(rename = "pulsar-client-cpp")]
+    PulsarCpp,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -542,6 +597,22 @@ pub struct DataConnector {
     pub connections_count: Option<i64>,
     #[serde(rename = "brokers", skip_serializing_if = "Option::is_none")]
     pub brokers: Option<String>,
+    #[serde(rename = "servers", skip_serializing_if = "Option::is_none")]
+    pub servers: Option<Vec<String>>,
+    #[serde(rename = "adminUrl", skip_serializing_if = "Option::is_none")]
+    pub admin_url: Option<String>,
+    #[serde(rename = "redisDatabase", skip_serializing_if = "Option::is_none")]
+    pub redis_database: Option<i64>,
+    #[serde(rename = "virtualHost", skip_serializing_if = "Option::is_none")]
+    pub virtual_host: Option<String>,
+    #[serde(rename = "connectTimeoutMs", skip_serializing_if = "Option::is_none")]
+    pub connect_timeout_ms: Option<i64>,
+    #[serde(rename = "operationTimeoutMs", skip_serializing_if = "Option::is_none")]
+    pub operation_timeout_ms: Option<i64>,
+    #[serde(rename = "token", skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(rename = "credentialsFile", skip_serializing_if = "Option::is_none")]
+    pub credentials_file: Option<String>,
     #[serde(rename = "version", skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     #[serde(rename = "dialTimeout", skip_serializing_if = "Option::is_none")]
@@ -622,6 +693,78 @@ pub struct Endpoint {
     pub function_module: Option<String>,
     #[serde(rename = "topic", skip_serializing_if = "Option::is_none")]
     pub topic: Option<String>,
+    #[serde(rename = "subject", skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    #[serde(rename = "queueName", skip_serializing_if = "Option::is_none")]
+    pub queue_name: Option<String>,
+    #[serde(rename = "exchangeName", skip_serializing_if = "Option::is_none")]
+    pub exchange_name: Option<String>,
+    #[serde(rename = "routingKey", skip_serializing_if = "Option::is_none")]
+    pub routing_key: Option<String>,
+    #[serde(rename = "queueType", skip_serializing_if = "Option::is_none")]
+    pub queue_type: Option<RabbitMQQueueType>,
+    #[serde(rename = "exchangeType", skip_serializing_if = "Option::is_none")]
+    pub exchange_type: Option<RabbitMQExchangeType>,
+    #[serde(rename = "createQueue", skip_serializing_if = "Option::is_none")]
+    pub create_queue: Option<bool>,
+    #[serde(rename = "createExchange", skip_serializing_if = "Option::is_none")]
+    pub create_exchange: Option<bool>,
+    #[serde(rename = "createBinding", skip_serializing_if = "Option::is_none")]
+    pub create_binding: Option<bool>,
+    #[serde(rename = "subscriptionName", skip_serializing_if = "Option::is_none")]
+    pub subscription_name: Option<String>,
+    #[serde(rename = "subscriptionType", skip_serializing_if = "Option::is_none")]
+    pub subscription_type: Option<String>,
+    #[serde(rename = "createSubscription", skip_serializing_if = "Option::is_none")]
+    pub create_subscription: Option<bool>,
+    #[serde(
+        rename = "subscriptionInitialPosition",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub subscription_initial_position: Option<String>,
+    #[serde(rename = "receiverQueueSize", skip_serializing_if = "Option::is_none")]
+    pub receiver_queue_size: Option<i64>,
+    #[serde(
+        rename = "negativeAckRedeliveryDelayMs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub negative_ack_redelivery_delay_ms: Option<i64>,
+    #[serde(rename = "streamKey", skip_serializing_if = "Option::is_none")]
+    pub stream_key: Option<String>,
+    #[serde(rename = "consumerName", skip_serializing_if = "Option::is_none")]
+    pub consumer_name: Option<String>,
+    #[serde(
+        rename = "createConsumerGroup",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub create_consumer_group: Option<bool>,
+    #[serde(rename = "groupStartId", skip_serializing_if = "Option::is_none")]
+    pub group_start_id: Option<String>,
+    #[serde(rename = "readCount", skip_serializing_if = "Option::is_none")]
+    pub read_count: Option<i64>,
+    #[serde(rename = "readBlockMs", skip_serializing_if = "Option::is_none")]
+    pub read_block_ms: Option<i64>,
+    #[serde(rename = "claimIdleMs", skip_serializing_if = "Option::is_none")]
+    pub claim_idle_ms: Option<i64>,
+    #[serde(rename = "claimIntervalMs", skip_serializing_if = "Option::is_none")]
+    pub claim_interval_ms: Option<i64>,
+    #[serde(rename = "consumerCredits", skip_serializing_if = "Option::is_none")]
+    pub consumer_credits: Option<i64>,
+    #[serde(
+        rename = "publisherMaxInFlight",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub publisher_max_in_flight: Option<i64>,
+    #[serde(rename = "queueGroup", skip_serializing_if = "Option::is_none")]
+    pub queue_group: Option<String>,
+    #[serde(rename = "streamName", skip_serializing_if = "Option::is_none")]
+    pub stream_name: Option<String>,
+    #[serde(rename = "durableName", skip_serializing_if = "Option::is_none")]
+    pub durable_name: Option<String>,
+    #[serde(rename = "createStream", skip_serializing_if = "Option::is_none")]
+    pub create_stream: Option<bool>,
+    #[serde(rename = "createConsumer", skip_serializing_if = "Option::is_none")]
+    pub create_consumer: Option<bool>,
     #[serde(rename = "partitions", skip_serializing_if = "Option::is_none")]
     pub partitions: Option<i64>,
     #[serde(rename = "createTopic", skip_serializing_if = "Option::is_none")]
