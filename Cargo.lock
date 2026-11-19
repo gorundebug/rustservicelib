@@ -3433,7 +3433,7 @@ dependencies = [
 
 [[package]]
 name = "servicelib-gorundebug"
-version = "0.2.182"
+version = "0.2.183"
 dependencies = [
  "arc-swap",
  "async-nats",
