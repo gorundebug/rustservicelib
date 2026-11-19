@@ -6,6 +6,7 @@
 )]
 
 pub mod api;
+pub mod dataquery;
 pub mod datasink;
 pub mod datasource;
 pub mod operators;

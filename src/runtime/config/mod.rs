@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 use crate::api;
 pub use crate::api::JoinType;
 
+mod query;
+pub use query::{S3AWSDataConnectorConfig, S3QueryEndpointConfig, S3QueryOperation, PostgreSQLSQLxDataConnectorConfig, PostgreSQLQueryOperation, QueryEndpointConfig};
+
 mod loader;
 pub(crate) mod nats;
 pub use nats::{NatsDataConnectorConfig, NatsEndpointConfig};
@@ -332,6 +335,8 @@ pub enum RuntimeDataConnectorConfig {
     Cron(CronDataConnectorConfig),
     Temporal(TemporalDataConnectorConfig),
     Custom(CustomDataConnectorConfig),
+    PostgreSQLSQLx(PostgreSQLSQLxDataConnectorConfig),
+    S3AWS(S3AWSDataConnectorConfig),
 }
 
 impl RuntimeDataConnectorConfig {
@@ -344,6 +349,8 @@ impl RuntimeDataConnectorConfig {
             Self::Cron(config) => config.id,
             Self::Temporal(config) => config.id,
             Self::Custom(config) => config.id,
+            Self::PostgreSQLSQLx(config) => config.id,
+            Self::S3AWS(config) => config.id,
         }
     }
 
@@ -356,6 +363,8 @@ impl RuntimeDataConnectorConfig {
             Self::Cron(config) => &config.name,
             Self::Temporal(config) => &config.name,
             Self::Custom(config) => &config.name,
+            Self::PostgreSQLSQLx(config) => &config.name,
+            Self::S3AWS(config) => &config.name,
         }
     }
 
@@ -368,6 +377,8 @@ impl RuntimeDataConnectorConfig {
             Self::Cron(_) => api::DataConnectorType::Cron,
             Self::Temporal(_) => api::DataConnectorType::Temporal,
             Self::Custom(_) => api::DataConnectorType::Custom,
+            Self::PostgreSQLSQLx(_) => api::DataConnectorType::PostgreSQLSQLx,
+            Self::S3AWS(_) => api::DataConnectorType::S3AWS,
         }
     }
 }
@@ -381,6 +392,8 @@ pub enum RuntimeEndpointConfig {
     Cron(CronEndpointConfig),
     Temporal(TemporalEndpointConfig),
     Custom(CustomEndpointConfig),
+    Query(QueryEndpointConfig),
+    S3Query(S3QueryEndpointConfig),
 }
 
 impl RuntimeEndpointConfig {
@@ -393,6 +406,8 @@ impl RuntimeEndpointConfig {
             Self::Cron(config) => config.id,
             Self::Temporal(config) => config.id,
             Self::Custom(config) => config.id,
+            Self::Query(config) => config.id,
+            Self::S3Query(config) => config.id,
         }
     }
 
@@ -405,6 +420,8 @@ impl RuntimeEndpointConfig {
             Self::Cron(config) => &config.name,
             Self::Temporal(config) => &config.name,
             Self::Custom(config) => &config.name,
+            Self::Query(config) => &config.name,
+            Self::S3Query(config) => &config.name,
         }
     }
 
@@ -417,6 +434,8 @@ impl RuntimeEndpointConfig {
             Self::Cron(config) => config.id_data_connector,
             Self::Temporal(config) => config.id_data_connector,
             Self::Custom(config) => config.id_data_connector,
+            Self::Query(config) => config.id_data_connector,
+            Self::S3Query(config) => config.id_data_connector,
         }
     }
 
@@ -429,6 +448,8 @@ impl RuntimeEndpointConfig {
             Self::Cron(_) => api::DataConnectorType::Cron,
             Self::Temporal(_) => api::DataConnectorType::Temporal,
             Self::Custom(_) => api::DataConnectorType::Custom,
+            Self::Query(_) => api::DataConnectorType::PostgreSQLSQLx,
+            Self::S3Query(_) => api::DataConnectorType::S3AWS,
         }
     }
 
@@ -441,6 +462,8 @@ impl RuntimeEndpointConfig {
             Self::Cron(config) => config.tracing_enabled,
             Self::Temporal(config) => config.tracing_enabled,
             Self::Custom(config) => config.tracing_enabled,
+            Self::Query(config) => config.tracing_enabled,
+            Self::S3Query(config) => config.tracing_enabled,
         }
     }
 }
@@ -732,6 +755,19 @@ impl From<SinkStreamConfig> for StreamConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct QueryStreamConfig {
+    #[serde(flatten)]
+    pub stream: StreamConfig,
+    pub endpoint_id: i32,
+}
+
+impl From<QueryStreamConfig> for StreamConfig {
+    fn from(config: QueryStreamConfig) -> Self {
+        config.stream
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct JoinStreamConfig {
     pub stream: StreamConfig,
     pub join_type: JoinType,
@@ -769,6 +805,7 @@ pub enum RuntimeStreamConfig {
     Process(ProcessStreamConfig),
     Delay(DelayStreamConfig),
     Sink(SinkStreamConfig),
+    Query(QueryStreamConfig),
     Join(JoinStreamConfig),
     MultiJoin(MultiJoinStreamConfig),
 }
@@ -792,6 +829,7 @@ impl RuntimeStreamConfig {
             Self::Process(config) => &config.stream,
             Self::Delay(config) => &config.stream,
             Self::Sink(config) => &config.stream,
+            Self::Query(config) => &config.stream,
             Self::Join(config) => &config.stream,
             Self::MultiJoin(config) => &config.stream,
         }
@@ -823,6 +861,7 @@ impl RuntimeStreamConfig {
             Self::Process(_) => api::TransformationType::Process,
             Self::Delay(_) => api::TransformationType::Delay,
             Self::Sink(_) => api::TransformationType::Sink,
+            Self::Query(_) => api::TransformationType::Query,
             Self::Join(_) => api::TransformationType::Join,
             Self::MultiJoin(_) => api::TransformationType::MultiJoin,
         }
@@ -832,6 +871,7 @@ impl RuntimeStreamConfig {
         match self {
             Self::Input(config) => Some(config.endpoint_id),
             Self::Sink(config) => Some(config.endpoint_id),
+            Self::Query(config) => Some(config.endpoint_id),
             _ => None,
         }
     }
@@ -862,6 +902,7 @@ runtime_stream_from!(SubStream, SubStreamConfig);
 runtime_stream_from!(Process, ProcessStreamConfig);
 runtime_stream_from!(Delay, DelayStreamConfig);
 runtime_stream_from!(Sink, SinkStreamConfig);
+runtime_stream_from!(Query, QueryStreamConfig);
 runtime_stream_from!(Join, JoinStreamConfig);
 runtime_stream_from!(MultiJoin, MultiJoinStreamConfig);
 
@@ -873,3 +914,17 @@ impl From<StreamConfig> for RuntimeStreamConfig {
 
 impl From<NatsDataConnectorConfig> for RuntimeDataConnectorConfig { fn from(config: NatsDataConnectorConfig) -> Self { Self::Nats(config) } }
 impl From<NatsEndpointConfig> for RuntimeEndpointConfig { fn from(config: NatsEndpointConfig) -> Self { Self::Nats(config) } }
+
+impl From<PostgreSQLSQLxDataConnectorConfig> for RuntimeDataConnectorConfig {
+    fn from(config: PostgreSQLSQLxDataConnectorConfig) -> Self { Self::PostgreSQLSQLx(config) }
+}
+impl From<QueryEndpointConfig> for RuntimeEndpointConfig {
+    fn from(config: QueryEndpointConfig) -> Self { Self::Query(config) }
+}
+
+impl From<S3AWSDataConnectorConfig> for RuntimeDataConnectorConfig {
+    fn from(config: S3AWSDataConnectorConfig) -> Self { Self::S3AWS(config) }
+}
+impl From<S3QueryEndpointConfig> for RuntimeEndpointConfig {
+    fn from(config: S3QueryEndpointConfig) -> Self { Self::S3Query(config) }
+}

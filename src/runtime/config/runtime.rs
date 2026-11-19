@@ -107,6 +107,10 @@ impl RuntimeConfig {
                 .insert(pool.name.clone(), Arc::new(pool));
         }
         for connector in data_connectors {
+            if let RuntimeDataConnectorConfig::PostgreSQLSQLx(config) = &connector {
+                config.validate()?;
+            }
+            if let RuntimeDataConnectorConfig::S3AWS(config) = &connector { config.validate()?; }
             let id = connector.id();
             let name = connector.name().to_owned();
             if runtime.data_connectors_by_id.contains_key(&id) {
@@ -122,6 +126,7 @@ impl RuntimeConfig {
             runtime.data_connectors_by_name.insert(name, connector);
         }
         for endpoint in endpoints {
+            if let RuntimeEndpointConfig::S3Query(config) = &endpoint { config.validate()?; }
             let id = endpoint.id();
             let name = endpoint.name().to_owned();
             if runtime.endpoints_by_id.contains_key(&id) {

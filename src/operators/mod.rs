@@ -14,6 +14,8 @@ pub mod merge;
 pub mod multijoin;
 pub mod process;
 pub mod sink;
+pub mod query;
+pub use query::QueryStream;
 pub mod split;
 pub mod streamlink;
 pub mod substream;

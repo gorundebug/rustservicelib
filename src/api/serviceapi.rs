@@ -52,6 +52,7 @@ pub enum TransformationType {
     Delay = 16,
     When = 17,
     SubStream = 18,
+    Query = 19,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize_repr, Deserialize_repr)]
@@ -124,6 +125,14 @@ pub enum DataConnectorType {
     RabbitMQ = 9,
     RedisStreams = 10,
     Pulsar = 11,
+    PostgreSQLBun = 12,
+    PostgreSQLKysely = 13,
+    PostgreSQLSQLAlchemy = 14,
+    PostgreSQLSQLx = 15,
+    PostgreSQLUserver = 16,
+    PostgreSQLLibpq = 17,
+    S3AWS = 18,
+    S3Userver = 19,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -280,6 +289,24 @@ pub enum DataConnectorImplementation {
     PulsarNode,
     #[serde(rename = "pulsar-client-cpp")]
     PulsarCpp,
+    #[serde(rename = "go/bun")]
+    GoBun,
+    #[serde(rename = "python/sqlalchemy")]
+    PythonSQLAlchemy,
+    #[serde(rename = "node/kysely")]
+    NodeKysely,
+    #[serde(rename = "rust/sqlx")]
+    RustSQLx,
+    #[serde(rename = "go/aws")]
+    GoAWS,
+    #[serde(rename = "node/aws")]
+    NodeAWS,
+    #[serde(rename = "python/aiobotocore")]
+    PythonAiobotocore,
+    #[serde(rename = "userver/postgresql")]
+    UserverPostgreSQL,
+    #[serde(rename = "libpq")]
+    Libpq,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -591,6 +618,12 @@ pub struct DataConnector {
     pub host: Option<String>,
     #[serde(rename = "port", skip_serializing_if = "Option::is_none")]
     pub port: Option<i64>,
+    #[serde(rename = "connectionString", skip_serializing_if = "Option::is_none")]
+    pub connection_string: Option<String>,
+    #[serde(rename = "region", skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[serde(rename = "forcePathStyle", skip_serializing_if = "Option::is_none")]
+    pub force_path_style: Option<bool>,
     #[serde(rename = "address", skip_serializing_if = "Option::is_none")]
     pub address: Option<String>,
     #[serde(rename = "connectionsCount", skip_serializing_if = "Option::is_none")]
@@ -669,6 +702,14 @@ pub struct Endpoint {
     pub enabled: Option<bool>,
     #[serde(rename = "tracingEnabled", skip_serializing_if = "Option::is_none")]
     pub tracing_enabled: Option<bool>,
+    #[serde(rename = "queryOperation", skip_serializing_if = "Option::is_none")]
+    pub query_operation: Option<String>,
+    #[serde(rename = "sqlFile", skip_serializing_if = "Option::is_none")]
+    pub sql_file: Option<String>,
+    #[serde(rename = "fetchSize", skip_serializing_if = "Option::is_none")]
+    pub fetch_size: Option<i64>,
+    #[serde(rename = "bucket", skip_serializing_if = "Option::is_none")]
+    pub bucket: Option<String>,
     #[serde(rename = "httpMethodType", skip_serializing_if = "Option::is_none")]
     pub http_method_type: Option<HTTPMethodType>,
     #[serde(rename = "path", skip_serializing_if = "Option::is_none")]

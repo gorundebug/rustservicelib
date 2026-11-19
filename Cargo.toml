@@ -11,6 +11,8 @@ repository = "https://github.com/gorundebug/rustservicelib"
 name = "servicelib"
 
 [dependencies]
+aws-sdk-s3 = { version = "=1.160.0", features = ["behavior-version-latest"] }
+sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots", "postgres", "chrono", "uuid", "rust_decimal", "bigdecimal", "json"] }
 arc-swap = "1.7"
 async-trait = "0.1"
 async-nats = "=0.52.0"

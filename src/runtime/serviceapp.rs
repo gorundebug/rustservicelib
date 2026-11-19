@@ -196,6 +196,8 @@ pub struct ServiceApp {
     data_sources: HashMap<i32, Arc<dyn DataSource>>,
     data_sinks: HashMap<i32, Arc<dyn DataSink>>,
     components: Vec<Arc<dyn Lifecycle>>,
+    managed_data_connectors: Vec<Arc<dyn Lifecycle>>,
+    request_drains: Vec<Arc<dyn Lifecycle>>,
     http_router: Router,
     http_shutdown: Mutex<CancellationToken>,
     http_task: AsyncMutex<Option<JoinHandle<Result<(), String>>>>,
@@ -236,6 +238,8 @@ impl ServiceApp {
             data_sources: HashMap::new(),
             data_sinks: HashMap::new(),
             components: Vec::new(),
+            managed_data_connectors: Vec::new(),
+            request_drains: Vec::new(),
             http_router: Router::new(),
             http_shutdown: Mutex::new(CancellationToken::new()),
             http_task: AsyncMutex::new(None),
@@ -325,6 +329,24 @@ impl ServiceApp {
     {
         self.ensure_created()?;
         self.components.push(component);
+        Ok(())
+    }
+
+    /// Outbound clients remain available until graph work and finalizers finish.
+    pub fn add_managed_data_connector<T>(&mut self, connector: Arc<T>) -> RuntimeResult<()>
+    where T: Lifecycle + 'static,
+    {
+        self.ensure_created()?;
+        self.managed_data_connectors.push(connector);
+        Ok(())
+    }
+
+    /// Join request finalizers after graph producers drain, before closing clients.
+    pub fn add_request_drain<T>(&mut self, drain: Arc<T>) -> RuntimeResult<()>
+    where T: Lifecycle + 'static,
+    {
+        self.ensure_created()?;
+        self.request_drains.push(drain);
         Ok(())
     }
 
@@ -684,6 +706,12 @@ impl ServiceApp {
             for pool in self.environment.priority_task_pools() {
                 pool.start()?;
             }
+            for connector in &self.managed_data_connectors {
+                connector.start(context.clone()).await?;
+            }
+            for drain in &self.request_drains {
+                drain.start(context.clone()).await?;
+            }
             for component in &components {
                 component.start(context.clone()).await?;
             }
@@ -761,6 +789,20 @@ impl ServiceApp {
             let environment = environment.clone();
             async move { environment.drain_parallel().await; Ok(()) }
         });
+        let request_drains = self.request_drains.iter().map(|drain| {
+            let drain = Arc::clone(drain);
+            ShutdownJob::new(move |context| {
+                let drain = Arc::clone(&drain);
+                async move { drain.stop(context).await }
+            })
+        }).collect();
+        let managed_clients = self.managed_data_connectors.iter().map(|connector| {
+            let connector = Arc::clone(connector);
+            ShutdownJob::new(move |context| {
+                let connector = Arc::clone(&connector);
+                async move { connector.stop(context).await }
+            })
+        }).collect();
         let sinks = self.data_sinks.values().map(|resource| {
             connector_shutdown(Arc::clone(resource), resource.name().to_owned(),
                 "datasink_connector", self.environment.metrics().clone())
@@ -790,7 +832,7 @@ impl ServiceApp {
                 environment.logs_engine().shutdown().await
             }
         });
-        vec![admission, runtime, vec![parallel], sinks, vec![runtime_metrics],
+        vec![admission, runtime, vec![parallel], request_drains, sinks, managed_clients, vec![runtime_metrics],
             vec![metrics], vec![tracing], vec![logs]]
     }
 
@@ -1089,4 +1131,67 @@ mod tests {
             .expect("stop service");
         assert!(completed.load(Ordering::Acquire));
     }
+    #[tokio::test]
+    async fn managed_clients_close_after_graph_and_request_finalizers() {
+        struct ManagedClient(Arc<AtomicBool>);
+        #[async_trait]
+        impl Lifecycle for ManagedClient {
+            async fn start(&self, _: MessageContext) -> RuntimeResult<()> { Ok(()) }
+            async fn stop(&self, _: MessageContext) -> RuntimeResult<()> {
+                self.0.store(true, Ordering::Release);
+                Ok(())
+            }
+        }
+        struct Finalizer {
+            client_closed: Arc<AtomicBool>,
+            graph_finished: Arc<AtomicBool>,
+            entered: Arc<Notify>,
+            release: Arc<Notify>,
+        }
+        #[async_trait]
+        impl Lifecycle for Finalizer {
+            async fn start(&self, _: MessageContext) -> RuntimeResult<()> { Ok(()) }
+            async fn stop(&self, _: MessageContext) -> RuntimeResult<()> {
+                assert!(self.graph_finished.load(Ordering::Acquire));
+                assert!(!self.client_closed.load(Ordering::Acquire));
+                self.entered.notify_one();
+                self.release.notified().await;
+                assert!(!self.client_closed.load(Ordering::Acquire));
+                Ok(())
+            }
+        }
+        let service = ServiceConfig { id: 1, name: "query-shutdown".into(),
+            shutdown_timeout: 5000, ..ServiceConfig::default() };
+        let environment = RuntimeEnvironment::default();
+        environment.publish_runtime_config(Arc::new(RuntimeConfig::from_parts(
+            CallSemantics::FunctionCall, [service.clone()], [], [], [], [], []).unwrap()));
+        let closed = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let mut app = ServiceApp::new(environment, service).unwrap();
+        app.add_managed_data_connector(Arc::new(ManagedClient(closed.clone()))).unwrap();
+        app.add_request_drain(Arc::new(Finalizer { client_closed: closed.clone(),
+            graph_finished: finished.clone(), entered: entered.clone(), release: release.clone() })).unwrap();
+        let app = Arc::new(app);
+        app.start_graph(MessageContext::new()).await.unwrap();
+        let graph_release = Arc::new(Notify::new());
+        let task_release = graph_release.clone();
+        let task_closed = closed.clone();
+        app.environment().spawn_parallel(async move {
+            task_release.notified().await;
+            assert!(!task_closed.load(Ordering::Acquire));
+            finished.store(true, Ordering::Release);
+        });
+        let stopping_app = app.clone();
+        let stopping = tokio::spawn(async move { stopping_app.stop(MessageContext::new()).await });
+        graph_release.notify_one();
+        entered.notified().await;
+        assert!(!stopping.is_finished());
+        assert!(!closed.load(Ordering::Acquire));
+        release.notify_one();
+        stopping.await.unwrap().unwrap();
+        assert!(closed.load(Ordering::Acquire));
+    }
+
 }
